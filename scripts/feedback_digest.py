@@ -232,22 +232,60 @@ def call_claude(prompt: str) -> tuple[bool, str, str]:
         return False, "", f"claude_cli_missing: {e}"
 
 
+def _unwrap_envelope(obj):
+    """The queue lane (claude_job.py provider) prints a claude
+    `--output-format json` shaped envelope, so the plan arrives as
+    {"type": "result", ..., "structured_output": ..., "result": "<json str>"}.
+    Before 2026-07-07 parse_plan returned that envelope dict itself as the
+    plan: apply_mutations then saw no "changes" key and dropped the 5 envelope
+    keys as unknown (the constant applied=0 dropped=5 signature), silently
+    discarding every distilled plan while still marking events processed."""
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("type") == "result" and ("structured_output" in obj or "result" in obj):
+        so = obj.get("structured_output")
+        if isinstance(so, dict):
+            return so
+        r = obj.get("result")
+        if isinstance(r, str):
+            return parse_plan(r)
+        if isinstance(r, dict):
+            return r
+        return None
+    return obj
+
+
+_PLAN_KEYS = frozenset(
+    {"changes", "voice_never_add", "guardrails_do_not_add", "block_authors",
+     "rationale", "project"})
+
+
+def _validated_plan(obj):
+    """A non-empty dict with zero recognized plan keys is NOT a plan (it is
+    some other JSON the model or a wrapper emitted); returning None leaves the
+    events unprocessed for the next run instead of consuming them on garbage.
+    {} stays valid: the prompt allows an all-empty plan meaning no changes."""
+    plan = _unwrap_envelope(obj)
+    if plan and not (_PLAN_KEYS & set(plan.keys())):
+        return None
+    return plan
+
+
 def parse_plan(text: str):
-    """Extract the JSON plan from model output (tolerates code fences and
-    surrounding prose). Returns dict or None."""
+    """Extract the JSON plan from model output (tolerates code fences,
+    surrounding prose, and the queue lane's claude-json envelope).
+    Returns dict or None."""
     t = text.strip()
     t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.MULTILINE).strip()
     try:
-        obj = json.loads(t)
-        return obj if isinstance(obj, dict) else None
+        return _validated_plan(json.loads(t))
     except Exception:
         pass
     start = t.find("{")
     end = t.rfind("}")
     if start != -1 and end > start:
         try:
-            obj = json.loads(t[start : end + 1])
-            return obj if isinstance(obj, dict) else None
+            return _validated_plan(json.loads(t[start : end + 1]))
         except Exception:
             return None
     return None
@@ -380,6 +418,8 @@ def digest_project(project: dict, platform: str, dry_run: bool,
     )
     for change in result.get("applied") or []:
         log(f"  {change}")
+    for reason in result.get("dropped") or []:
+        log(f"  dropped: {reason}")
     return True
 
 
