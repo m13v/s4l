@@ -199,12 +199,13 @@ def call_claude(prompt: str) -> tuple[bool, str, str]:
     # The queue lane waits for the every-minute worker to claim + draft; give
     # it the same generous budget the pipeline's queued calls get.
     timeout_sec = 900
-    if os.path.exists(RUN_CLAUDE_SH):
-        cmd = ["bash", RUN_CLAUDE_SH, "feedback-digest", "-p", prompt,
-               "--max-turns", "1", "--disallowed-tools", DISALLOWED_TOOLS]
-    else:
-        cmd = ["claude", "-p", prompt, "--max-turns", "1",
-               "--disallowed-tools", DISALLOWED_TOOLS]
+    if not os.path.exists(RUN_CLAUDE_SH):
+        # Broken install. Fail loudly; a bare `claude -p` here would silently
+        # bypass the queue seam and cost tracking (removed 2026-07-06 with the
+        # rest of the CLI fallbacks). Events stay unprocessed for the next run.
+        return False, "", f"run_claude_sh_missing: {RUN_CLAUDE_SH}"
+    cmd = ["bash", RUN_CLAUDE_SH, "feedback-digest", "-p", prompt,
+           "--max-turns", "1", "--disallowed-tools", DISALLOWED_TOOLS]
     empty_mcp = "/tmp/.feedback_digest_empty_mcp.json"
     try:
         if not os.path.exists(empty_mcp):
