@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "social-autoposter",
   "display_name": "S4L",
-  "version": "1.6.204-rc.19",
+  "version": "1.6.204-rc.20",
   "description": "Draft, review, approve, and autopilot X/Twitter posts.",
   "long_description": "## **⚠️ The disclaimer above is generic Claude boilerplate.** Anthropic shows the same warning on every plugin regardless of what it does; any plugin has the same level of access as any app you download from the internet.\n\nS4L is an open source product developed by Mediar.ai Incorporated, a VC-backed San Francisco-based startup.\n\nTo get started:\n\n1\\. Copy this prompt: **Set me up on S4L plugin end to end**\n\n2\\. Quit with CMD+Q, reopen Claude, paste into a new chat.\n\nWhat happens next:\n\n* About every 5 minutes S4L scans X for posts that match your topics and drafts replies in your voice.\n* Drafts show up as review cards, usually the first within a few minutes. Nothing is posted automatically; you approve each one.\n* Posting autopilot stays off until you explicitly turn it on.",
   "author": {
