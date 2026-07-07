@@ -3091,8 +3091,19 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 7; // v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
+const QUEUE_WORKER_PROMPT_VERSION = 8; // v8: worker polls internally (claude_job.py next --wait-seconds) instead of single-shot check-then-die. Empirically verified (2026-07-06) that a single long-running Bash call survives well past the host's ~90s between-tool-call inactivity kill — that timer only fires on MODEL silence, not on one in-flight tool call — so one Bash call can safely poll for QUEUE_WORKER_POLL_SECONDS before giving up. This cuts the every-minute spin-up-empty-then-die husk cycle down to roughly one session per poll window instead of one per cron tick. v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
 const QUEUE_WORKER_PROMPT_MARKER = "s4l_queue_worker_prompt_version";
+// How long ONE `next --wait-seconds` call polls before giving up and exiting.
+// 240s (4 min): comfortably inside the 900s single-Bash-call survival verified
+// live on 2026-07-06, and covers a meaningful chunk of the ~8min average
+// real job inter-arrival gap measured on the box, while still keeping each
+// worker session bounded. The cron's `* * * * *` cadence remains the outer
+// safety net for whatever the poll window doesn't catch.
+// COUPLING: scripts/reap_stale_claude_sessions.py's S4L_REAPER_CLAIM_GRACE_SEC
+// default MUST stay >= this value + margin — a claimless session inside this
+// poll window is legitimately still working, not a husk, and a too-tight
+// claim_grace would SIGTERM it mid-poll before it ever gets to claim.
+const QUEUE_WORKER_POLL_SECONDS = 240;
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
@@ -3214,17 +3225,24 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `other tool, or trying to "investigate", STALLS it forever.`,
     ``,
     `PACING — CRITICAL: this unattended session is terminated ~90 seconds after ` +
-      `your LAST tool call (a host inactivity timeout). Make your first tool call ` +
-      `promptly, and if the job's prompt gives you per-item persist commands to run ` +
-      `(its own quick Bash calls), run them as you complete each item instead of ` +
-      `working silently — those calls are what keep the session alive. The prompt ` +
-      `file may begin with a WORKER EXECUTION NOTES header; follow it exactly.`,
+      `your LAST tool call (a host inactivity timeout). That clock only runs BETWEEN ` +
+      `tool calls, not during one — step 1 below is a single Bash call that can ` +
+      `legitimately take several minutes to return, and that is fine. Make your ` +
+      `first tool call promptly, and once you are drafting (step 2), if the job's ` +
+      `prompt gives you per-item persist commands to run (its own quick Bash calls), ` +
+      `run them as you complete each item instead of working silently — those calls ` +
+      `are what keep the session alive. The prompt file may begin with a WORKER ` +
+      `EXECUTION NOTES header; follow it exactly.`,
     ``,
     `Steps:`,
-    `1. Claim the next job. Run this EXACT Bash command:`,
-    `     ${py} ${job} next --type any --prompt-file --state-dir ${sd}`,
-    `   It prints one line of JSON. If it prints "{}" (empty), there is NO work — ` +
-      `report "no jobs" in one line and STOP. You are done.`,
+    `1. Look for the next job. Run this EXACT Bash command and let it run to ` +
+      `completion — it polls internally for up to ${Math.round(QUEUE_WORKER_POLL_SECONDS / 60)} ` +
+      `minutes before giving up, so it may take a while to return. That is normal: ` +
+      `do NOT interrupt it and do NOT make any other tool call while it is running.`,
+    `     ${py} ${job} next --type any --prompt-file --wait-seconds ${QUEUE_WORKER_POLL_SECONDS} --state-dir ${sd}`,
+    `   It prints one line of JSON once it returns. If it prints "{}" (empty), no ` +
+      `job showed up during the whole poll window — report "no jobs" in one line ` +
+      `and STOP. You are done.`,
     `2. Otherwise it prints {"job_id":"...","prompt_file":"...","schema_file":...}. ` +
       `Use the Read tool to read prompt_file; it is the complete, self-contained ` +
       `instruction the pipeline wrote for you. If the Read result says it is partial ` +
