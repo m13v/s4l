@@ -1030,6 +1030,10 @@ class _ReviewController(NSObject):
                 "loved": bool(approved and loved),
                 "text": body,
                 "edited": bool(approved and body != orig),
+                # Pre-edit draft, shipped only when the user actually rewrote
+                # it, so the feedback digest can diff original vs final and
+                # learn the edit patterns (not just THAT an edit happened).
+                "original_text": orig if (approved and body != orig) else None,
                 "drop_link": bool(approved and drop_link),
                 "reject_category": reject_category,
                 "reject_note": (reject_note or "").strip() or None,
