@@ -29,8 +29,7 @@ router (the S4L_CLAUDE_PROVIDER env var was removed 2026-07-06): run_claude.sh
 asks `eligible --tag` and routes mapped tags through the queue unconditionally,
 on every machine. Only PURE text->JSON calls belong in the map; unmapped tags
 always run the real `claude -p`. Migrating a lane onto the queue = adding its
-tag to TAG_TO_TYPE, nothing else. twitter-link-tail is intentionally NOT
-mapped: the customer flow skips it (S4L_SKIP_LINK_TAIL=1) for now.
+tag to TAG_TO_TYPE, nothing else.
 """
 
 from __future__ import annotations
@@ -68,6 +67,11 @@ TAG_TO_TYPE = {
     # pins the provider to queue itself, no env switch).
     "invent-topic": "invent-topic",
     "invent-queries": "invent-queries",
+    # Tail-link bridge (queue-native since 2026-07-06; moved from a post-time
+    # call in twitter_post_plan.py to a draft-time call in
+    # twitter_gen_links.py's Phase 2b-gen step, which already tolerates the
+    # queue worker's cadence — see scripts/link_tail.py).
+    "twitter-link-tail": "twitter-link-tail",
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
@@ -80,6 +84,7 @@ TYPE_TO_ACTIVITY = {
     "feedback-digest": ("learning", "feedback"),
     "invent-topic": ("learning", "new topic"),
     "invent-queries": ("learning", "new queries"),
+    "twitter-link-tail": ("drafting", "link bridge"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
