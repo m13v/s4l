@@ -124,10 +124,15 @@ Do not ask the user to approve the inferred voice during initial setup. Save a
 specific, conservative best draft and mention afterward that it can be edited.
 
 Then run the DICTATION INTERVIEW before extracting topics or seeding. This is
-where the persona's `search_topics` and grounding corpus come from. Tell the user
-to answer all of the following in ONE spoken dictation (the Claude input box
-already supports dictation, so they talk once and you split the answers into
-fields). Ask verbatim as a single numbered list:
+where the persona's `search_topics` and grounding corpus come from. Keep the
+framing CHILL: this is a casual brain-dump, not a form. Invite the user to
+answer the following in ONE spoken dictation (the Claude input box already
+supports dictation, so they talk once and you split the answers into fields),
+and make clear there is no pressure: they can answer as much or as little as
+they like, skip anything, and come back to the rest whenever they feel like it.
+Preface the list with one short low-key line saying exactly that (e.g. "No
+pressure here, ramble as much or as little as you want; you can always come
+back to this later."), then ask verbatim as a single numbered list:
 
 1. Who are you, and what do you want to be known for? (→ description)
 2. What subjects could you talk about for an hour, work and non-work? (→
@@ -151,8 +156,11 @@ answers. Keep the RAW transcript VERBATIM as the persona corpus (do not
 paraphrase; the actual numbers, opinions, and phrasing are what make drafts sound
 like them). Pass it as `content_corpus` when you call `engagement_mode` (or
 `project_config`); it is stored in the `persona_corpus.txt` sidecar, not
-config.json. If the user declines or gives nothing usable, fall back to
-scan-derived topics.
+config.json. If the user answers only some questions, take what they gave,
+continue setup without nagging for the rest, and mention once that they can
+answer the remaining questions any time later to make drafts sound more like
+them. If the user declines or gives nothing usable, fall back to scan-derived
+topics.
 
 Only after the dictation is captured do you set the engagement mode / save the
 persona, which seeds the topics. Do not seed topics from the scan before the
