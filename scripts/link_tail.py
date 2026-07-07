@@ -266,6 +266,49 @@ Example bridge sentences (do NOT copy verbatim — these are FORM examples, voic
 Write the final reply now."""
 
 
+def _unwrap_queue_envelope(text: str) -> str:
+    """Unwrap claude_job.py's queue-provider envelope if present.
+
+    'twitter-link-tail' is a queue-mapped tag (scripts/claude_job.py
+    TAG_TO_TYPE, since 2026-07-06), so run_claude.sh routes it through
+    claude_job.py's provider instead of exec'ing `claude` directly. On
+    success that provider ALWAYS emits a claude `--output-format json`-shaped
+    envelope on stdout: {"type":"result","subtype":"success","is_error":false,
+    "structured_output":<answer>,"result":<answer>} — regardless of whether
+    the caller's prompt asked for JSON. This prompt explicitly asks for bare
+    text ("no JSON, no quotes"), so without this unwrap the WHOLE envelope
+    string was fed straight into clean_output()/enforce_budget(), which
+    produced garbage: the raw JSON leaking into the reply, or the link URL
+    (present twice in the envelope: once in structured_output, once in
+    result) getting doubled up when enforce_budget's trim-and-reappend ran
+    (2026-07-06 regression, first release rc.22).
+
+    A direct (non-queued) `claude -p` response is plain text and never
+    matches this shape, so this is a no-op for that path.
+    """
+    t = (text or "").strip()
+    if not (t.startswith("{") and t.endswith("}")):
+        return text
+    try:
+        obj = json.loads(t)
+    except Exception:
+        return text
+    if not isinstance(obj, dict) or obj.get("type") != "result":
+        return text
+    payload = obj.get("structured_output")
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("text", "reply", "answer", "output"):
+            v = payload.get(key)
+            if isinstance(v, str):
+                return v
+    result = obj.get("result")
+    if isinstance(result, str):
+        return result
+    return text
+
+
 def call_claude(prompt: str, *, timeout_sec: int = 120,
                 use_run_claude_sh: bool = True) -> tuple[bool, str, str]:
     """Run claude -p in headless mode. Returns (ok, stdout_text, error_msg).
@@ -319,7 +362,7 @@ def call_claude(prompt: str, *, timeout_sec: int = 120,
             return (False, out, f"rc={r.returncode}: {err[:300]}")
         if not out:
             return (False, "", f"empty_stdout: {err[:200]}")
-        return (True, out, "")
+        return (True, _unwrap_queue_envelope(out), "")
     except subprocess.TimeoutExpired:
         return (False, "", f"timeout_{timeout_sec}s")
     except FileNotFoundError as e:
