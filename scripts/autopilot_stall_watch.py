@@ -15,7 +15,8 @@ so a sustained stall pages us even when nobody is looking at the menu bar.
 
 Design mirrors the stall signal in mcp/menubar/s4l_menubar.py (_autopilot_stalled)
 and mcp/src/index.ts (autopilotStalled) — keep the threshold in sync:
-  stalled = the autopilot is configured (both worker SKILL.md files present)
+  stalled = the autopilot is configured (a complete worker set's SKILL.md
+            files present — see WORKER_TASK_SETS)
             AND a draft job has sat unclaimed in pending/ past STALL_SECONDS.
 False-positive free: an idle queue (no candidates) has no pending job at all, so
 a quiet pipeline never trips this.
@@ -57,8 +58,18 @@ RUNNING_STALL_SECONDS = 900
 # At StartInterval 120 that is ~6 min of continuous stall.
 ALERT_AFTER = 3
 
-# Includes the current universal worker id; legacy phase pair kept for old
-# installs (same stale-checker drift fix as scheduled_tasks_snapshot.py, 2026-07-03).
+# A box counts as configured when ANY complete worker set has its SKILL.md on
+# disk: the universal type-blind worker, its short-lived staging predecessor, or
+# the legacy per-type pair. Keep in sync with WORKER_TASK_SETS in
+# scripts/schedule_state.py. The old flat all()-over-four-ids check could never
+# pass on a universal install (no box has all four dirs), which silently killed
+# the fleet watchdog for every post-2026-07-02 install — Karol's 13-hour stall
+# on 2026-07-06 paged nobody (found during that investigation).
+WORKER_TASK_SETS = (
+    ("s4l-worker",),
+    ("saps-worker",),
+    ("saps-phase1-query", "saps-phase2b-draft"),
+)
 WORKER_TASK_IDS = ("s4l-worker", "saps-worker", "saps-phase1-query", "saps-phase2b-draft")
 
 
@@ -83,11 +94,12 @@ def _claude_config_dir() -> str:
 
 
 def _autopilot_configured() -> bool:
-    """Both worker routines have their SKILL.md on disk = the autopilot was set up
+    """A complete worker set has its SKILL.md on disk = the autopilot was set up
     here (so 'no drafts draining' is a real stall, not just unfinished setup)."""
     base = os.path.join(_claude_config_dir(), "scheduled-tasks")
-    return all(
-        os.path.exists(os.path.join(base, tid, "SKILL.md")) for tid in WORKER_TASK_IDS
+    return any(
+        all(os.path.exists(os.path.join(base, tid, "SKILL.md")) for tid in task_set)
+        for task_set in WORKER_TASK_SETS
     )
 
 
