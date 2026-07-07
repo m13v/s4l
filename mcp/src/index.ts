@@ -519,7 +519,7 @@ const baseRegisterTool = server.registerTool.bind(server);
 // NOT here — it writes finer scanning/drafting phases itself (see produceDrafts).
 const TOOL_ACTIVITY: Record<string, string> = {
   post_drafts: "posting",
-  get_stats: "loading stats",
+  get_stats: "stats…",
 };
 function toolActivityLabel(name: string, args: any): string | null {
   const fallback = TOOL_ACTIVITY[name];
@@ -775,8 +775,8 @@ async function produceDrafts(
   let lastMsg = "";
   // Granular scan progress for the menu-bar label. Phase 1 logs one
   // `executing N queries` line (the total), then one `ok/err project=… kept=K`
-  // line per query. We count those to paint `scanning X · N/M · kept K` instead
-  // of a static "scanning X". Best-effort: missing total falls back to a plain
+  // line per query. We count those to paint `scan N/M +K` (K = kept) instead
+  // of a static "scan…". Best-effort: missing total falls back to a plain
   // count, and any parse miss just leaves the prior label up.
   let scanTotal = 0;
   let scanDone = 0;
@@ -806,7 +806,7 @@ async function produceDrafts(
   );
   // Menu-bar status: scanning first, then drafting once the prep phase begins
   // (switched in onLine below). Cleared before every return.
-  writeActivity("scanning", "scanning X");
+  writeActivity("scanning", "scan…");
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env: env as Record<string, string>,
     timeoutMs: 900_000, // scan+draft can take several minutes
@@ -833,9 +833,9 @@ async function produceDrafts(
         const km = /kept=(\d+)/.exec(t);
         if (km) scanKept += parseInt(km[1], 10) || 0;
         const prog = scanTotal ? `${scanDone}/${scanTotal}` : `${scanDone}`;
-        writeActivity("scanning", `scanning X · ${prog} · kept ${scanKept}`);
+        writeActivity("scanning", `scan ${prog} +${scanKept}`);
       }
-      if (/Phase 2b-prep/.test(t)) writeActivity("drafting", "drafting replies");
+      if (/Phase 2b-prep/.test(t)) writeActivity("drafting", "drafting");
       if (!onProgress) return;
       const msg = cycleProgressMessage(t);
       // Skip consecutive duplicates (a phase can log a couple matching lines).
