@@ -186,6 +186,7 @@ def _show_alert(title=None, message='', ok=None, cancel=None, other=None):
         cancel = 'Cancel' if cancel else None
     alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_(
         title, ok, cancel, other, msg)
+    alert.setAlertStyle_(0)  # same style rumps.alert() uses
     try:
         alert.window().setLevel_(NSFloatingWindowLevel)
         alert.window().orderFrontRegardless()
