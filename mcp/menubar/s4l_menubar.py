@@ -132,25 +132,66 @@ except Exception as _import_err:
 import s4l_state as st  # noqa: E402
 
 # AppKit is available in the owned venv (PyObjC is a rumps dependency). We use it
-# only to pull the accessory (LSUIElement) app to the front before showing an
-# NSAlert: an agent app that isn't the active app has its rumps.alert appear
-# BEHIND the frontmost window ("modal doesn't show on top"), because runModal
-# doesn't activate the app for us. Guarded so a missing AppKit never breaks the
-# menu bar — the alert still shows, just possibly not front-most.
+# to pull the accessory (LSUIElement) app to the front AND to force the alert
+# window itself above whatever else is on screen. Guarded so a missing AppKit
+# never breaks the menu bar — the alert still shows, just possibly not
+# front-most.
 try:
-    from AppKit import NSApplication  # noqa: E402
+    from AppKit import NSApplication, NSAlert, NSFloatingWindowLevel  # noqa: E402
 except Exception:
     NSApplication = None
+    NSAlert = None
+    NSFloatingWindowLevel = None
 
 
 def _activate_front():
-    """Bring this accessory app to the front so the next NSAlert (rumps.alert)
-    opens on top of whatever was frontmost, instead of behind it. Best-effort."""
+    """Bring this accessory app to the front so the next alert opens on top of
+    whatever was frontmost, instead of behind it. Best-effort; kept as a
+    belt-and-suspenders call alongside _show_alert's own window-level fix
+    below, since activation also affects which app is "key" for keyboard
+    input on the alert's buttons."""
     try:
         if NSApplication is not None:
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
     except Exception:
         pass
+
+
+def _show_alert(title=None, message='', ok=None, cancel=None, other=None):
+    """Like rumps.alert(), but actually shows up on top.
+
+    rumps.alert() builds an NSAlert and immediately calls runModal() with no
+    window-level or ordering call at all — it just assumes the app is already
+    active. activateIgnoringOtherApps_ (_activate_front, above) is async, so
+    it can lose the race against runModal()'s own (assumed-active) window
+    presentation: the alert window is created at the default level and never
+    explicitly raised, so when this accessory app ISN'T active (e.g. Claude
+    Desktop is frontmost), it renders BEHIND Claude's window instead of on
+    top of it. Confirmed recurring 2026-07-07 (uninstall modal hidden behind
+    Claude Desktop) despite the activation call landing 2026-06-30.
+
+    Fix: build the NSAlert ourselves (same call rumps.alert uses) and force
+    its window to NSFloatingWindowLevel + orderFrontRegardless() BEFORE
+    runModal(), mirroring the pattern s4l_card.py's review panel already uses
+    successfully (see _ReviewPanel._build: setLevel_(NSFloatingWindowLevel) +
+    orderFrontRegardless()). Floating level sits above normal app windows in
+    the window server's global z-order regardless of app-activation state,
+    so it doesn't depend on the activation race resolving in time."""
+    _activate_front()
+    if NSAlert is None:
+        # AppKit unavailable in this venv: fall back to rumps' plain alert.
+        return rumps.alert(title=title, message=message, ok=ok, cancel=cancel, other=other)
+    msg = str(message).replace('%', '%%')
+    if not isinstance(cancel, str):
+        cancel = 'Cancel' if cancel else None
+    alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_(
+        title, ok, cancel, other, msg)
+    try:
+        alert.window().setLevel_(NSFloatingWindowLevel)
+        alert.window().orderFrontRegardless()
+    except Exception:
+        pass
+    return alert.runModal()
 
 
 CLAUDE_APP = "Claude"
@@ -595,7 +636,7 @@ class S4LMenuBar(rumps.App):
             msg = "Click OK, then open Claude and ask it to " + action_desc + "."
         try:
             _activate_front()
-            rumps.alert(title=title, message=msg, ok="OK")
+            _show_alert(title=title, message=msg, ok="OK")
         except Exception:
             self._notify("S4L · prompt copied" if copied else "S4L",
                          "Paste the prompt into Claude (Cmd+V) and press Enter.")
@@ -666,7 +707,7 @@ class S4LMenuBar(rumps.App):
         also run the registry self-heal, which additionally repairs the
         account-switch orphan case, so this one click covers both known causes."""
         _activate_front()
-        choice = rumps.alert(
+        choice = _show_alert(
             title="Restart Claude Desktop?",
             message=(
                 "Claude’s scheduler stopped running the draft tasks (a known "
@@ -994,7 +1035,7 @@ class S4LMenuBar(rumps.App):
         # ok=1 (plugin reset, keeps X login + browser layer), other=-1 (deep wipe),
         # cancel=0. See rumps.alert: default=1, alternate=0, other=-1.
         _activate_front()
-        choice = rumps.alert(
+        choice = _show_alert(
             title="Uninstall S4L?",
             message=(
                 "This quits Claude Desktop, removes the S4L extension + its "
@@ -1037,7 +1078,7 @@ class S4LMenuBar(rumps.App):
     def _alert(self, title, message):
         try:
             _activate_front()
-            rumps.alert(title=title, message=message, ok="OK")
+            _show_alert(title=title, message=message, ok="OK")
         except Exception:
             pass
 
@@ -1072,7 +1113,7 @@ class S4LMenuBar(rumps.App):
         modal FIRST that Claude Desktop will restart, since the app window will
         close and reopen under them."""
         _activate_front()
-        choice = rumps.alert(
+        choice = _show_alert(
             title="Quit the S4L autoposter?",
             message=(
                 "Quitting stops the autoposter completely: the draft + query "
@@ -1758,7 +1799,7 @@ class S4LMenuBar(rumps.App):
             self._cwd_healed = True
             return
         _activate_front()
-        choice = rumps.alert(
+        choice = _show_alert(
             title="Tidy the S4L background tasks?",
             message=(
                 "S4L can tidy its background tasks: merge the old draft + query "
