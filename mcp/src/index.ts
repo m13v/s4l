@@ -60,6 +60,7 @@ import {
   clearMenubarStop,
   ensurePipelineCurrent,
   ensureRuntimeProvisioned,
+  retryProvisionIfStalled,
 } from "./runtime.js";
 import {
   blockOnboardingMilestone,
@@ -2821,16 +2822,24 @@ tool(
     }
 
     // ---- status (default): runtime install snapshot -----------------------
-    const snapshot = runtimeSnapshot();
+    let snapshot = runtimeSnapshot();
     if (snapshot.runtime_ready) {
       completeOnboardingMilestone("runtime_ready");
     } else if (snapshot.progress?.done && !snapshot.progress.ok) {
-      blockOnboardingMilestone(
-        "runtime_ready",
-        "runtime_install_failed",
-        snapshot.progress.error || "Runtime installation failed",
-        { outcome: "failed" }
-      );
+      // A prior provision failed. Kick a bounded auto-retry so status polling
+      // self-heals a transient failure instead of parking until the next boot;
+      // the provisioner cleans its own partial artifacts, so a retry is safe.
+      // Only surface the failure to the onboarding ledger once retries are spent.
+      if (retryProvisionIfStalled()) {
+        snapshot = runtimeSnapshot(); // reflect the restarted, in-flight run
+      } else {
+        blockOnboardingMilestone(
+          "runtime_ready",
+          "runtime_install_failed",
+          snapshot.progress.error || "Runtime installation failed",
+          { outcome: "failed" }
+        );
+      }
     }
     return jsonContent({
       ...snapshot,
