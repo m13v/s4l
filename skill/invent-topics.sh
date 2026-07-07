@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# invent-topics.sh — hourly topic invention job (replaces in-cycle EXPLORE_INVENT).
+# invent-topics.sh — topic invention job (replaces in-cycle EXPLORE_INVENT).
 #
 # Picks ONE project via pick_projects() (same inverse-recent-share weighting
-# the post-comments cycle uses), then calls Claude to propose N new
-# search_topic candidates given that project's ledger. Validates each
-# proposal against the universe (exact-match + Jaccard similarity), commits
-# survivors to project_search_topics with source='invented', status='active',
-# and appends an audit row to state/invented_topics_audit.jsonl.
+# the post-comments cycle uses), then runs queue-routed Claude turns to
+# propose new search_topic candidates given that project's ledger. Validates
+# each proposal against the universe (exact-match + Jaccard similarity),
+# commits survivors to project_search_topics with source='invented',
+# status='active', and POSTs an audit row to /api/v1/invented-topics-audit.
 #
-# Fires hourly via com.m13v.social-invent-topics.plist. Deliberately runs
-# outside the 15-min cycle cadence because invention doesn't need realtime;
-# new topics added at minute :00 vs :30 make no difference to engagement.
+# Queue-native (2026-07-06): invoked by the run-draft-and-publish.sh kicker
+# on EVERY install (state-file gate, S4L_INVENT_EVERY_HOURS), operator Mac
+# included. Every Claude turn is a job on the local claude-queue drained by
+# the Desktop scheduled-task worker; there is no claude CLI dependency. The
+# operator-only launchd job com.m13v.social-invent-topics is retired.
 
 set -uo pipefail
 
-# shellcheck source=/dev/null
-[ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
+# Honor S4L_REPO_DIR (set by the MCP wrapper + the kicker on .mcpb installs)
+# so the plugin's installed package resolves its own scripts.
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 
-REPO_DIR="$HOME/social-autoposter"
+# shellcheck source=/dev/null
+[ -f "$REPO_DIR/.env" ] && source "$REPO_DIR/.env"
+
+PY="${S4L_PYTHON:-python3}"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/invent-topics-$(date +%Y-%m-%d_%H%M%S).log"
@@ -40,7 +46,7 @@ MAX_ATTEMPTS="${INVENT_MAX_ATTEMPTS:-5}"
 
 {
     echo "[$(date +%Y-%m-%dT%H:%M:%S%z)] invent-topics start (proposals=$PROPOSALS target=$TARGET max_attempts=$MAX_ATTEMPTS)"
-    /usr/bin/python3 "$REPO_DIR/scripts/invent_topics.py" \
+    S4L_REPO_DIR="$REPO_DIR" "$PY" "$REPO_DIR/scripts/invent_topics.py" \
         --proposals "$PROPOSALS" \
         --target "$TARGET" \
         --max-attempts "$MAX_ATTEMPTS"
