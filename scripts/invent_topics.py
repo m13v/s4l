@@ -244,37 +244,71 @@ def _format_topic_table(rows: list[dict], max_per_bucket: int = 12) -> str:
     return "\n".join(parts)
 
 
+def _table_visible_rows(rows: list[dict], max_per_bucket: int = 12) -> list[dict]:
+    """The exact rows _format_topic_table renders (top N per verdict bucket),
+    so build_prompt can exclude them from the remaining-universe list."""
+    buckets: dict[str, list[dict]] = {}
+    for r in rows:
+        buckets.setdefault(r.get("verdict", "untried"), []).append(r)
+    out: list[dict] = []
+    for verdict in ("strong", "decent", "weak", "dud", "untried"):
+        out.extend(buckets.get(verdict, [])[:max_per_bucket])
+    return out
+
+
+def _format_universe_list(universe: set[str], shown_in_table: set[str]) -> str:
+    """Complete plain list of every active topic NOT already detailed in the
+    stats table, so the prompt carries FULL-universe visibility (this replaced
+    the retired invent-tools search_topics/get_topic_stats session tools; the
+    table alone truncates at 12 per bucket). Comma-separated: topics are short
+    2-6 word strings, so even hundreds fit in a few KB of prompt."""
+    rest = sorted(t for t in universe if t not in shown_in_table)
+    if not rest:
+        return ""
+    return (
+        f"\n## Remaining active topics not detailed above ({len(rest)} more — "
+        "together with the table this is the COMPLETE universe; anything here "
+        "or a paraphrase of it is a dupe)\n\n"
+        + ", ".join(rest) + "\n"
+    )
+
+
 def build_prompt(
     project: dict,
     topics: list[dict],
     n_proposals: int,
     avoid_topics: set[str] | None = None,
+    universe: set[str] | None = None,
 ) -> str:
-    """Assemble the Claude prompt for one tool-using topic invention session.
+    """Assemble the single text->JSON topic-invention prompt (one queue job).
 
-    This version of the prompt gives Claude the invent-tools MCP suite
-    (search_topics / get_topic_stats / submit_topic) so dedup runs IN-SESSION
-    instead of post-hoc. The ledger snapshot is still included as a quick
-    overview, but Claude is expected to use the tools to verify against the
-    full universe before submitting. submit_topic returns a tool-call error
-    on near-dupes, so Claude can react and propose a different angle without
-    a new session.
+    Flattened (2026-07-06, queue-native rewrite): no tools. The prompt carries
+    the stats table (top 12 per bucket) PLUS the complete remaining topic-name
+    list, so the model has full-universe visibility for both gap-finding and
+    dupe avoidance. Dedup runs post-hoc in validate_proposals(); a rejected
+    near-dupe re-prompts with the grown `avoid_topics` list.
 
-    `avoid_topics` carries topics already proposed earlier in THIS run.
-    Empty/None when the outer loop is on its first session.
+    `avoid_topics` carries topics already proposed earlier in THIS run
+    (committed or rejected). `universe` is the full working universe including
+    topics minted earlier this run.
     """
     name = project.get("name", "")
     description = project.get("description", "")
     voice = project.get("voice_relationship", "")
 
     table = _format_topic_table(topics)
+    shown_in_table = {
+        (r.get("search_topic") or "").strip().lower()
+        for r in _table_visible_rows(topics)
+    }
+    universe_block = _format_universe_list(universe or set(), shown_in_table)
 
     avoid_block = ""
     if avoid_topics:
         avoid_lines = "\n".join(f"- {t}" for t in sorted(avoid_topics))
         avoid_block = (
             "\n## Already proposed earlier this run — DO NOT repeat or paraphrase\n\n"
-            "An earlier session this run already suggested the topics below "
+            "An earlier attempt this run already suggested the topics below "
             "(committed OR rejected as dupes). Stay clear of these:\n\n"
             f"{avoid_lines}\n"
         )
@@ -288,18 +322,10 @@ A topic is a short concept phrase (2-6 words typically) used to draft Twitter se
 - Description: {description}
 - Voice: {voice}
 
-## Performance ledger snapshot (top 12 per bucket; full universe has {len(topics)} topics)
+## Performance ledger (stats for top 12 per bucket; full universe has {len(topics)} topics)
 
 {table}
-
-## Tools available — USE THEM before submitting
-
-You have THREE tools exposed by the `invent-tools` MCP server. The ledger above is a snapshot; for ground truth and full coverage, call the tools.
-
-1. **search_topics(project, q="", limit=200)** — search the FULL active topic universe. Use a short substring (e.g. `q="agent"`) to scan everything adjacent to your candidate before you commit. Empty `q` returns the whole list.
-2. **get_topic_stats(project, topic)** — pull the topic-funnel row for any specific topic (attempts, supply, candidates, posted, likes, clicks, verdict). Use this when search_topics shows an adjacent topic and you need to know if it's STRONG (propose ADJACENT angle) or WEAK/DUD (AVOID neighborhood).
-3. **submit_topic(project, topic, rationale)** — submit your final topic. The tool runs Jaccard dedup against the full universe ON THE SERVER. If your topic is a near-dupe it returns `ok: false` with the offending neighbor and similarity score. PROPOSE A DIFFERENT ANGLE and try again. When it returns `ok: true`, the topic is committed.
-
+{universe_block}
 ## Ledger bucket guide
 - **STRONG** (clicks_per_post >= 1.0): audience converts. Invent ADJACENT angles, not paraphrases.
 - **DECENT** (>= 0.3): solid signal. Same as strong, lower peak.
@@ -308,29 +334,25 @@ You have THREE tools exposed by the `invent-tools` MCP server. The ledger above 
 - **UNTRIED** (no attempts in 30d): unknown. Read carefully before proposing nearby.
 {avoid_block}
 ## Workflow (follow strictly)
-1. Pick a candidate gap angle you think is genuinely new.
-2. Call `search_topics(project="{name}", q="<one-word probe from your candidate>")` to scan the neighborhood.
-3. For the 1-2 closest existing topics, call `get_topic_stats(project="{name}", topic="<the topic>")` to read their verdict.
-4. Based on what you find: keep your candidate if the gap is real, or pivot to a different angle.
-5. Call `submit_topic(project="{name}", topic="<2-6 words, lowercase>", rationale="<≤30 words, why this gap>")`.
-6. If `ok: false` (dupe error): use the `neighbor` field to pivot, then call submit_topic again with a genuinely different topic. Up to 5 submission attempts per session.
-7. When a submission returns `ok: true`, STOP and answer with the final JSON envelope below.
+1. Scan the full universe above (table + remaining-topics list) for genuinely uncovered angles.
+2. For your candidate, check its nearest neighbors in the ledger: adjacent to STRONG/DECENT is good ground; adjacent to WEAK/DUD is poisoned ground; a paraphrase of ANY listed topic is a dupe and will be rejected.
+3. Answer with exactly ONE proposal in the JSON envelope below. It will be dedup-checked (token-Jaccard) against the full universe after you answer, so self-check first: if you cannot phrase a real gap in genuinely different words, say so via the saturation envelope instead of forcing a paraphrase.
 
 ## Required final answer
 
-After a successful submit_topic call, end your response with EXACTLY this JSON (no prose around it):
+Return STRICT JSON only, no prose around it:
 
 ```json
-{{"submitted_topic": "the topic you successfully submitted, verbatim", "rationale": "your rationale, verbatim"}}
+{{"proposals": [{{"topic": "<2-6 words, lowercase>", "rationale": "<≤30 words, why this gap>"}}]}}
 ```
 
-If you cannot find a non-dupe topic after several submit attempts and the project is genuinely saturated, end with:
+If the universe is genuinely saturated and you cannot propose a non-dupe:
 
 ```json
-{{"submitted_topic": null, "reason": "short explanation, e.g. 'tried X, Y, Z all dupes; project saturated this hour'"}}
+{{"proposals": [], "reason": "short explanation, e.g. 'every angle adjacent to the strong topics is already covered'"}}
 ```
 
-Strict topic constraints (enforced by submit_topic too):
+Strict topic constraints (dedup-enforced after you answer):
 - Lowercase, 2-6 words
 - No quotes inside topic strings
 - NO Twitter operators (no `min_faves:`, `-filter:replies`, `since:` — those are added at query-draft time downstream)"""
