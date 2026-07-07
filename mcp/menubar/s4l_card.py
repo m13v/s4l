@@ -856,12 +856,13 @@ class _ReviewController(NSObject):
             content.addSubview_(deye)
             self._details_btn = deye
 
-        # Editable reply, with the attached link folded in as it'll post (no
-        # separate link field). The trailing link is stripped on send so the
-        # pipeline still mints the tracked /r/<code> short link (no double link).
+        # Editable reply. Since 2026-07-06 the tail link is folded into
+        # reply_text at DRAFT time (scripts/twitter_gen_links.py::apply_tail_link),
+        # so it's normally already there — only append link_url when reply_text
+        # is genuinely link-free (older/fallback plans), else it shows twice.
         reply = d.get("reply_text") or ""
         link = d.get("link_url")
-        composed = f"{reply} {link}" if link else reply
+        composed = reply if (not link or link in reply) else f"{reply} {link}"
         # Non-English draft with a stamped translation: a muted read-only
         # "EN:" block sits between the heading and the editable field so the
         # reviewer reads the draft in English while still editing (and
@@ -1082,23 +1083,19 @@ class _ReviewController(NSObject):
         drop_link = False
         if approved:
             text = self._current_text()
-            # The card folds link_url into the editable field (see _render). On
-            # send we must reconcile what the user did with that link:
-            #   - link still present anywhere -> remove ALL occurrences so the
-            #     poster mints the single tracked /r/<code> short link (no double
-            #     link, no bare URL). Generalizes the old endswith() strip, which
-            #     missed the link whenever the user typed anything after it.
-            #   - link gone (user deleted it while editing) -> drop_link=True so
-            #     the poster does NOT re-append it. Without this signal the post
-            #     pipeline's forced TWITTER_TAIL_LINK_RATE=1.0 silently revived a
-            #     link the user intentionally removed.
-            if link:
-                if link in text:
-                    text = text.replace(link, "")
-                else:
-                    drop_link = True
-            # Collapse only horizontal whitespace left by the removal; preserve
-            # any newlines the user intended.
+            # reply_text already carries the link embedded at draft time (see
+            # _render) — post it as-is, don't strip it back out. tail_link_variant
+            # is stamped before the card is ever shown, so the post pipeline now
+            # trusts reply_text verbatim and never re-adds a missing link; the old
+            # strip-then-hope-the-poster-revives-it logic predates that move and
+            # was mislabeling every approval as "edited" (body != orig once the
+            # link was stripped) and occasionally shipping a tweet with no link
+            # at all. Only signal drop_link when the user actually deleted the
+            # link while editing, so the poster clears link_url instead of
+            # reviving it.
+            if link and link not in text:
+                drop_link = True
+            # Collapse only horizontal whitespace runs; preserve intended newlines.
             body = re.sub(r"[ \t]{2,}", " ", text).strip()
         else:
             body = orig
