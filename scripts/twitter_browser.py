@@ -1162,26 +1162,26 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             except Exception:
                 pass
 
-            # Navigate + locate reply box. Composer mount is flaky on E2B
-            # sandbox egress (~1-in-5 misses on first attempt). Strategy:
-            # up to 2 navigation attempts; on miss, scroll-nudge once before
-            # re-navigating. On final miss, dump diagnostics for triage.
+            # Navigate + locate reply box. Single pass only (2026-07-06:
+            # removed the same-URL nudge+re-navigate retry — it doubled the
+            # composer-mount wait for no measurable recovery benefit, and on
+            # a genuine author-block it just delayed the block-probe below by
+            # another ~68s for nothing). On miss, dump diagnostics for triage;
+            # the block-probe (see _probe_author_block) doubles as the
+            # transient-miss recovery path now.
             reply_box = None
             tweet_not_found = False
             # Edited-tweet redirect (2026-07-06): when the author edits a
             # tweet, the OLD permalink keeps rendering but X strips the
-            # composer and shows "There's a new version of this post." — the
-            # nudge + re-nav below can never recover from that, so the reply
-            # used to die as reply_box_not_found. Follow X's own latest-version
-            # link (same-author /status/<id> only) and reply to the LATEST
-            # version instead. Hops are bounded so a pathological edit chain
-            # can't loop; each hop refreshes the nav-attempt budget. The
-            # reassigned tweet_url flows into the success payload's tweet_url,
-            # so the caller logs the thread we actually replied to.
+            # composer and shows "There's a new version of this post." Follow
+            # X's own latest-version link (same-author /status/<id> only) and
+            # reply to the LATEST version instead — this re-navigates to a
+            # DIFFERENT url, not a retry of the same one. Hops are bounded so
+            # a pathological edit chain can't loop. The reassigned tweet_url
+            # flows into the success payload's tweet_url, so the caller logs
+            # the thread we actually replied to.
             edit_hops = 0
-            nav_attempt = 0
-            while nav_attempt < 2:
-                nav_attempt += 1
+            while True:
                 try:
                     page.goto(tweet_url, wait_until="load", timeout=60000)
                 except Exception:
@@ -1208,8 +1208,8 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 # DO NOT let text_content("main") raise a bare TimeoutError that
                 # crashes the whole script with no_reply_json and no diagnostics.
                 # Swallow it, log the actual URL (rate-limit vs logout triage),
-                # and fall through to the nudge + re-nav; on the final miss the
-                # reply_box-None path reaches _dump_reply_failure_diag below.
+                # and fall through; the reply_box-None path below reaches
+                # _dump_reply_failure_diag and the block-probe.
                 try:
                     page.wait_for_selector("main", state="attached", timeout=20000)
                     page_text = page.text_content("main", timeout=5000) or ""
@@ -1219,9 +1219,8 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         cur_url = page.url
                     except Exception:
                         cur_url = "<unknown>"
-                    print(f"[reply_to_tweet] <main> not rendered on "
-                          f"nav_attempt={nav_attempt} (url={cur_url!r}); "
-                          f"nudging + re-navigating", file=sys.stderr)
+                    print(f"[reply_to_tweet] <main> not rendered "
+                          f"(url={cur_url!r})", file=sys.stderr)
                 # X renders the 404 copy with a CURLY apostrophe
                 # ("Hmm...this page doesn’t exist"), so normalize before
                 # matching — the plain-ASCII check silently never fired and
@@ -1238,24 +1237,10 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                               f"following latest version {latest_url} "
                               f"(hop {edit_hops})", file=sys.stderr)
                         tweet_url = latest_url
-                        nav_attempt = 0  # fresh attempt budget for the new URL
                         continue
 
                 reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
-                if reply_box:
-                    break
-
-                # Nudge: small scroll + scroll back; sometimes coaxes the
-                # composer to attach when React stalled on the initial mount.
-                print(f"[reply_to_tweet] reply_box missing on nav_attempt={nav_attempt}; "
-                      f"nudging + re-navigating", file=sys.stderr)
-                try:
-                    page.evaluate("window.scrollBy(0, 400)")
-                    page.wait_for_timeout(1500)
-                    page.evaluate("window.scrollTo(0, 0)")
-                    page.wait_for_timeout(1500)
-                except Exception:
-                    pass
+                break
 
             if tweet_not_found:
                 return {"ok": False, "error": "tweet_not_found"}
