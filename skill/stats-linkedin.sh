@@ -137,7 +137,17 @@ acquire_lock "linkedin-browser" 1800
 # Probe + launch harness Chrome idempotently if it's down. Safe to call under
 # the linkedin-browser lock; harness CDP supports concurrent clients on the
 # same profile so no SingletonLock fight.
-ensure_linkedin_browser_for_backend
+# rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+# Chrome); convert to clean exit 0 here in the parent shell.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 
 # 2. Run the headed-Chromium scraper (single scrape, shared between writers).
 log "Launching headed Chromium scraper..."
