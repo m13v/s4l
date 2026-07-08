@@ -2882,6 +2882,41 @@ tool(
   }
 );
 
+// ---- pause_autopilot: temporarily stop drafting/posting, reversibly --------
+// The lighter alternative to Quit: unloads only the launchd jobs that scan,
+// draft, and post (plus their support daemons), leaving Claude Desktop, the
+// S4L tray, X connection, and the draft schedule registration untouched.
+// Fully reversible — action:'resume' reinstalls the exact same daemons via the
+// same idempotent ensure*Installed() functions boot uses.
+tool(
+  "pause_autopilot",
+  {
+    title: "Pause or resume the S4L autopilot",
+    description:
+      "Pause temporarily stops S4L's own pipeline (the launchd kicker that scans/drafts/posts, plus " +
+      "its reaper/stall-watch/memory-snapshot support jobs) WITHOUT touching Claude Desktop, the S4L " +
+      "tray, your X connection, or the draft schedule registration — nothing is deleted, so it survives " +
+      "a Claude Desktop restart and Resume brings it right back. Use when the user asks to pause, stop, " +
+      "or temporarily disable S4L, or to resume/unpause it. This is NOT the same as Quit (which kills " +
+      "and restarts Claude Desktop and removes the draft schedule) — Pause is the lighter, fully " +
+      "reversible option. action:'status' (default) reports whether it's currently paused.",
+    inputSchema: {
+      action: z.enum(["status", "pause", "resume"]).optional(),
+    },
+  },
+  async ({ action }: { action?: "status" | "pause" | "resume" }) => {
+    if (action === "pause") {
+      const res = await pauseAutopilot();
+      return jsonContent({ action: "pause", paused: isPaused(), ...res });
+    }
+    if (action === "resume") {
+      const res = await resumeAutopilot();
+      return jsonContent({ action: "resume", paused: isPaused(), ...res });
+    }
+    return jsonContent({ action: "status", paused: isPaused() });
+  }
+);
+
 // ---- report_diagnosis: ship a field diagnosis to the developers -------------
 // First-class MCP wrapper over scripts/send_diagnostic_report.py (the same
 // Sentry lane the menubar "Diagnose & fix" prompt uses). Before this existed
@@ -3951,6 +3986,76 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
   } catch (e: any) {
     return { ok: false, detail: e?.message || String(e) };
   }
+}
+
+// ---- pause/resume: stop drafting/posting without touching Claude Desktop ---
+// Unlike Quit (which kills + relaunches Claude Desktop and deletes the draft
+// schedule), Pause only unloads the launchd jobs that actually DO work — the
+// kicker that scans/drafts/posts (TWITTER_AUTOPILOT_LABEL) plus its reaper,
+// stall-watch, and memory-snapshot support daemons — while leaving Claude
+// Desktop, the tray, and the Claude-native s4l-worker scheduled task alone.
+// The scheduled task still fires on its own cadence; claude_job.py's `next`
+// checks the same flag file and reports "no work" instantly instead of
+// draining the queue, so nothing drafts or posts while paused even if a
+// worker session wakes up mid-pause. A flag file (nothing is deleted) is what
+// makes Resume a plain reinstall of the same 4 daemons — see resumeAutopilot.
+function pauseFlagPath(): string {
+  return path.join(s4lStateDir(), "paused.flag");
+}
+
+function isPaused(): boolean {
+  try {
+    return fs.existsSync(pauseFlagPath());
+  } catch {
+    return false;
+  }
+}
+
+const PAUSE_TARGETS: Array<{ label: string; plist: string }> = [
+  { label: TWITTER_AUTOPILOT_LABEL, plist: TWITTER_AUTOPILOT_PLIST },
+  { label: REAPER_LABEL, plist: REAPER_PLIST },
+  { label: STALL_WATCH_LABEL, plist: STALL_WATCH_PLIST },
+  { label: MEMORY_SNAPSHOT_LABEL, plist: MEMORY_SNAPSHOT_PLIST },
+];
+
+async function pauseAutopilot(): Promise<{ ok: boolean; detail: string }> {
+  if (isPaused()) return { ok: true, detail: "already paused" };
+  try {
+    fs.mkdirSync(path.dirname(pauseFlagPath()), { recursive: true });
+    fs.writeFileSync(pauseFlagPath(), `paused at ${new Date().toISOString()}\n`, "utf-8");
+  } catch (e: any) {
+    return { ok: false, detail: `could not write pause flag: ${e?.message || e}` };
+  }
+  const uid = process.getuid ? process.getuid() : 0;
+  const results: string[] = [];
+  for (const { label, plist } of PAUSE_TARGETS) {
+    try {
+      const res = await unloadPlist(label, plist, uid);
+      results.push(`${label}: unloaded (rc=${res.code})`);
+    } catch (e: any) {
+      results.push(`${label}: ${e?.message || e}`);
+    }
+  }
+  return { ok: true, detail: results.join("; ") };
+}
+
+async function resumeAutopilot(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    fs.rmSync(pauseFlagPath(), { force: true });
+  } catch {
+    /* best-effort */
+  }
+  const kicker = await ensureQueueKickerInstalled();
+  const reaper = await ensureClaudeReaperInstalled();
+  const stall = await ensureStallWatchInstalled();
+  const mem = await ensureMemorySnapshotInstalled();
+  const detail = [
+    `kicker: ${kicker.ok ? "ok" : "skip"} (${kicker.detail})`,
+    `reaper: ${reaper.ok ? "ok" : "skip"} (${reaper.detail})`,
+    `stall-watch: ${stall.ok ? "ok" : "skip"} (${stall.detail})`,
+    `memory-snapshot: ${mem.ok ? "ok" : "skip"} (${mem.detail})`,
+  ].join("; ");
+  return { ok: true, detail };
 }
 
 // Install/refresh the on-screen overlay watcher launchd job. Promotes the
