@@ -1367,10 +1367,21 @@ async function postApproved(batchId: string, plan: Plan) {
   }
   // Post failures are HANDLED in the pipeline (it returns a count, never throws),
   // so they never reach Sentry on their own. Capture an explicit event whenever
-  // the run exited non-zero OR fewer drafts posted than were approved. This is
-  // the only telemetry channel that reaches a customer .mcpb install (their cycle
-  // log lives on their machine). install_id/hostname are auto-tagged.
-  if (res.code !== 0 || realPosted < approved.length) {
+  // the run exited non-zero OR a REAL failure happened. This is the only
+  // telemetry channel that reaches a customer .mcpb install (their cycle log
+  // lives on their machine). install_id/hostname are auto-tagged.
+  //
+  // Gated on failure_reasons (not just realPosted < approved.length): the
+  // Python pipeline already reports every shortfall to Sentry itself
+  // (twitter_post_plan.py's capture_message), including benign skips like a
+  // deleted target tweet. Re-reporting the SAME benign skip here as a second,
+  // independently-fingerprinted `Error` (this capture group) doubled every
+  // such event into two distinct Sentry issues. Only add this Node-side
+  // capture when there's a real failure_reasons entry or a non-zero exit,
+  // i.e. something the Python capture wouldn't already have flagged as an
+  // actionable error on its own.
+  const hasRealFailure = res.code !== 0 || Boolean(summObj?.failure_reasons);
+  if (hasRealFailure) {
     captureError(
       new Error(`post_drafts: ${realPosted}/${approved.length} posted (exit=${res.code})`),
       {
