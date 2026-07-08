@@ -1523,7 +1523,11 @@ class S4LMenuBar(rumps.App):
             # `claude --resume` history. MUST happen while Claude is down (it caches
             # the registry in memory and clobbers live edits). See queueWorkerCwd()
             # in mcp/src/index.ts and the same routine in scripts/s4l_box_update.sh.
-            self._rewrite_scheduled_task_cwd()
+            # _fresh (not the in-process call): this is a mid-update self-heal,
+            # so it must run the code that was JUST downloaded, not whatever
+            # this already-running (about to be replaced) process imported at
+            # ITS OWN startup — see _rewrite_scheduled_task_cwd_fresh's docstring.
+            self._rewrite_scheduled_task_cwd_fresh()
             if target:
                 # The graceful quit can eat minutes; restart the verify clock
                 # now that Claude is actually down so UPDATE_VERIFY_GRACE_SEC
@@ -1713,198 +1717,72 @@ class S4LMenuBar(rumps.App):
     def _rewrite_scheduled_task_cwd(self):
         """Registry self-heal, run ONLY while Claude is DOWN (the running app
         caches the registry in memory and clobbers a live edit on the next
-        fire). Five fixes in one pass, across every scheduled-tasks.json:
-          1. Point worker tasks' cwd at ~/.s4l-worker.
-          2. REMOVE the deprecated single autopilot task.
-          3. CONSOLIDATE every legacy worker entry into ONE s4l-worker entry
-             (the universal type-blind worker): drop the legacy entries and,
-             if no s4l-worker is registered there yet, add one inheriting the
-             legacy cron/enabled state. This is the migration path for installs
-             that predate the universal queue.
-          4. ENSURE an enabled s4l-worker entry exists in EVERY account registry
-             (the account-switch orphan heal, 2026-07-06): switching Claude
-             accounts leaves the task under the old account's registry and the
-             new account never fires it. Writing the record into every registry
-             while Claude is down means whichever account the user logs into has
-             the task; copies under logged-out accounts are inert. Guarded by
-             user intent: if ANY registry holds an explicitly DISABLED worker
-             copy, the user turned it off — we add nothing anywhere. (The Quit
-             flow deletes the SKILL.md dirs, so worker_skill_ok also gates this
-             from resurrecting a quit install.) This restores the June 27
-             direct-write re-arm (45f1c45d) with the targeting problem dissolved
-             by writing everywhere instead of guessing the live account.
-          5. CREATE a fresh registry for the active account when it has NONE at
-             all (2026-07-08): fix 4 only edits files the glob finds, so an
-             account that's never had a scheduled-tasks.json (just switched
-             into, never scheduled on this box) got nothing — found on a real
-             test box where the active account's session tree held zero
-             registry files. Resolves the active account via
-             scripts/schedule_state.py's config.json lookup and writes a fresh
-             worker entry into its most-recently-touched EXISTING session
-             directory (never fabricates a new directory). Same user-intent
-             and worker_skill_ok guards as fix 4.
+        fire). Delegates to scripts/scheduled_task_selfheal.py::heal() — the
+        single implementation, importable in-process (here) or runnable as a
+        standalone subprocess (see _rewrite_scheduled_task_cwd_fresh below,
+        used by the update/relocate flows specifically because THIS in-process
+        call can only ever execute whatever code this already-running process
+        imported at its own startup, which is stale mid-update; see that
+        script's module docstring for the full story, 2026-07-08).
         Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
         and queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts."""
         try:
-            os.makedirs(WORKER_CWD, exist_ok=True)
+            import scheduled_task_selfheal
+            scheduled_task_selfheal.heal()
         except Exception:
             pass
-        worker_skill_ok = self._ensure_worker_skill_md()
-        # Pre-scan for user intent + a template: an explicitly disabled worker
-        # copy anywhere means the user opted out — never re-add. Otherwise clone
-        # cron from an existing record so the shape matches what the host wrote.
-        any_disabled = False
-        tmpl_cron = "* * * * *"
+
+    def _fresh_pipeline_tmpdir(self):
+        """Extract THIS UPDATE's embedded pipeline.tgz (already unpacked to
+        self._ext_dir() by the caller) into a throwaway temp dir and return
+        its root, or None on any failure. See _rewrite_scheduled_task_cwd_fresh
+        for why this matters: a subprocess run from here always imports
+        whatever is on disk at invocation time, so — unlike an in-process
+        call on this already-running (and about to be replaced) process — it
+        can never be stale."""
         try:
-            for f in glob.glob(SCHED_REGISTRY_GLOB):
-                try:
-                    with open(f) as fh:
-                        d = json.load(fh)
-                except Exception:
-                    continue
-                for t in (d.get("scheduledTasks") or []):
-                    if t.get("id") in WORKER_TASK_IDS:
-                        if not t.get("enabled", True):
-                            any_disabled = True
-                        if t.get("cronExpression"):
-                            tmpl_cron = t.get("cronExpression")
+            pipeline_tgz = os.path.join(self._ext_dir(), "dist", "pipeline.tgz")
+            if not os.path.exists(pipeline_tgz):
+                return None
+            tmpd = tempfile.mkdtemp(prefix="s4l-selfheal-")
+            r = subprocess.run(["tar", "-xzf", pipeline_tgz, "-C", tmpd],
+                                capture_output=True, timeout=60)
+            return tmpd if r.returncode == 0 else None
         except Exception:
-            pass
+            return None
+
+    def _rewrite_scheduled_task_cwd_fresh(self):
+        """Run the registry self-heal via a FRESH SUBPROCESS unpacked from the
+        just-downloaded bundle, instead of self._rewrite_scheduled_task_cwd
+        (in-process — can only ever run the code THIS process imported at ITS
+        OWN startup). Found on a real test box (2026-07-08): a self-heal fix
+        shipped in a release silently did nothing during the very update that
+        shipped it, because _mcpb_update_work calls the self-heal BEFORE this
+        process quits and relaunches with the new code — Python does not
+        hot-reload an already-imported module just because newer .py files
+        landed on disk mid-run. Every future fix to the self-heal logic would
+        have hit this same "one version behind" bug via this call site.
+        Falls back to the in-process call if extraction fails for any reason
+        (best-effort; a same-version restart isn't stale anyway)."""
+        tmpd = self._fresh_pipeline_tmpdir()
+        if not tmpd:
+            self._rewrite_scheduled_task_cwd()
+            return
         try:
-            for f in glob.glob(SCHED_REGISTRY_GLOB):
-                try:
-                    with open(f) as fh:
-                        d = json.load(fh)
-                except Exception:
-                    continue
-                tasks = d.get("scheduledTasks") or []
-                legacy = [t for t in tasks if t.get("id") in LEGACY_WORKER_TASK_IDS]
-                has_worker = any(t.get("id") == WORKER_TASK_ID for t in tasks)
-                new_tasks = []
-                dirty = False
-                for t in tasks:
-                    tid = t.get("id")
-                    if tid in DEPRECATED_TASK_IDS:
-                        dirty = True          # drop it
-                        continue
-                    if tid in LEGACY_WORKER_TASK_IDS and worker_skill_ok:
-                        dirty = True          # consolidated into s4l-worker below
-                        continue
-                    if tid in WORKER_TASK_IDS and t.get("cwd") != WORKER_CWD:
-                        t["cwd"] = WORKER_CWD
-                        dirty = True
-                    new_tasks.append(t)
-                add_worker = worker_skill_ok and not has_worker and (
-                    legacy                      # fix 3: legacy consolidation
-                    or not any_disabled         # fix 4: orphan heal (user intent guard)
-                )
-                if add_worker:
-                    tmpl = legacy[0] if legacy else {}
-                    new_tasks.append({
-                        "id": WORKER_TASK_ID,
-                        "cronExpression": tmpl.get("cronExpression") or tmpl_cron,
-                        "enabled": bool(tmpl.get("enabled", True)),
-                        "filePath": os.path.join(
-                            os.path.expanduser("~"), ".claude",
-                            "scheduled-tasks", WORKER_TASK_ID, "SKILL.md",
-                        ),
-                        # Fresh createdAt keeps schedule_state's CREATED_GRACE
-                        # treating the never-yet-fired task as "ok" until its
-                        # first fire lands (no ⚠ flap during the restart).
-                        "createdAt": int(time.time() * 1000),
-                        "cwd": WORKER_CWD,
-                    })
-                    dirty = True
-                if not dirty:
-                    continue
-                d["scheduledTasks"] = new_tasks
-                try:
-                    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
-                    with os.fdopen(fd, "w") as fh:
-                        json.dump(d, fh, indent=2)
-                    os.replace(tmp, f)
-                except Exception:
-                    pass
+            script = os.path.join(tmpd, "package", "scripts", "scheduled_task_selfheal.py")
+            if not os.path.exists(script):
+                self._rewrite_scheduled_task_cwd()
+                return
+            py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
+            subprocess.run([py, script], capture_output=True, timeout=60)
         except Exception:
-            pass
-        # Fix 5 (2026-07-08): the orphan heal above (fix 4) only EDITS registry
-        # files the glob finds — it can never create one where none exists. An
-        # account that's never had a scheduled-tasks.json at all (e.g. just
-        # switched into, never scheduled on this box before) got nothing written
-        # despite fix 4 running: found on a real test box, where the active
-        # account's entire claude-code-sessions/<uuid>/ tree held zero
-        # scheduled-tasks.json files (only regular chat transcripts), so the
-        # per-file loop above had nothing to iterate for it — the schedule read
-        # as 'missing' forever, and every "just restart Claude" attempt did
-        # nothing because there was never a file to fix.
-        # The worker entry carries no account-specific data (id/filePath/cwd are
-        # shared constants; only cronExpression/enabled get copied as a
-        # template), so writing a fresh copy into an account that has none is
-        # exactly equivalent to what create_scheduled_task would produce — just
-        # via a direct file write in the same safe quit-then-heal-then-relaunch
-        # window this whole method already runs in, not a live host-tool call.
-        # Reuses scripts/schedule_state.py's account resolution (config.json's
-        # lastKnownAccountUuid, verified correct against real installs
-        # 2026-07-08) instead of a second implementation of that lookup.
-        try:
-            import schedule_state
-            if worker_skill_ok and not any_disabled:
-                for cfg in schedule_state._config_json_paths():
-                    root = os.path.dirname(cfg)
-                    uuid = schedule_state._active_account_uuid(cfg)
-                    if not uuid:
-                        continue
-                    account_dir = os.path.join(root, "claude-code-sessions", uuid)
-                    existing = glob.glob(os.path.join(account_dir, "*", "scheduled-tasks.json"))
-                    if existing:
-                        continue  # fix 4 above already covers this account
-                    session_dirs = [
-                        p for p in glob.glob(os.path.join(account_dir, "*"))
-                        if os.path.isdir(p)
-                    ]
-                    if not session_dirs:
-                        continue  # Desktop has never created a session for this
-                                  # account on this box -- nowhere safe to write
-                    # Most-recently-touched session dir is the best available
-                    # guess for "the one Desktop is actively using".
-                    target_dir = max(session_dirs, key=lambda p: os.path.getmtime(p))
-                    target_file = os.path.join(target_dir, "scheduled-tasks.json")
-                    new_entry = {
-                        "id": WORKER_TASK_ID,
-                        "cronExpression": tmpl_cron,
-                        "enabled": True,
-                        "filePath": os.path.join(
-                            os.path.expanduser("~"), ".claude",
-                            "scheduled-tasks", WORKER_TASK_ID, "SKILL.md",
-                        ),
-                        "createdAt": int(time.time() * 1000),
-                        "cwd": WORKER_CWD,
-                    }
-                    try:
-                        fd, tmp = tempfile.mkstemp(dir=target_dir)
-                        with os.fdopen(fd, "w") as fh:
-                            json.dump(
-                                {"scheduledTasks": [new_entry], "recordedSkips": []},
-                                fh, indent=2,
-                            )
-                        os.replace(tmp, target_file)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        # Remove retired tasks' on-disk SKILL.md dirs too, so they can't be
-        # re-registered from a stale prompt file (and the MCP's boot refresh
-        # stops resurrecting the legacy prompts).
-        try:
-            import shutil
-            retired = list(DEPRECATED_TASK_IDS)
-            if worker_skill_ok:
-                retired += list(LEGACY_WORKER_TASK_IDS)
-            for tid in retired:
-                shutil.rmtree(os.path.join(os.path.expanduser("~"), ".claude",
-                                           "scheduled-tasks", tid), ignore_errors=True)
-        except Exception:
-            pass
+            self._rewrite_scheduled_task_cwd()
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(tmpd, ignore_errors=True)
+            except Exception:
+                pass
 
     def _maybe_relocate_tasks(self, _=None):
         """Timer callback: detect, then ASK. If the autopilot tasks are in the wrong
@@ -1970,7 +1848,12 @@ class S4LMenuBar(rumps.App):
             # wrong profile, which orphans these very tasks from the registry.
             user_data_dirs = self._claude_user_data_dirs()
             self._quit_claude_and_wait()
-            self._rewrite_scheduled_task_cwd()
+            # _fresh here too (2026-07-08): no code update happens in this flow
+            # today, so it behaves identically to the in-process call (safe
+            # fallback either way) — used unconditionally at every quit-heal-
+            # relaunch call site so this can never regress silently if that
+            # ever changes, rather than reasoning per call site about staleness.
+            self._rewrite_scheduled_task_cwd_fresh()
             self._relaunch_claude(user_data_dirs)
             time.sleep(8)  # let Claude reload the registry before we re-check
             if not self._scheduled_task_cwd_needs_fix():
