@@ -2,18 +2,28 @@
 """Feedback digest: distill human card decisions into learned_preferences.
 
 The scheduled half of the review-events feedback loop (see
-scripts/learned_preferences.py for the full loop). Per run:
+scripts/learned_preferences.py for the full loop). learned_preferences is a
+SINGLE install-wide block (2026-07-08), not one per project: events are
+still fetched and prompted per project (that's where the candidates/cards
+came from), but every project's digest writes into the same shared block, on
+the theory that what a reviewer is actually correcting (voice, quality bar,
+author-quality signals) is a fact about them, not about one product's
+audience. main() runs learned_preferences.migrate_to_global() once per tick
+(idempotent) to fold any pre-existing per-project blocks into the shared one.
+
+Per run:
 
   1. GET /api/v1/review-events?counts=true — which (project, platform) pairs
      have unprocessed events. The API scopes to this installation, so a
      customer box only ever digests its own user's decisions.
   2. For each project that exists in the local config.json: fetch the
-     unprocessed events, build a conservative digest prompt (current block +
-     events + approval counter-evidence), run Claude headless via
+     unprocessed events, build a conservative digest prompt (current shared
+     block + events + approval counter-evidence), run Claude headless via
      run_claude.sh (script_tag feedback-digest, cost-tracked like every other
      pipeline Claude call).
   3. Apply the returned mutation plan through
-     learned_preferences.apply_mutations() (whitelist, flock, backup, atomic).
+     learned_preferences.apply_mutations() (whitelist, flock, backup, atomic)
+     into the shared block.
   4. PATCH the events processed (processed_batch=digest-<ts>) so they are
      never digested twice. Events are marked processed even when the plan is
      "no changes" — a considered no-op is a completed digestion, not a retry.
@@ -180,9 +190,11 @@ def build_prompt(project: dict, events: list[dict], overall_events: list[dict] |
             f"{notes}"
         )
 
-    return f"""You maintain the learned_preferences block for the project "{project.get('name')}" in a social-posting pipeline. The block distills the user's own approve/reject decisions on draft cards into short standing preferences that steer future thread selection and drafting. It is SOFT guidance read by the drafting model, not a filter.
+    return f"""You maintain the SINGLE, install-wide learned_preferences block for this social-posting pipeline (shared across every configured project, not just "{project.get('name')}"). It distills the user's own approve/reject decisions on draft cards into short standing preferences that steer future thread selection and drafting across ALL projects. It is SOFT guidance read by the drafting model, not a filter.
 
-CURRENT learned_preferences:
+The events below all happened to come from project "{project.get('name')}"'s cards, but since the block is shared, only propose an entry that generalizes to a human reviewer's standing taste or quality bar (voice, tone, structural habits, author-quality signals, what counts as a good vs bad reply) — NOT something that is true only because of this one product's specific audience, niche, or content angle (e.g. "prefers accounts studying for nursing boards" belongs to one product's ICP, not to every project this reviewer runs). When the evidence is really project-specific, prefer NO change over forcing it into the shared block.
+
+CURRENT learned_preferences (shared by every project):
 {json.dumps({k: block[k] for k in ("audience_avoid", "audience_prefer", "thread_avoid", "draft_style_notes")}, indent=2)}
 
 CURRENT voice.never: {json.dumps(voice_never)}
@@ -203,6 +215,7 @@ Propose changes to the block. RULES, in priority order:
 5. bad_draft events feed draft_style_notes (or, ONLY for a clearly recurring phrasing complaint, voice_never_add / guardrails_do_not_add; use those sparingly, they touch curated fields).
 6. Each entry: one sentence, under 200 characters, plain language, no em dashes, no hashtags, understandable a month from now without these events.
 7. Respect the cap: at most {lp.MAX_ENTRIES_PER_LIST} entries per list. If a list is full, fold the new signal into an existing entry via remove+add.
+8. Scope check (this block is shared across every project): before proposing an entry, ask whether it would still make sense read from a totally different product's cards. If it only makes sense for "{project.get('name')}" specifically, don't add it.
 
 OUTPUT: a single JSON object, nothing else. Schema:
 {{"changes": {{"audience_avoid": {{"add": [], "remove": []}}, "audience_prefer": {{"add": [], "remove": []}}, "thread_avoid": {{"add": [], "remove": []}}, "draft_style_notes": {{"add": [], "remove": []}}}}, "voice_never_add": [], "guardrails_do_not_add": [], "block_authors": [{{"handle": "somehandle", "reason": "one short sentence citing the evidence"}}], "rationale": "one short sentence"}}
@@ -462,6 +475,21 @@ def main() -> int:
     except BlockingIOError:
         log("another digest run holds the lock; exiting")
         return 0
+
+    # One-time, idempotent move from per-project learned_preferences to the
+    # single learned_preferences_global block (2026-07-08). Runs on every
+    # digest tick everywhere (this operator's box AND every customer install,
+    # since this file ships in the same release); a config already migrated
+    # (no project carries the old key) is a fast no-op. Skipped in --dry-run
+    # since that mode promises to change nothing.
+    if not args.dry_run:
+        try:
+            mig = lp.migrate_to_global()
+            if mig.get("migrated"):
+                log(f"learned_preferences migrated to global: projects={mig.get('projects_merged')} "
+                    f"excluded={len(mig.get('excluded') or [])} dropped_at_cap={len(mig.get('dropped_at_cap') or [])}")
+        except Exception as e:
+            log(f"learned_preferences migration error (non-fatal): {e}")
 
     cfg = load_config()
     by_name = {p.get("name"): p for p in (cfg.get("projects") or [])}
