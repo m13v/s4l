@@ -2959,12 +2959,15 @@ class S4LMenuBar(rumps.App):
                 # Task registered + enabled but the host stopped launching it: the
                 # Claude Desktop warm-session wedge (finished worker sessions never
                 # exit; the overlap guard skips every fire) or an account-switch
-                # orphan. A full Claude restart fixes the wedge and is harmless
-                # otherwise, so it's the PRIMARY action; re-arm stays as fallback
-                # for the orphan case (Karol, 2026-07-06).
+                # orphan. _restart_claude_fix_work already runs the registry
+                # self-heal (ensure-worker/orphan repair) while Claude is down,
+                # before relaunching — so it covers BOTH known causes in one click.
+                # A separate "Set up draft schedule" button here would just be a
+                # redundant second way to do the same repair; every other ⚠ branch
+                # offers exactly one specific action, so this one does too
+                # (Karol, 2026-07-06; button consolidated 2026-07-08).
                 items.append(self._label("⚠ Drafts stopped — Claude’s scheduler is stuck"))
                 items.append(rumps.MenuItem("Restart Claude Desktop to fix", callback=self._restart_claude_fix))
-                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
