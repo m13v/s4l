@@ -54,6 +54,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import learned_preferences  # noqa: E402
+
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -67,6 +70,16 @@ TWEET_LIMIT = 280
 URL_WEIGHT = 23
 TWITTER_TEXT_BUDGET = TWEET_LIMIT - URL_WEIGHT  # 257 chars for everything but the URL
 _URL_RE = re.compile(r"https?://\S+")
+
+# The model is asked for the BRIDGE SENTENCE ONLY, never a rewrite of the
+# already-drafted reply (see build_prompt / main). These bound that sentence:
+# below MIN_BRIDGE_CHARS of budget there's no room to say anything meaningful
+# before the URL, so main() skips the Claude call and falls straight to a
+# mechanical concat; above MAX_BRIDGE_CHARS the model has ignored the
+# "sentence only" contract and is attempting a full rewrite, so the quality
+# gate rejects it as a structural violation, not a phrasing nitpick.
+MIN_BRIDGE_CHARS = 20
+MAX_BRIDGE_CHARS = 400
 
 
 def x_weighted_len(text: str) -> int:
@@ -115,28 +128,42 @@ def enforce_budget(text: str, link_url: str,
     return _trim_to_chars(text, limit), True
 
 
-def resolve_voice_relationship(project: str) -> str:
-    """Look up the matched project's `voice_relationship` field in config.json.
-
-    Returns "first_party" or "third_party". Defaults to "first_party" if the
-    project is missing or the field is absent, matching the historical
-    pre-2026-05-27 behavior so we never silently mute first-party voice.
-    The link_tail subprocess runs with --disallowed-tools that bans Read/Glob,
-    so the value must be resolved here in Python rather than inside the prompt.
+def _load_project_entry(project: str) -> dict:
+    """Load the matched project's raw config.json entry (case-insensitive
+    name match), or {} if config.json is unreadable or the project is
+    missing. Shared by voice_relationship + learned_preferences lookups so
+    both read config.json once via the same path. The link_tail subprocess
+    runs with --disallowed-tools that bans Read/Glob/MCP, so these values
+    must be resolved here in Python and handed to the prompt as plain text.
     """
     try:
         with open(CONFIG_PATH, "r") as f:
             cfg = json.load(f)
     except Exception:
-        return "first_party"
+        return {}
     name_lc = (project or "").lower()
     for p in cfg.get("projects", []):
         if (p.get("name") or "").lower() == name_lc:
-            val = (p.get("voice_relationship") or "").strip().lower()
-            if val in ("first_party", "third_party"):
-                return val
-            return "first_party"
-    return "first_party"
+            return p
+    return {}
+
+
+def resolve_voice_relationship(project_entry: dict) -> str:
+    """Returns "first_party" or "third_party" from the project's
+    `voice_relationship` field. Defaults to "first_party" if the field is
+    absent, matching the historical pre-2026-05-27 behavior so we never
+    silently mute first-party voice."""
+    val = (project_entry.get("voice_relationship") or "").strip().lower()
+    return val if val in ("first_party", "third_party") else "first_party"
+
+
+def resolve_learned_preferences_block(project_entry: dict) -> str:
+    """Render this project's learned_preferences (draft_style_notes,
+    edit_examples, audience/thread avoid-prefer) via the shared
+    learned_preferences.prompt_block() renderer — the same text the main
+    drafting prompt embeds. Empty string when the block is disabled or has
+    no entries yet."""
+    return learned_preferences.prompt_block(project_entry)
 
 # Paths to the Claude Code CLI in order of preference. run_claude.sh resolves
 # `claude` from PATH; we fall back to a direct nvm path if PATH lookup fails
@@ -169,17 +196,28 @@ def resolve_claude_cli() -> str:
 
 def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
                  project: str, platform: str,
-                 voice_relationship: str = "first_party") -> str:
-    """Compose the one-shot prompt for the bridge sentence.
+                 voice_relationship: str = "first_party",
+                 learned_prefs_block: str = "",
+                 bridge_budget: int | None = None) -> str:
+    """Compose the one-shot prompt for the bridge sentence ONLY.
 
-    Kept tight on purpose: the model gets only the four pieces of context it
-    needs, plus a precise output contract. No tools, no MCP, no file access.
+    The model is never asked to reproduce or rewrite the reply already
+    drafted; it's shown that text for context and told explicitly not to
+    repeat it. main() appends whatever comes back to the UNMODIFIED
+    reply_text in Python afterward — the model's output is never substituted
+    for the drafted reply, only concatenated after it, so it structurally
+    cannot rewrite the drafted body regardless of what it outputs.
 
     `voice_relationship` ("first_party" | "third_party") is resolved by the
     caller from config.json and selects the example sentences + voice rule
     embedded in the prompt. third_party projects (Agora, Runner, Podlog,
     studyly, NightOwl, PieLine as of 2026-05-27) MUST be referred to in
     third-person; first_party projects own the "we ship / we built" voice.
+
+    `learned_prefs_block` is the project's rendered learned_preferences
+    (learned_preferences.prompt_block()), the same distilled human-review
+    feedback the main drafting prompt treats as mandatory; empty when the
+    project has no notes yet.
     """
     if voice_relationship == "third_party":
         voice_rule = (
