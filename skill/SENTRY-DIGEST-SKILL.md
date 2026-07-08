@@ -207,9 +207,14 @@ If issues were skipped due to the Step 3 cap, list them at the end under
 "Also new/growing, not investigated this run" with shortId, count, installs,
 link only (no diagnosis).
 
-Write the body to a temp file, then send:
+Write the body to a temp file, then send. Use `/opt/homebrew/bin/python3.11`
+explicitly, not bare `python3`: the google-auth/googleapiclient deps this
+script needs are not guaranteed to be on whatever `python3` resolves to in a
+spawned session's PATH (hit this exact failure, "No module named 'google'",
+on 2026-07-07; `/opt/homebrew/bin/python3.11` is the confirmed-good
+interpreter with the full Gmail deps installed).
 ```bash
-python3 scripts/send_gmail_report.py \
+/opt/homebrew/bin/python3.11 scripts/send_gmail_report.py \
   --to "i@m13v.com" \
   --subject "$SUBJECT" \
   --body-file /tmp/sentry-digest-body.txt
