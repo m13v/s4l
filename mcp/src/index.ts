@@ -1862,7 +1862,9 @@ tool(
     // persona is seeded. (2026-06-30) Skipped when promotion-only, since the
     // product project isn't configured yet (it stays gated until project_config).
     let kickerInstall: { ok: boolean; detail: string } | null = null;
-    if (personalBrand) {
+    if (personalBrand && isPaused()) {
+      kickerInstall = { ok: false, detail: "skip (paused)" };
+    } else if (personalBrand) {
       try {
         kickerInstall = await ensureQueueKickerInstalled();
         console.error(
@@ -2412,7 +2414,9 @@ tool(
       // persona-aware, so calling it from both setup paths is safe. Best-effort:
       // a kicker hiccup never fails setup. (2026-06-30)
       let kickerInstall: { ok: boolean; detail: string } | null = null;
-      if (result.ready) {
+      if (result.ready && isPaused()) {
+        kickerInstall = { ok: false, detail: "skip (paused)" };
+      } else if (result.ready) {
         try {
           kickerInstall = await ensureQueueKickerInstalled();
           console.error(
