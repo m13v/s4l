@@ -43,6 +43,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -306,6 +307,21 @@ class Harness:
                 ctx.add_init_script(script)
             except Exception:
                 pass
+            # The overlay shares this CDP session with the real twitter-harness
+            # automation. When x.com throws up a native JS dialog, both clients'
+            # Playwright drivers race to auto-dismiss it (the default behavior
+            # when no listener is registered); the loser gets a
+            # "Page.handleJavaScriptDialog: No dialog is showing" protocol error
+            # that is an UNCAUGHT rejection in the Node driver, killing that
+            # whole driver process. A no-op listener opts this connection out of
+            # the race entirely (dialog handling stays the automation's job);
+            # once the driver's default-dismiss is suppressed here, evaluate()
+            # calls on the affected page resume normally as soon as the other
+            # side clears the dialog.
+            try:
+                ctx.on("dialog", lambda dialog: None)
+            except Exception:
+                pass
 
     def paint(self, title: str, reassure: str, status: str) -> int:
         """Paint/refresh the overlay on every live page. Returns pages touched."""
@@ -473,11 +489,40 @@ def cmd_watch(interval: float = 2.0) -> int:
     # Treat SIGTERM (launchd unload, `kill`) like Ctrl-C so the overlay is
     # cleared on the way out instead of lingering until the next navigation.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    # Hard watchdog: a wedged CDP call (e.g. a page whose JS is paused on a
+    # native dialog) can block the loop body indefinitely without ever raising,
+    # so the normal try/except reconnect logic below never gets a chance to
+    # run. That let a past incident spin a full core for ~3.5 hours with the
+    # overlay silently stuck instead of failing loudly. A background thread
+    # that self-terminates the process if the main loop hasn't ticked in too
+    # long is the only thing that reliably fires even when the main thread is
+    # stuck inside a blocking Playwright/CDP call; os._exit() skips Python-level
+    # cleanup on purpose since a stuck process can't be trusted to run it
+    # either. launchd's KeepAlive relaunches a clean instance immediately.
+    WATCHDOG_MAX_STALL_SEC = 60.0
+    _last_tick = {"t": time.time()}
+
+    def _watchdog() -> None:
+        while True:
+            time.sleep(10)
+            stalled = time.time() - _last_tick["t"]
+            if stalled > WATCHDOG_MAX_STALL_SEC:
+                print(
+                    f"[watchdog] loop stalled {stalled:.0f}s (>{WATCHDOG_MAX_STALL_SEC:.0f}s); "
+                    "self-terminating for a clean launchd restart",
+                    file=sys.stderr,
+                )
+                os._exit(1)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+
     last_status = None
     h: Harness | None = None
     registered = False
     try:
         while True:
+            _last_tick["t"] = time.time()
             # Never let status computation (log globbing/stat, all racing against
             # live log rotation) kill the watcher; fall back to a neutral status.
             try:
