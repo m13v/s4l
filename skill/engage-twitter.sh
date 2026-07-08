@@ -369,7 +369,7 @@ MANDATORY reply flow for every item:
                     this reply: python3 reply_db.py skipped ID "author_blocked_us"
                     Then hard-block the author so future items from them are
                     never drafted (same mechanism as the escape hatch above):
-                      python3 \$REPO_DIR/scripts/reply_db.py blocklist add x HANDLE \\
+                      python3 $REPO_DIR/scripts/reply_db.py blocklist add x HANDLE \\
                         --reason "X reported this author has blocked our account (live reply attempt, engage-twitter)" \\
                         --classification blocked_by_author \\
                         --added-by block_probe \\
