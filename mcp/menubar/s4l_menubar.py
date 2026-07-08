@@ -2937,21 +2937,29 @@ class S4LMenuBar(rumps.App):
         # When the schedule IS firing (ok), attention is False and nothing shows here
         # — a firing autopilot reads as healthy even if no draft has drained yet.
         if attention:
+            # Exactly ONE clickable action per ⚠ scenario, always — never stack a
+            # specific fix next to the universal "Diagnose & fix" escape hatch.
+            # Each branch below picks whichever single action is most relevant:
+            # a known mechanical fix when one exists, or Diagnose when it doesn't
+            # (2026-07-08, replacing the old "specific fix + Diagnose" pattern that
+            # showed 2-3 buttons at once and confused which one to click).
             if self._stall_reason_info[0] == "rate_limited":
                 # Routines fire but every run dies on a Claude rate limit (429).
-                # Re-arm can't fix this, so don't offer it — just say what's wrong.
+                # Re-arm/restart can't fix this — Diagnose is the one relevant action.
                 items.append(self._label("⚠ Claude rate-limited — drafts can’t run"))
                 items.append(self._label(
                     "   " + (self._stall_reason_info[1] or "wait for reset or switch account")
                 ))
+                items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
             elif self._stall_reason_info[0] == "draft_stuck":
                 # Routines fire and the producer keeps narrating "drafting" but the
-                # worker keeps getting killed mid-run / never returns a result. Don't
-                # offer Re-arm (routines are fine); state the real problem.
+                # worker keeps getting killed mid-run / never returns a result.
+                # Re-arm/restart can't fix this either — Diagnose is the one action.
                 items.append(self._label("⚠ Draft not completing — worker keeps getting killed"))
                 items.append(self._label(
                     "   " + (self._stall_reason_info[1] or "drafting") + " — no result yet"
                 ))
+                items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
             elif schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
@@ -2961,20 +2969,13 @@ class S4LMenuBar(rumps.App):
                 # exit; the overlap guard skips every fire) or an account-switch
                 # orphan. _restart_claude_fix_work already runs the registry
                 # self-heal (ensure-worker/orphan repair) while Claude is down,
-                # before relaunching — so it covers BOTH known causes in one click.
-                # A separate "Set up draft schedule" button here would just be a
-                # redundant second way to do the same repair; every other ⚠ branch
-                # offers exactly one specific action, so this one does too
-                # (Karol, 2026-07-06; button consolidated 2026-07-08).
+                # before relaunching — so it covers both known causes in one click,
+                # making it the one relevant action here (Karol, 2026-07-06).
                 items.append(self._label("⚠ Drafts stopped — Claude’s scheduler is stuck"))
                 items.append(rumps.MenuItem("Restart Claude Desktop to fix", callback=self._restart_claude_fix))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
-            # Universal escape hatch for EVERY persistent ⚠ (the draft_stuck and
-            # rate_limited branches previously dead-ended with labels only): hand
-            # Claude a diagnose-and-heal prompt that also reports back to us.
-            items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
             items.append(rumps.separator)
 
         if not runtime_ready:
