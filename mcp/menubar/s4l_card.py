@@ -1383,13 +1383,13 @@ class _ReviewController(NSObject):
                     print(f"DEBUG slot={slot} layer is None")
                     continue
                 if slot == self._selected_draft:
-                    layer.setBorderWidth_(2.0)
-                    layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
-                    print(f"DEBUG slot={slot} SELECTED set width=2.0 accent")
+                    layer.setBorderWidth_(8.0)
+                    layer.setBorderColor_(NSColor.redColor().CGColor())
+                    print(f"DEBUG slot={slot} SELECTED set width=8.0 RED layer={layer}")
                 else:
-                    layer.setBorderWidth_(1.0)
-                    layer.setBorderColor_(NSColor.separatorColor().CGColor())
-                    print(f"DEBUG slot={slot} plain set width=1.0 separator")
+                    layer.setBorderWidth_(8.0)
+                    layer.setBorderColor_(NSColor.blueColor().CGColor())
+                    print(f"DEBUG slot={slot} plain set width=8.0 BLUE layer={layer}")
             except Exception as e:
                 import traceback
                 print(f"DEBUG EXCEPTION slot={slot}: {e}")
