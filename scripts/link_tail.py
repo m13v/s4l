@@ -13,6 +13,15 @@ Haiku) that:
   4. Writes 1 short bridge sentence that names a concrete benefit and
      ends with the URL — no period after, no "click here".
 
+APPEND-ONLY, deterministically (2026-07-07): the model is asked for the
+bridge sentence ONLY, never the full reply. main() concatenates it onto the
+UNMODIFIED reply_text in Python, so the model's output is never substituted
+for the drafted reply, only appended after it — it cannot rewrite the
+drafted body no matter what it returns. The bridge prompt also embeds the
+matched project's learned_preferences (draft_style_notes / edit_examples,
+same as the main drafting prompt) so human-review feedback reaches the
+bridge sentence too, not just the initial draft.
+
 Why not Haiku: bridge writing requires reading two pieces of context (thread
 + our reply) and producing language that doesn't read as bolted-on. The
 cheap model fails this; tested via the existing studyly Twitter dataset
