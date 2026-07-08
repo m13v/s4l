@@ -262,22 +262,48 @@ def main() -> int:
     plan_obj = {"candidates": merged}
     if plan_created_at:
         plan_obj["created_at"] = plan_created_at
-    _atomic_write(dst, plan_obj)
-    ensure_store_symlink()
 
-    # Refresh the review-request marker the menu bar polls (count = pending, not posted).
-    pending = len([c for c in merged if not c.get("posted")])
-    project = ns.project or batch.get("project") or (new_cands[0].get("matched_project") if new_cands else None)
-    _atomic_write(
-        review_request_path(),
-        {
-            "batch_id": REVIEW_QUEUE_ID,
-            "project": project,
-            "count": pending,
-            "plan_path": dst,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        },
-    )
+    # This is the actual delivery: if anything below throws, the cycle's drafts
+    # were computed but never reached the store the menu bar reads, and the
+    # wrapper (run-draft-and-publish.sh) captures this process's whole stdout+
+    # stderr with `|| true`, so a crash here previously vanished into a local
+    # log nothing central reads — the exact blind spot that cost the 2026-07-08
+    # Karol investigation its root cause. Report it like any other handled
+    # pipeline failure (see twitter_post_plan.py's post-failure capture).
+    try:
+        _atomic_write(dst, plan_obj)
+        ensure_store_symlink()
+
+        # Refresh the review-request marker the menu bar polls (count = pending, not posted).
+        pending = len([c for c in merged if not c.get("posted")])
+        project = ns.project or batch.get("project") or (new_cands[0].get("matched_project") if new_cands else None)
+        _atomic_write(
+            review_request_path(),
+            {
+                "batch_id": REVIEW_QUEUE_ID,
+                "project": project,
+                "count": pending,
+                "plan_path": dst,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
+    except Exception as e:
+        print(f"[merge_review_queue] delivery failed (drafts NOT merged into cards): {e}", file=sys.stderr)
+        try:
+            import sentry_init
+
+            sentry_init.init()
+            sentry_init.capture_message(
+                f"merge_review_queue delivery failed: {e}",
+                level="error",
+                tags={"component": "merge_review_queue", "added": str(added)},
+                extra={"plan_src": src},
+            )
+            sentry_init.flush(2.0)
+        except Exception:
+            pass
+        return 1
+
     print(
         f"[merge_review_queue] merged {added} new draft(s) into {REVIEW_QUEUE_ID} "
         f"({pending} pending total) from {os.path.basename(src)}",
