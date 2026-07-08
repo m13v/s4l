@@ -1433,8 +1433,6 @@ class _ReviewController(NSObject):
             body = re.sub(r"[ \t]{2,}", " ", text).strip()
         else:
             body = orig
-        rec_idx = d.get("recommended_draft_index")
-        rec_idx = rec_idx if rec_idx in (0, 1) else 0
         self._decisions.append(
             {
                 "n": d["n"],
@@ -1463,12 +1461,13 @@ class _ReviewController(NSObject):
                 # stay in the ORIGINAL language (that is what posts).
                 "language": d.get("language"),
                 # Two-draft cards: which draft ("a"|"b") was showing when this
-                # decision was made, its 0/1 index, and whether that matches
-                # the model's own recommendation. None/False on single-draft
-                # candidates. Kept separate from `edited` above by design.
+                # decision was made, its 0/1 index, and whether it was the
+                # fixed default (Draft A / slot 0) rather than a reviewer
+                # switch to Draft B. None/False on single-draft candidates.
+                # Kept separate from `edited` above by design.
                 "draft_variant": draft_variant,
                 "draft_index": sel_idx,
-                "draft_auto_selected": bool(dual and sel_idx is not None and sel_idx == rec_idx),
+                "draft_auto_selected": bool(dual and sel_idx == 0),
             }
         )
         self._last_decision_at = time.time()
