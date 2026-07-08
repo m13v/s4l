@@ -4233,8 +4233,8 @@ async function ensureUpdaterInstalled(): Promise<{ ok: boolean; detail: string }
 //   'disabled' — present but a worker task is disabled.
 //   'missing'  — not firing anywhere (orphaned / not registered for the live
 //                account) -> dashboard offers "Set up draft schedule".
-// The algorithm (live-account detection by freshest lastRunAt, firing window,
-// etc.) lives in ONE place: scripts/schedule_state.py. The Python menu bar imports
+// The algorithm (live-account detection via config.json's lastKnownAccountUuid,
+// firing window, etc.) lives in ONE place: scripts/schedule_state.py. The Python menu bar imports
 // that module in-process; we shell out to it here. Keeping a single implementation
 // is the whole point — the two surfaces can no longer drift. The script is
 // stdlib-only and resolvePython() falls back to system python3, so this works even
