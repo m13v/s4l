@@ -1748,9 +1748,17 @@ Project match: $cproject${DRAFT_LINE}${AUTHOR_HISTORY_LINE}
 done <<< "$CANDIDATES"
 
 ALL_PROJECTS_JSON=$(python3 -c "
-import json, os
+import json, os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+import learned_preferences as lp
 config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 projects = config.get('projects', [])
+# learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
+# scripts/learned_preferences.py), not one per project. Computed once here
+# and stamped onto every emitted project dict under the same key so the
+# existing DRAFT_DIRECTIVE prose ('The matched project's learned_preferences
+# block in ALL_PROJECTS_JSON is MANDATORY...') keeps working unchanged.
+global_lp = lp.get_global_block(config)
 lane = os.environ.get('S4L_ACTIVE_LANE', '')
 if lane == 'personal_brand':
     # Personal-brand lane is pure organic growth: the drafter must NOT see any
@@ -1773,10 +1781,17 @@ if lane == 'personal_brand':
     persona = next((p for p in projects if p.get('persona') is True), None)
     out = {}
     if persona:
-        out[persona['name']] = {k: v for k, v in persona.items() if k in ALLOWED}
+        entry = {k: v for k, v in persona.items() if k in ALLOWED}
+        entry['learned_preferences'] = global_lp
+        out[persona['name']] = entry
     print(json.dumps(out, indent=2))
 else:
-    print(json.dumps({p['name']: p for p in projects}, indent=2))
+    out = {}
+    for p in projects:
+        entry = dict(p)
+        entry['learned_preferences'] = global_lp
+        out[p['name']] = entry
+    print(json.dumps(out, indent=2))
 " 2>/dev/null || echo "{}")
 
 # Engagement-style picker (2026-05-19): pick ONE assigned style for this
@@ -2069,13 +2084,15 @@ log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)...
 CLAUDE_SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 export CLAUDE_SESSION_ID
 
-# PREP_SCHEMA — strict JSON schema for the prep envelope. Includes
-# optional `new_style` per candidate (an inner object) that the model
-# MUST populate when it chooses a brand-new engagement style name (i.e.
-# the picker set mode=invent and the model invented a snake_case name).
-# Fields mirror engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the
-# downstream validate_or_register call accepts the block without a
-# second schema layer.
+# PREP_SCHEMA — strict JSON schema for the prep envelope. Two-draft cards
+# (2026-07-07): each candidate carries draft_a_* / draft_b_* (one per
+# assigned style) instead of a single reply_text/engagement_style, plus
+# recommended_draft (a|b) and is_reused_draft. Includes optional
+# `draft_a_new_style` / `draft_b_new_style` per candidate (inner objects) that
+# the model MUST populate when that slot's picker set mode=invent and it
+# invented a snake_case name. Fields mirror
+# engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the downstream
+# validate_or_register call accepts the block without a second schema layer.
 PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"is_reused_draft":{"type":"boolean"},"draft_a_text":{"type":"string"},"draft_a_style":{"type":"string"},"draft_a_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_a_text_en":{"type":["string","null"]},"draft_b_text":{"type":["string","null"]},"draft_b_style":{"type":["string","null"]},"draft_b_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_b_text_en":{"type":["string","null"]},"recommended_draft":{"type":"string","enum":["a","b"]},"language":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","is_reused_draft","recommended_draft","draft_a_text","draft_a_style","draft_b_text","draft_b_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
@@ -2343,6 +2360,46 @@ except Exception as _e:
     print(f'prep: experiments stamp failed: {_e}', file=sys.stderr)
 for _c in candidates:
     _c['experiments'] = dict(_exps)
+    # Two-draft cards (2026-07-07): mirror the RECOMMENDED draft onto the
+    # canonical single-draft fields (reply_text/engagement_style/new_style/
+    # reply_text_en/assigned_style/assigned_mode) so every existing downstream
+    # consumer (tail-link baking, dedup, translations, posting, drift
+    # coercion) keeps working unchanged by default. Additionally attach a
+    # 'drafts' array + 'recommended_draft_index' for the review card to offer
+    # a switch; reused/stale candidates (single draft, no draft_b) don't get
+    # a drafts array, so the card falls back to today's single-draft UI.
+    _rec = _c.get('recommended_draft') if _c.get('recommended_draft') in ('a', 'b') else 'a'
+    _is_reused = bool(_c.get('is_reused_draft'))
+    _rec_text = _c.get(f'draft_{_rec}_text') or ''
+    _rec_style = _c.get(f'draft_{_rec}_style') or ''
+    _rec_new_style = _c.get(f'draft_{_rec}_new_style')
+    _rec_text_en = _c.get(f'draft_{_rec}_text_en')
+    _c['reply_text'] = _rec_text
+    _c['engagement_style'] = _rec_style
+    _c['new_style'] = _rec_new_style
+    if _rec_text_en:
+        _c['reply_text_en'] = _rec_text_en
+    _c['assigned_style'] = ('$PICKED_STYLE' or None) if _rec == 'a' else ('$PICKED_STYLE_B' or None)
+    _c['assigned_mode'] = ('$PICKED_MODE' or 'use') if _rec == 'a' else ('$PICKED_MODE_B' or 'use')
+    _draft_b_text = _c.get('draft_b_text')
+    if not _is_reused and _draft_b_text:
+        _c['drafts'] = [
+            {
+                'variant': 'a', 'text': _c.get('draft_a_text') or '',
+                'style': _c.get('draft_a_style') or '',
+                'text_en': _c.get('draft_a_text_en'),
+                'assigned_style': '$PICKED_STYLE' or None,
+                'assigned_mode': '$PICKED_MODE' or 'use',
+            },
+            {
+                'variant': 'b', 'text': _draft_b_text,
+                'style': _c.get('draft_b_style') or '',
+                'text_en': _c.get('draft_b_text_en'),
+                'assigned_style': '$PICKED_STYLE_B' or None,
+                'assigned_mode': '$PICKED_MODE_B' or 'use',
+            },
+        ]
+        _c['recommended_draft_index'] = 0 if _rec == 'a' else 1
 json.dump({'candidates': candidates,
            'session_id': '$CLAUDE_SESSION_ID',
            'assigned_style': '$PICKED_STYLE' or None,
@@ -2442,6 +2499,45 @@ GEN_EXIT=${PIPESTATUS[0]:-1}
 if [ "$GEN_EXIT" -ne 0 ]; then
     log "WARN: twitter_gen_links.py exited $GEN_EXIT, continuing with whatever links it set (per-candidate fallback to plain project URL on gen failure)."
 fi
+
+# Two-draft cards: twitter_gen_links.py (above, locked/untouched) bakes the
+# tail link into reply_text in place for the RECOMMENDED draft only, it never
+# looks at the 'drafts' array. Sync the same suffix onto the non-recommended
+# draft so switching to it on the review card still posts with the link.
+# link_tail.py's apply_tail_link is documented APPEND-ONLY (concatenates the
+# bridge sentence onto the unmodified reply_text, never rewrites it), so
+# diffing the appended suffix and re-applying it verbatim is safe.
+python3 -c "
+import json
+plan_path = '$PLAN_FILE'
+try:
+    with open(plan_path) as f:
+        plan = json.load(f)
+except Exception as e:
+    print(f'[gen] drafts-link-sync: plan read failed: {e}')
+    raise SystemExit(0)
+changed = 0
+for c in plan.get('candidates') or []:
+    drafts = c.get('drafts')
+    if not isinstance(drafts, list) or len(drafts) != 2:
+        continue
+    rec_idx = c.get('recommended_draft_index')
+    rec_idx = rec_idx if rec_idx in (0, 1) else 0
+    other_idx = 1 - rec_idx
+    rec_draft = drafts[rec_idx]
+    other_draft = drafts[other_idx]
+    baked = (c.get('reply_text') or '')
+    original = (rec_draft.get('text') or '')
+    if baked and original and baked != original and baked.startswith(original):
+        suffix = baked[len(original):]
+        rec_draft['text'] = baked
+        other_draft['text'] = (other_draft.get('text') or '') + suffix
+        changed += 1
+if changed:
+    with open(plan_path, 'w') as f:
+        json.dump(plan, f, indent=2)
+print(f'[gen] drafts-link-sync: synced tail link onto the non-recommended draft for {changed} candidate(s)')
+" 2>&1 | tee -a "$LOG_FILE"
 
 # --- DRAFT_ONLY gate: stop after drafting for human review (MCP manual mode) -
 # When DRAFT_ONLY=1 the cycle runs scan -> score -> draft -> link-gen, leaves the
