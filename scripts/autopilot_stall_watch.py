@@ -201,6 +201,25 @@ def _oldest_pending_age() -> float | None:
     return time.time() - oldest
 
 
+def _pending_count() -> int:
+    """Number of unclaimed pending draft jobs across all types. Cheap: same glob
+    shape as _oldest_pending_age, just counted instead of min'd. Feeds the
+    queue_health_samples row (see _report_queue_health_sample)."""
+    pend_root = os.path.join(_queue_root(), "pending")
+    n = 0
+    for sub in glob.glob(os.path.join(pend_root, "*")):
+        for jf in glob.glob(os.path.join(sub, "*.json")):
+            if not jf.endswith(".tmp"):
+                n += 1
+    return n
+
+
+def _running_count() -> int:
+    """Number of claimed-but-unfinished jobs. See _pending_count."""
+    run_root = os.path.join(_queue_root(), "running")
+    return sum(1 for jf in glob.glob(os.path.join(run_root, "*.json")) if not jf.endswith(".tmp"))
+
+
 def _oldest_running_age() -> float | None:
     """Seconds since the oldest CLAIMED-but-unfinished job was written, or None if
     nothing is in flight. A worker claims by moving a job pending/ -> running/ and
@@ -286,6 +305,47 @@ def _report_recovery(total_duration_s: float, paged_duration_s: float | None) ->
         sys.stderr.write(f"[stall-watch] recovered after {total_duration_s:.0f}s but Sentry report failed\n")
 
 
+def _report_queue_health_sample(
+    pending: int,
+    running: int,
+    timeouts: int,
+    age: float | None,
+    run_age: float | None,
+    stalled: bool,
+    batches_stuck: bool,
+) -> None:
+    """Best-effort POST of one queue_health_samples row, on EVERY tick (not
+    just while stalled) — a continuous baseline is the point: it's what makes
+    "was this box actually healthy at time T" a one-line SQL query instead of
+    absence-of-evidence. See migrations/2026-07-07-queue-health-samples.sql.
+
+    Catches BaseException, not just Exception — see _recent_batches_not_progressing
+    for why (http_api._request raises SystemExit on a terminal 4xx/5xx, which
+    must never be allowed to kill this watchdog process)."""
+    try:
+        repo = os.environ.get("S4L_REPO_DIR")
+        if repo:
+            scripts_dir = os.path.join(repo, "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+        import http_api  # noqa: E402
+
+        http_api.api_post(
+            "/api/v1/queue-health-samples",
+            {
+                "pending": pending,
+                "running": running,
+                "consecutive_timeouts": timeouts,
+                "oldest_pending_age_s": int(age) if age is not None else None,
+                "oldest_running_age_s": int(run_age) if run_age is not None else None,
+                "stalled": stalled,
+                "batches_stuck": batches_stuck,
+            },
+        )
+    except BaseException:
+        pass
+
+
 def main() -> int:
     age = _oldest_pending_age()
     run_age = _oldest_running_age()
@@ -312,6 +372,11 @@ def main() -> int:
     # episode resets and a LATER real stall (orphaned routines) still alerts.
     if stalled and _recent_rate_limit():
         stalled = False
+
+    # Record this tick regardless of outcome — see _report_queue_health_sample.
+    _report_queue_health_sample(
+        _pending_count(), _running_count(), timeouts, age, run_age, stalled, batches_stuck
+    )
 
     st = _read_state()
     consecutive = int(st.get("consecutive", 0))
