@@ -920,6 +920,12 @@ def _attempt_claim(ns, qtype: str) -> bool:
 
 def cmd_next(ns) -> int:
     _apply_state_dir_override(ns)
+    # S4L paused (mcp/src/index.ts pauseAutopilot): report no work instead of
+    # claiming a job, so an already-queued draft can't drain/post while paused
+    # even though the scheduled task worker still fires on its own cadence.
+    if os.path.exists(os.path.join(state_dir(), "paused.flag")):
+        print(json.dumps({}))
+        return 0
     qtype = ns.type
     wait_seconds = max(0, ns.wait_seconds or 0)
     # wait_seconds=0 (default) is the legacy single-shot behavior: one pass,
