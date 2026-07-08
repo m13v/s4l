@@ -224,6 +224,14 @@ MENUBAR_PLIST = os.path.join(
 # start actions (restart_menubar tool, queue_setup re-arm). Keep the filename in
 # sync with MENUBAR_STOP_FLAG in mcp/src/runtime.ts.
 STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
+# Pause sentinel (lighter than STOP_FLAG): while present, the pipeline daemons
+# (kicker/reaper/stall-watch/memory-snapshot) stay unloaded and claude_job.py's
+# `next` reports no work — but Claude Desktop, this tray, and the draft
+# schedule registration are untouched. Written/cleared ONLY by the MCP's
+# pause_autopilot tool (see _pause_work below); this constant is read-only
+# here, purely to render the menu label. Keep the filename in sync with
+# pauseFlagPath() in mcp/src/index.ts.
+PAUSE_FLAG = os.path.join(st.state_dir(), "paused.flag")
 
 # Autopilot scheduled tasks. Queue workers must RUN in a dedicated folder
 # (~/.s4l-worker) so their once-a-minute sessions don't flood the user's
@@ -1125,6 +1133,47 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
         return False
+
+    def _pause_toggle(self, _=None):
+        """Pause/Resume: the lighter, fully reversible alternative to Quit. Stops
+        S4L's own scan/draft/post pipeline (the launchd kicker + its support
+        daemons) while leaving Claude Desktop, this tray, and the draft
+        schedule registration alone — nothing is deleted, so it survives a
+        Claude restart and Resume brings it right back. The real work
+        (launchctl bootout/bootstrap) needs to happen where the daemons are
+        defined, so this calls through the MCP's pause_autopilot tool over the
+        same loopback the tray already uses for other tool calls; it does NOT
+        duplicate the launchctl logic here."""
+        action = "resume" if os.path.exists(PAUSE_FLAG) else "pause"
+        self._notify("S4L", "Resuming…" if action == "resume" else "Pausing…")
+        threading.Thread(target=self._pause_work, args=(action,), daemon=True).start()
+
+    def _pause_work(self, action):
+        res = st.loopback_tool("pause_autopilot", {"action": action})
+        if res is None:
+            self._notify(
+                "S4L",
+                f"Couldn't reach S4L to {action} — make sure Claude Desktop is running.",
+            )
+            return
+        ok = bool(res.get("ok"))
+        if action == "pause":
+            self._notify(
+                "S4L",
+                "S4L paused. Drafting and posting are stopped; Claude and the tray "
+                "stay up. Click Resume S4L to start again."
+                if ok else "Couldn't fully pause S4L — see logs.",
+            )
+        else:
+            self._notify(
+                "S4L", "S4L resumed." if ok else "Couldn't fully resume S4L — see logs."
+            )
+        self._sig = None
+        try:
+            self._tick(None)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] pause toggle rebuild failed: {e}\n")
+            sys.stderr.flush()
 
     def _quit_app(self, _=None):
         """The single Quit path. Quitting stops the autopilot completely: the
