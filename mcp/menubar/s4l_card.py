@@ -1403,13 +1403,18 @@ class _ReviewController(NSObject):
         try:
             tv = notification.object()
         except Exception:
+            print("DEBUG textViewDidChangeSelection_ exception getting object", flush=True)
             return
+        print(f"DEBUG textViewDidChangeSelection_ tv={tv} selected={self._selected_draft} textviews={self._draft_textviews}", flush=True)
         for slot, cand_tv in (self._draft_textviews or {}).items():
             if cand_tv is tv and slot != self._selected_draft:
                 self._selected_draft = slot
                 self._textview = cand_tv
                 self._update_draft_borders()
+                print(f"DEBUG switched to slot={slot}", flush=True)
                 break
+        else:
+            print("DEBUG no matching slot found (or already selected)", flush=True)
 
     @objc.python_method
     def _update_draft_borders(self):
