@@ -2467,6 +2467,7 @@ class S4LMenuBar(rumps.App):
             attention,
             schedule_state,
             self._stall_reason_info,
+            os.path.exists(PAUSE_FLAG),
         )
         if sig != self._sig:
             self._sig = sig
@@ -3025,6 +3026,16 @@ class S4LMenuBar(rumps.App):
         if self._reloc_needed and not self._relocating:
             items.append(rumps.separator)
             items.append(rumps.MenuItem("Tidy autopilot history…", callback=self._prompt_relocate_tasks))
+        items.append(rumps.separator)
+        # Pause: the lighter, fully reversible alternative to Quit below — stops
+        # drafting/posting but leaves Claude Desktop, this tray, and the draft
+        # schedule alone. See _pause_toggle.
+        if os.path.exists(PAUSE_FLAG):
+            items.append(self._label("⏸ S4L is paused — drafting & posting stopped"))
+            items.append(rumps.MenuItem("Resume S4L", callback=self._pause_toggle))
+        else:
+            items.append(rumps.MenuItem("Pause S4L", callback=self._pause_toggle))
+            items.append(self._label("   stop drafting/posting, keep Claude + tray running"))
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=self._quit_app))
