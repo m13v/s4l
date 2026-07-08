@@ -7,27 +7,41 @@ schedule state from HERE so the two surfaces can never drift. Previously the sam
 ~40-line algorithm was hand-maintained in both languages.
 
 The data source is the host's scheduled-task registries on disk:
-  ~/Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json
+  ~/Library/Application Support/Claude/claude-code-sessions/<account-uuid>/*/scheduled-tasks.json
 A complete worker set must be present: the universal s4l-worker task (or its short-lived
 staging predecessor saps-worker), or the
 legacy pair (saps-phase1-query + saps-phase2b-draft) on pre-universal installs.
-The LIVE account is the registry whose tasks have the freshest lastRunAt (only
-the active account's scheduler advances it, so this is robust across the
-session-id churn that Claude restarts cause).
+The LIVE account for each Claude* root is read from THAT root's config.json ->
+lastKnownAccountUuid (see _active_registry_glob_patterns) — NOT inferred by
+picking whichever registry has the freshest lastRunAt. An account switch
+leaves the previous account's scheduled-tasks.json sitting untouched on disk
+under its OWN account-uuid directory; picking "freshest lastRunAt across every
+account this machine has ever logged into" can pick that orphaned registry
+right back up and read a genuinely missing schedule (zero tasks for the
+account actually logged in) as merely 'stalled' (found 2026-07-08: a box's
+active account had NO scheduled-tasks.json anywhere, while a different,
+no-longer-active account's directory still had s4l-worker enabled with a
+lastRunAt from hours earlier — every "just restart Claude" attempt was
+guaranteed to do nothing, because there was never anything registered for the
+account that was actually running).
 
 States:
   'ok'       — a complete worker set present, enabled, and FIRING (lastRunAt
-               within FIRING_WINDOW seconds).
-  'disabled' — present but a worker task is disabled.
-  'stalled'  — present AND enabled somewhere, but lastRunAt is stale: the host
-               scheduler stopped launching it. Two known causes: the Claude
-               Desktop warm-session wedge (finished worker sessions never exit,
-               the overlap guard skips every fire; full app restart fixes it —
-               Karol, 2026-07-06) or an account switch orphaning the registry.
-               UI should offer "Restart Claude Desktop" FIRST, re-arm second.
-  'missing'  — no registry contains a complete worker set at all (deleted /
-               never scheduled) -> the dashboard offers "Set up draft schedule".
-               Consumers that predate 'stalled' treated both cases as 'missing';
+               within FIRING_WINDOW seconds), for the ACTIVE account.
+  'disabled' — present but a worker task is disabled, for the ACTIVE account.
+  'stalled'  — present AND enabled for the ACTIVE account, but lastRunAt is
+               stale: the host scheduler stopped launching it for THIS
+               account. Known cause: the Claude Desktop warm-session wedge
+               (finished worker sessions never exit, the overlap guard skips
+               every fire; full app restart fixes it — Karol, 2026-07-06).
+               Account-switch orphaning is no longer a 'stalled' cause — it
+               now correctly resolves to 'missing' (below), since the account
+               scoping means an orphaned OTHER account's registry is never
+               consulted for the active account's health.
+  'missing'  — the ACTIVE account has no registry with a complete worker set
+               (deleted / never scheduled / orphaned by an account switch)
+               -> the dashboard offers "Set up draft schedule". Consumers
+               that predate 'stalled' treated both cases as 'missing';
                anything gating on == 'ok' is unaffected.
 
 stdlib-only on purpose, so the MCP can run it with system python3 before the
@@ -90,14 +104,64 @@ CREATED_GRACE = 900
 # "Claude*" (not "Claude"): the host app can run with a custom --user-data-dir
 # (per-account dirs like "Claude-mediar" on multi-account machines), and the
 # registry lands under THAT dir while plain "Claude/" has no claude-code-sessions
-# at all. The freshest-lastRunAt selection in compute() already picks the live
-# registry among however many dirs match, so widening the glob is safe; the
-# plain-"Claude" glob read a hard "missing" forever on such machines even while
-# both worker tasks fired every minute (found 2026-07-02 during onboarding).
+# at all. UNSCOPED across every account under each root — deliberately, this is
+# also imported by callers that need to see EVERY account's registries (e.g. the
+# menu bar's relocation/legacy-consolidation sweep, which must find and clean up
+# old accounts' leftover tasks, not just the live one). compute()/_detail() do
+# NOT use this directly by default any more — see _active_registry_glob_patterns.
 SCHED_REGISTRY_GLOB = os.path.join(
     os.path.expanduser("~"), "Library", "Application Support", "Claude*",
     "claude-code-sessions", "*", "*", "scheduled-tasks.json",
 )
+
+
+def _config_json_paths():
+    """One config.json per Claude* root (multi-account machines can run
+    several distinct --user-data-dir roots, e.g. Claude-mediar, each a
+    separate host app instance with its own logged-in account)."""
+    return glob.glob(os.path.join(
+        os.path.expanduser("~"), "Library", "Application Support", "Claude*",
+        "config.json",
+    ))
+
+
+def _active_account_uuid(config_path):
+    """The account currently logged into the Claude* root config_path lives
+    under, or None if config.json is missing/unreadable/predates this field."""
+    try:
+        with open(config_path) as fh:
+            d = json.load(fh)
+        u = d.get("lastKnownAccountUuid")
+        return u if isinstance(u, str) and u else None
+    except Exception:
+        return None
+
+
+def _active_registry_glob_patterns():
+    """One glob pattern per Claude* root, scoped to ONLY the account that root
+    is currently logged into (verified 2026-07-08: claude-code-sessions/<uuid>/
+    is keyed by account — lastKnownAccountUuid in that root's config.json
+    matches the top-level directory local-agent-mode-sessions/<uuid>/ actually
+    running under, and a different, no-longer-active account's own <uuid>/
+    directory sits untouched alongside it). Falls back to the OLD
+    every-account-under-this-root pattern for a root whose config.json doesn't
+    resolve an account, so an unusual/older install never regresses to a blind
+    'missing' just because this field happens to be absent."""
+    patterns = []
+    for cfg in _config_json_paths():
+        root = os.path.dirname(cfg)
+        uuid = _active_account_uuid(cfg)
+        if uuid:
+            patterns.append(os.path.join(
+                root, "claude-code-sessions", uuid, "*", "scheduled-tasks.json"
+            ))
+        else:
+            patterns.append(os.path.join(
+                root, "claude-code-sessions", "*", "*", "scheduled-tasks.json"
+            ))
+    # No Claude* root found at all (host app never launched here) -> fall back
+    # to the unscoped glob so callers still see SOMETHING rather than nothing.
+    return patterns or [SCHED_REGISTRY_GLOB]
 
 
 def _iso_to_epoch(s):
@@ -120,37 +184,45 @@ def _ms_to_epoch(ms):
         return None
 
 
-def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
-    """Return 'ok' | 'disabled' | 'stalled' | 'missing' for the draft schedule."""
+def compute(glob_pattern: str | None = None) -> str:
+    """Return 'ok' | 'disabled' | 'stalled' | 'missing' for the draft schedule.
+
+    With no argument (every real caller), scans ONLY the active account's
+    registries via _active_registry_glob_patterns() — see its docstring and
+    the module docstring for why. Pass an explicit glob_pattern to scan a
+    literal pattern instead (e.g. a test fixture dir); this bypasses account
+    scoping entirely, matching the old unconditional behavior."""
+    patterns = [glob_pattern] if glob_pattern is not None else _active_registry_glob_patterns()
     newest_epoch, newest_enabled = None, False
     # Track the freshest just-created, enabled, never-yet-fired task so a schedule
     # the user only moments ago set up doesn't read as "missing" before its first
     # fire lands (see CREATED_GRACE).
     newest_fresh_created = None
     any_present, any_enabled = False, False
-    for f in glob.glob(glob_pattern):
-        try:
-            with open(f) as fh:
-                d = json.load(fh)
-        except Exception:
-            continue
-        by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
-        recs = _registry_worker_recs(by_id)
-        if recs is None:
-            continue
-        any_present = True
-        enabled = all(r.get("enabled") for r in recs)
-        any_enabled = any_enabled or enabled
-        epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
-        e = max([x for x in epochs if x is not None], default=None)
-        if e is not None and (newest_epoch is None or e > newest_epoch):
-            newest_epoch, newest_enabled = e, enabled
-        # Freshly scheduled + enabled + not yet fired anywhere in this registry.
-        if enabled and e is None:
-            created = [_ms_to_epoch(r.get("createdAt")) for r in recs]
-            c = min([x for x in created if x is not None], default=None)
-            if c is not None and (newest_fresh_created is None or c > newest_fresh_created):
-                newest_fresh_created = c
+    for pattern in patterns:
+        for f in glob.glob(pattern):
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+            except Exception:
+                continue
+            by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+            recs = _registry_worker_recs(by_id)
+            if recs is None:
+                continue
+            any_present = True
+            enabled = all(r.get("enabled") for r in recs)
+            any_enabled = any_enabled or enabled
+            epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
+            e = max([x for x in epochs if x is not None], default=None)
+            if e is not None and (newest_epoch is None or e > newest_epoch):
+                newest_epoch, newest_enabled = e, enabled
+            # Freshly scheduled + enabled + not yet fired anywhere in this registry.
+            if enabled and e is None:
+                created = [_ms_to_epoch(r.get("createdAt")) for r in recs]
+                c = min([x for x in created if x is not None], default=None)
+                if c is not None and (newest_fresh_created is None or c > newest_fresh_created):
+                    newest_fresh_created = c
     # Firing recently => the live account's schedule is active and healthy.
     if newest_epoch is not None and (time.time() - newest_epoch) <= FIRING_WINDOW:
         return "ok" if newest_enabled else "disabled"
@@ -158,9 +230,11 @@ def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
     # Suppresses the false ⚠ right after the user sets up the draft schedule.
     if newest_fresh_created is not None and (time.time() - newest_fresh_created) <= CREATED_GRACE:
         return "ok"
-    # Not firing anywhere. Registered-but-disabled => disabled; registered and
-    # enabled but the host stopped launching it => stalled (Desktop scheduler
-    # wedge or account-switch orphan); absent everywhere => missing.
+    # Not firing anywhere for the active account. Registered-but-disabled =>
+    # disabled; registered and enabled but the host stopped launching it =>
+    # stalled (Desktop scheduler wedge, SAME account); absent for the active
+    # account entirely (never scheduled, or orphaned by an account switch) =>
+    # missing.
     if any_present and not any_enabled:
         return "disabled"
     if any_present and any_enabled:
@@ -168,29 +242,32 @@ def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
     return "missing"
 
 
-def _detail(glob_pattern: str = SCHED_REGISTRY_GLOB) -> dict:
-    """Cheap diagnostics for the JSON output: which registries the glob saw and
-    which contain both worker tasks, with each one's freshest lastRunAt age.
-    This is what makes a 'missing' verdict debuggable from a log line instead of
-    requiring filesystem forensics (the 2026-07-02 rotated-dir bug hid here)."""
+def _detail(glob_pattern: str | None = None) -> dict:
+    """Cheap diagnostics for the JSON output: which registries the glob(s) saw
+    and which contain both worker tasks, with each one's freshest lastRunAt
+    age. This is what makes a 'missing' verdict debuggable from a log line
+    instead of requiring filesystem forensics (the 2026-07-02 rotated-dir bug,
+    and the 2026-07-08 wrong-account bug, both hid here)."""
+    patterns = [glob_pattern] if glob_pattern is not None else _active_registry_glob_patterns()
     regs = []
-    for f in glob.glob(glob_pattern):
-        entry = {"path": f, "has_workers": False, "last_run_age_s": None}
-        try:
-            with open(f) as fh:
-                d = json.load(fh)
-            by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
-            recs = _registry_worker_recs(by_id)
-            if recs is not None:
-                entry["has_workers"] = True
-                epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
-                e = max([x for x in epochs if x is not None], default=None)
-                if e is not None:
-                    entry["last_run_age_s"] = int(time.time() - e)
-        except Exception as exc:
-            entry["error"] = str(exc)
-        regs.append(entry)
-    return {"glob": glob_pattern, "registries": regs}
+    for pattern in patterns:
+        for f in glob.glob(pattern):
+            entry = {"path": f, "has_workers": False, "last_run_age_s": None}
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+                by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+                recs = _registry_worker_recs(by_id)
+                if recs is not None:
+                    entry["has_workers"] = True
+                    epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
+                    e = max([x for x in epochs if x is not None], default=None)
+                    if e is not None:
+                        entry["last_run_age_s"] = int(time.time() - e)
+            except Exception as exc:
+                entry["error"] = str(exc)
+            regs.append(entry)
+    return {"glob": patterns, "registries": regs}
 
 
 def main() -> int:
