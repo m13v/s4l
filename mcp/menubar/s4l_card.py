@@ -1156,24 +1156,18 @@ class _ReviewController(NSObject):
                 # separate outline view, sized to the box and holding the
                 # scroll view inset a few px inside it, keeps the ring
                 # unobstructed since nothing opaque reaches its edge.
+                # The inset gap between this wrapper's edge (where the ring is
+                # drawn) and the scroll view's own background otherwise sits
+                # directly on the translucent frosted panel behind it, so a
+                # plain hairline there read as barely visible (2026-07-08
+                # feedback: "outline not obvious, background is mostly
+                # transparent"). _update_draft_borders (called once the
+                # content view is installed, below) backs the whole wrapper a
+                # solid color so box + ring read as one opaque card; no need
+                # to pre-seed it here since that call always follows.
                 outline_frame = NSMakeRect(M, box_y, W - 2 * M, box_h)
                 outline = NSView.alloc().initWithFrame_(outline_frame)
                 _round_rect(outline)
-                try:
-                    # The inset gap between this wrapper's edge (where the ring
-                    # is drawn) and the scroll view's own opaque background
-                    # otherwise sits directly on the translucent frosted panel
-                    # behind it, so a plain hairline there read as barely
-                    # visible (2026-07-08 feedback: "outline not obvious,
-                    # background is mostly transparent"). Backing the whole
-                    # wrapper the same solid color as the text area makes box +
-                    # ring read as one opaque card, giving the border real
-                    # contrast to sit on instead of translucency.
-                    outline.layer().setBackgroundColor_(
-                        NSColor.textBackgroundColor().CGColor()
-                    )
-                except Exception:
-                    pass
                 inset = 4
                 scroll, tv = _editable_scroll(
                     NSMakeRect(
