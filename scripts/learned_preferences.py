@@ -1,39 +1,54 @@
 #!/usr/bin/env python3
-"""Per-project learned_preferences: the agent-owned config block distilled from
-human card decisions (review_events).
+"""learned_preferences: the agent-owned config block distilled from human
+card decisions (review_events).
+
+**Single install-wide block (2026-07-08).** Earlier this lived once PER
+PROJECT. In practice every entry ever learned was a fact about the human
+reviewer (their voice, their quality bar, their reviewing habits), never
+about one product's audience specifically, so a multi-project install (every
+install gets at least a persona project plus, usually, a product project)
+just relearned the same reviewer-level facts independently in each project.
+Consolidated into ONE top-level `learned_preferences_global` block so a
+correction made anywhere reaches every project's drafting/judging prompt.
+migrate_to_global() performs the one-time move from the old per-project
+shape and runs automatically (idempotent) from feedback_digest.py.
 
 The feedback loop:
   1. The menubar review card ships every approve/reject (with reason chips,
      free-text note, link-click interactions, dwell) to /api/v1/review-events.
   2. scripts/feedback_digest.py (scheduled) claims unprocessed events per
      project and asks Claude for a conservative mutation plan.
-  3. apply_mutations() here writes that plan into config.json under the
-     project's `learned_preferences` block, whitelist-enforced, with flock +
+  3. apply_mutations() here writes that plan into config.json's single
+     `learned_preferences_global` block, whitelist-enforced, with flock +
      backup + atomic replace.
   4. Enforcement is SOFT (prompt-level, never a deterministic filter): the
      twitter prep prompt embeds every project entry verbatim via
-     ALL_PROJECTS_JSON, so the block (with its self-describing _instruction)
-     reaches the judging/drafting model automatically. prompt_block() renders
-     the same content for prompts that want an explicit section.
+     ALL_PROJECTS_JSON (each project dict is stamped with the same global
+     block at prompt-build time), so the block (with its self-describing
+     _instruction) reaches the judging/drafting model automatically.
+     prompt_block() renders the same content for callers that want an
+     explicit section instead of the raw embed.
 
-Block shape (inside a config.json project entry):
+Block shape (config.json top-level key `learned_preferences_global`):
 
-  "learned_preferences": {
+  "learned_preferences_global": {
     "_instruction": "<how the drafting model should apply this block>",
     "enabled": true,
     "audience_avoid":    ["crypto/web3-native authors ..."],
     "audience_prefer":   [],
     "thread_avoid":      ["engagement-bait question threads ..."],
     "draft_style_notes": [],
+    "edit_examples":     [{"original", "final", "ts"}],
     "updated_at": "...",
     "history": [{"ts", "change", "rationale", "source_events": [ids]}]
   }
 
-WHITELIST: this module writes ONLY learned_preferences plus (append-only)
-voice.never and content_guardrails.do_not. Nothing else in a project entry is
-touchable through this path; unknown keys in a mutation plan are dropped and
-counted, never applied. Facts (content_angle, links, identity fields) are
-deliberately unreachable so a bad digest can never poison grounding.
+WHITELIST: this module writes ONLY learned_preferences_global plus
+(append-only, still per-project) voice.never and content_guardrails.do_not.
+Nothing else in a project entry is touchable through this path; unknown keys
+in a mutation plan are dropped and counted, never applied. Facts
+(content_angle, links, identity fields) are deliberately unreachable so a
+bad digest can never poison grounding.
 """
 from __future__ import annotations
 
@@ -41,6 +56,7 @@ import datetime
 import fcntl
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -137,14 +153,40 @@ def normalized(block) -> dict:
     return out
 
 
-def get_block(project_cfg) -> dict:
-    return normalized((project_cfg or {}).get("learned_preferences"))
+def get_global_block(cfg: dict | None = None, cfg_path: str | None = None) -> dict:
+    """Load + normalize the single install-wide learned_preferences block.
+
+    If `cfg` (an already-parsed config.json dict) isn't supplied, reads
+    config.json fresh from disk — the same "re-read on every call" pattern
+    already used elsewhere (e.g. link_tail.py's project loader), so callers
+    that only ever had a single project's dict slice (not the whole config)
+    can still reach the global block with no signature change on their end.
+    """
+    if cfg is None:
+        try:
+            cfg = json.loads(Path(cfg_path or config_path()).read_text())
+        except Exception:
+            cfg = {}
+    return normalized(cfg.get("learned_preferences_global"))
 
 
-def prompt_block(project_cfg) -> str:
+def get_block(project_cfg=None) -> dict:
+    """Back-compat shim (2026-07-08): learned_preferences is now a SINGLE
+    install-wide block, not one per project — see module docstring.
+    `project_cfg` is accepted but ignored; kept so every existing caller
+    (post_reddit.py, engage_reddit.py, post_github.py, engage_github.py,
+    link_tail.py — 4 of those 5 files are chflags-uchg locked) needs zero
+    changes. Callers that already have the full parsed config in scope
+    should call get_global_block(cfg) directly instead (apply_mutations and
+    record_edit_examples below do)."""
+    return get_global_block()
+
+
+def prompt_block(project_cfg=None) -> str:
     """Explicit prompt section for callers that don't embed the raw project
     JSON (mirrors the engagement_styles STYLES_BLOCK pattern). Empty string
-    when the block is disabled or has no entries."""
+    when the block is disabled or has no entries. `project_cfg` is accepted
+    but ignored (see get_block())."""
     b = get_block(project_cfg)
     if not b["enabled"]:
         return ""
