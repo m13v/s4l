@@ -1357,6 +1357,17 @@ class _ReviewController(NSObject):
         note = NSTextField.alloc().initWithFrame_(NSMakeRect(M, 14, W - 2 * M, y + 28 - 14 - 8))
         note.setEditable_(True)
         note.setBezeled_(True)
+        # Same rounded-rect skin as the reply editor; square bezel is the fallback.
+        if _round_rect(note):
+            note.setBezeled_(False)
+            try:
+                note.setDrawsBackground_(True)
+                note.setBackgroundColor_(NSColor.textBackgroundColor())
+                # The square focus ring fights the rounded skin (renders as a
+                # heavy outline); the border already marks the field.
+                note.setFocusRingType_(1)  # NSFocusRingTypeNone
+            except Exception:
+                pass
         note.setFont_(NSFont.systemFontOfSize_(12))
         try:
             note.setPlaceholderString_("Optional note (sent with whichever reason you pick)")
@@ -1367,7 +1378,7 @@ class _ReviewController(NSObject):
         self._reason_field = note
 
         self._textview = None
-        self._panel.setContentView_(content)
+        self._panel.setContentView_(_frosted(content))
         self._panel.makeFirstResponder_(note)
 
     @objc.python_method
@@ -1632,7 +1643,7 @@ class _FeedbackController(NSObject):
         send.setAction_("feedbackSend:")
         content.addSubview_(send)
 
-        panel.setContentView_(content)
+        panel.setContentView_(_frosted(content))
         self._panel = panel
         panel.makeKeyAndOrderFront_(None)
         panel.orderFrontRegardless()
