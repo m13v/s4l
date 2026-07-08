@@ -21,6 +21,9 @@ const EMBEDDED_DSN = "https://4d44ac907262c6545cf8681703528d04@o4507617161314304
 const SENTRY_DSN = process.env.S4L_SENTRY_DSN || EMBEDDED_DSN;
 
 let sentryReady = false;
+// Cached install_id (set by tagInstall), reused to fingerprint every event per
+// install — see captureError/captureMessage below.
+let cachedInstallId: string | null = null;
 
 export function initSentry(): void {
   if (sentryReady || !SENTRY_DSN) return;
@@ -53,7 +56,10 @@ async function tagInstall(): Promise<void> {
     const res = await runPython("scripts/identity.py", ["show"], { timeoutMs: 10_000 });
     if (res.code !== 0) return;
     const id = JSON.parse(res.stdout || "{}");
-    if (id.install_id) Sentry.setTag("install_id", String(id.install_id));
+    if (id.install_id) {
+      Sentry.setTag("install_id", String(id.install_id));
+      cachedInstallId = String(id.install_id);
+    }
     if (id.hostname) Sentry.setTag("hostname", String(id.hostname));
   } catch {
     /* best-effort */
@@ -62,7 +68,37 @@ async function tagInstall(): Promise<void> {
 
 export function captureError(err: unknown, tags?: Record<string, string>): void {
   try {
-    if (sentryReady) Sentry.captureException(err, tags ? { tags } : undefined);
+    if (!sentryReady) return;
+    Sentry.withScope((scope) => {
+      for (const [k, v] of Object.entries(tags || {})) scope.setTag(k, v);
+      // Mix install_id into the grouping key so the SAME error on two different
+      // customer boxes lands in two different issues, not one conflated issue
+      // whose "latest event" can silently belong to a different install than
+      // the one you filtered for (default grouping ignores tags entirely).
+      if (cachedInstallId) scope.setFingerprint(["{{ default }}", cachedInstallId]);
+      Sentry.captureException(err);
+    });
+  } catch {
+    /* swallow */
+  }
+}
+
+// Report a handled, non-exception CONDITION (mirrors scripts/sentry_init.py's
+// capture_message on the Python side — added 2026-07-07 alongside it so both
+// halves of the client have parity). Use for operational states, not thrown
+// errors: captureError only covers exceptions.
+export function captureMessage(
+  message: string,
+  opts?: { level?: Sentry.SeverityLevel; tags?: Record<string, string>; extra?: Record<string, unknown> }
+): void {
+  try {
+    if (!sentryReady) return;
+    Sentry.withScope((scope) => {
+      for (const [k, v] of Object.entries(opts?.tags || {})) scope.setTag(k, v);
+      for (const [k, v] of Object.entries(opts?.extra || {})) scope.setExtra(k, v);
+      if (cachedInstallId) scope.setFingerprint(["{{ default }}", cachedInstallId]);
+      Sentry.captureMessage(message, opts?.level || "info");
+    });
   } catch {
     /* swallow */
   }
@@ -74,6 +110,49 @@ export async function flushSentry(ms = 2000): Promise<void> {
   } catch {
     /* swallow */
   }
+}
+
+function lastVersionPath(): string {
+  return path.join(snapshotStateDir(), "last-version.json");
+}
+
+// Detect a version change on boot (a .mcpb self-update, or Desktop reloading
+// the extension after one) and log ONE explicit milestone: old_version ->
+// new_version. Before this, "was this an update?" had to be inferred after
+// the fact by cross-referencing THREE unrelated weak signals — app_version in
+// memory_snapshot, reason="startup" in installation_state_snapshots, and the
+// menu bar's own boot line — across a manual full-day log sweep (the Karol
+// 2026-07-07 update-orphan investigation). Call once, early in main(), before
+// anything else that might restart or exit. Best-effort; never throws.
+export function checkVersionChange(): { changed: boolean; isFirstBoot: boolean; from: string | null; to: string } {
+  const to = VERSION;
+  let from: string | null = null;
+  try {
+    const raw = fs.readFileSync(lastVersionPath(), "utf-8");
+    from = (JSON.parse(raw)?.version as string) ?? null;
+  } catch {
+    from = null; // no cached version -> first boot ever, or file missing/corrupt
+  }
+  const isFirstBoot = from === null;
+  const changed = !isFirstBoot && from !== to;
+  try {
+    fs.mkdirSync(snapshotStateDir(), { recursive: true });
+    fs.writeFileSync(
+      lastVersionPath(),
+      JSON.stringify({ version: to, seen_at: new Date().toISOString() }),
+      "utf-8"
+    );
+  } catch {
+    /* best-effort; a failed write just means the next boot re-detects from "from: null" */
+  }
+  if (changed) {
+    console.error(`[social-autoposter-mcp] self-update detected: ${from} -> ${to}`);
+    captureMessage(`social-autoposter self-update: ${from} -> ${to}`, {
+      level: "info",
+      tags: { component: "update", issue: "self_update", from_version: from || "", to_version: to },
+    });
+  }
+  return { changed, isFirstBoot, from, to };
 }
 
 // Phone home so .mcpb installs show up in the install-lane digest, parity with
