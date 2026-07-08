@@ -32,13 +32,10 @@ from urllib.parse import unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import load_env, get_conn  # noqa: E402
-
 # Our own installs, hidden by default so the roster is real external users.
-INTERNAL_EMAILS = {"i@m13v.com", "agent@mk0r.com", "matt@mediar.ai"}
-INTERNAL_HOSTNAME_SUBSTR = ("e2b.local", "71522")  # mk0r E2B sandboxes; MacStadium QA box
-# MacStadium remote QA box (hostname "71522", no git_email). It actively runs the
-# pipeline and posts, so without this it masquerades as our only posting customer.
-INTERNAL_HARDWARE_UUIDS = {"07CB793D-6E32-5EF8-82E2-7CDEABD47FBC"}
+# Shared with autopilot_stall_watch.py via identity.py so the two lists can't
+# drift apart (see identity.is_internal_install).
+from identity import INTERNAL_EMAILS, INTERNAL_HOSTNAME_SUBSTR, INTERNAL_HARDWARE_UUIDS  # noqa: E402
 
 # Connected X handle resolves only from posts.our_account; drop scaffolding values.
 PLACEHOLDER_HANDLES = {"your-twitter-handle", "your_handle", "your-handle", "none", "null", ""}
