@@ -141,6 +141,38 @@ def _recent_rate_limit(window: int = 1200) -> bool:
     return False
 
 
+BATCH_PROGRESSION_MIN_BATCHES = 5
+BATCH_PROGRESSED_PHASES = {"phase2b-gen", "phase2b-post"}
+
+
+def _recent_batches_not_progressing(min_batches: int = BATCH_PROGRESSION_MIN_BATCHES) -> bool:
+    """True if the last `min_batches` twitter_batches for THIS install ALL failed
+    to reach phase2b-gen (real draft generation) or later. A second, independent
+    detection layer: the queue's consecutive_timeouts counter is one level
+    removed from the actual product outcome (did a batch progress). During the
+    Karol 2026-07-07 investigation the DB showed the stall the whole time — 46
+    consecutive batches dying at phase2b-prep — while this watchdog's other
+    signals took hours longer to latch. Requires network (via http_api); any
+    failure (offline, endpoint missing, not enough batch history yet) returns
+    False so this signal can only ever ADD confidence, never false-positive on
+    its own from a transient API hiccup."""
+    try:
+        repo = os.environ.get("S4L_REPO_DIR")
+        if repo:
+            scripts_dir = os.path.join(repo, "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+        import http_api  # noqa: E402
+
+        resp = http_api.api_get("/api/v1/twitter-batches", {"list": "1", "limit": str(min_batches)})
+        batches = (resp or {}).get("batches") or []
+        if len(batches) < min_batches:
+            return False  # not enough history yet to conclude a stall
+        return all((b or {}).get("current_phase") not in BATCH_PROGRESSED_PHASES for b in batches)
+    except Exception:
+        return False
+
+
 def _oldest_pending_age() -> float | None:
     """Seconds since the oldest unclaimed pending draft job was written, or None
     if nothing is pending (idle queue). The FAST signal: catches a fresh stall
@@ -251,14 +283,22 @@ def main() -> int:
     age = _oldest_pending_age()
     run_age = _oldest_running_age()
     timeouts = _consecutive_timeouts()
-    # Three complementary signals, OR'd; all gated on the autopilot actually being
+    configured = _autopilot_configured()
+    # batches_stuck is deliberately computed unconditionally (not short-circuited
+    # by the other signals) — it's a genuinely independent, outcome-level
+    # backstop, not a cheaper proxy for the same thing. It's what would have
+    # caught the Karol 2026-07-07 stall immediately instead of hours later.
+    batches_stuck = configured and _recent_batches_not_progressing()
+    # Four complementary signals, OR'd; all gated on the autopilot actually being
     # configured here. (1) durable producer drain latch, (2) fast pending-age (job
-    # never claimed), (3) running-age (job claimed then wedged mid-run). (3) is the
-    # only one that catches a worker dying after it picked up the job.
-    stalled = _autopilot_configured() and (
+    # never claimed), (3) running-age (job claimed then wedged mid-run) — (3) is
+    # the only one of the first three that catches a worker dying after it picked
+    # up the job — (4) batches_stuck, the outcome-level backstop above.
+    stalled = configured and (
         timeouts >= 1
         or (age is not None and age > STALL_SECONDS)
         or (run_age is not None and run_age > RUNNING_STALL_SECONDS)
+        or batches_stuck
     )
     # A rate-limit stall is expected and self-heals at the quota reset — never page
     # for it (and re-arm can't fix it). Treat it as "not an actionable stall" so the
@@ -292,19 +332,31 @@ def main() -> int:
         first_seen_at = time.time()
     age_str = f"{int(age)}s" if age is not None else "n/a (between cycles)"
     run_age_str = f"{int(run_age)}s" if run_age is not None else "n/a (none in flight)"
-    # Distinguish the two shapes so the alert points at the right cause: a claimed-
-    # but-wedged job (running-age) is a mid-run worker death, not an orphaned routine.
+    # Distinguish the shapes so the alert points at the right cause: a claimed-
+    # but-wedged job (running-age) is a mid-run worker death, batches_stuck is
+    # the outcome-level backstop firing independently of the queue signals, and
+    # the fallback is the classic orphaned-routine case.
     wedged_inflight = run_age is not None and run_age > RUNNING_STALL_SECONDS
     if consecutive >= ALERT_AFTER and not alerted:
         try:
             sentry = _sentry()
             sentry.init()
-            cause = (
-                "a worker claimed a draft job and then died mid-run (claude -p child "
-                "never came up / crashed)"
-                if wedged_inflight
-                else "scheduled-task routines likely orphaned — Claude Desktop account change?"
-            )
+            if wedged_inflight:
+                cause = (
+                    "a worker claimed a draft job and then died mid-run (claude -p child "
+                    "never came up / crashed)"
+                )
+                stall_shape = "inflight_wedged"
+            elif batches_stuck:
+                cause = (
+                    f"last {BATCH_PROGRESSION_MIN_BATCHES} twitter_batches all failed to "
+                    "reach phase2b-gen — drafting is not actually happening even if the "
+                    "queue-level counters look ambiguous"
+                )
+                stall_shape = "batches_not_progressing"
+            else:
+                cause = "scheduled-task routines likely orphaned — Claude Desktop account change?"
+                stall_shape = "not_draining"
             sentry.capture_message(
                 "social-autoposter autopilot stalled: draft jobs are not being "
                 f"drained ({cause}). producer consecutive timeouts={timeouts}, "
@@ -314,10 +366,11 @@ def main() -> int:
                 tags={
                     "component": "autopilot",
                     "issue": "stall",
-                    "stall_shape": "inflight_wedged" if wedged_inflight else "not_draining",
+                    "stall_shape": stall_shape,
                     "consecutive_timeouts": str(timeouts),
                     "oldest_pending_age_s": str(int(age)) if age is not None else "",
                     "oldest_running_age_s": str(int(run_age)) if run_age is not None else "",
+                    "batches_stuck": str(batches_stuck),
                 },
             )
             sentry.flush()
