@@ -2844,6 +2844,7 @@ tool(
     return jsonContent({
       ...snapshot,
       menubar_running: await menubarRunning(),
+      paused: isPaused(),
       onboarding: onboardingSnapshot(),
     });
   }
@@ -4240,6 +4241,7 @@ async function buildSnapshot() {
   // (it's a launchctl check the Node side owns), so layer it on here. The panel
   // uses it to offer a one-click "restart menu bar" when the tray was quit.
   snap.menubar_running = await menubarRunning();
+  snap.paused = isPaused();
   await ensureDoctorPhase(snap.x_connected ? "full" : "pre_connect");
   if (snap.runtime_ready) completeOnboardingMilestone("runtime_ready");
   if (snap.x_connected) completeOnboardingMilestone("x_connected", { state: snap.x_state || "connected" });
@@ -5342,16 +5344,29 @@ async function main() {
   } catch (e: any) {
     console.error(`[queue-worker] could not create worker folder: ${e?.message || e}`);
   }
-  void ensureQueueKickerInstalled()
-    .then((r) => console.error(`[queue-worker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-    .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
+  // The 4 pipeline daemons (kicker, reaper, stall-watch, memory-snapshot) are
+  // skipped at boot while paused.flag is present, so a Claude Desktop restart
+  // during a Pause doesn't silently un-pause the autopilot — see pauseAutopilot/
+  // resumeAutopilot. Feedback-digest is NOT gated: it only distills past review
+  // decisions, not drafting/posting, so it's harmless to keep running.
+  if (!isPaused()) {
+    void ensureQueueKickerInstalled()
+      .then((r) => console.error(`[queue-worker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+      .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
+  } else {
+    console.error("[queue-worker] launchd kicker: skip (paused)");
+  }
   // Self-healing reaper for the agent-mode session leak the queue autopilot
   // produces (finished `claude` worker sessions Desktop never tears down). A
   // standalone guardrail; install unconditionally so it caps memory even on a
   // box whose project isn't ready yet. Best-effort; must never block boot.
-  void ensureClaudeReaperInstalled()
-    .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-    .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
+  if (!isPaused()) {
+    void ensureClaudeReaperInstalled()
+      .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+      .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
+  } else {
+    console.error("[claude-reaper] launchd reaper: skip (paused)");
+  }
   // Feedback digest: hourly distillation of the user's card approve/reject
   // decisions into learned_preferences (see scripts/feedback_digest.py).
   // Best-effort; a box with no review events runs a no-op.
@@ -5361,15 +5376,23 @@ async function main() {
   // Autopilot stall watchdog: fleet-side Sentry alert when the draft routines stop
   // draining (most often an account switch orphaning them). The menu bar shows the
   // user the Re-arm action; this is the part we see. Best-effort; never blocks boot.
-  void ensureStallWatchInstalled()
-    .then((r) => console.error(`[stall-watch] launchd watchdog: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-    .catch((e) => console.error("[stall-watch] watchdog install failed:", e?.message || e));
+  if (!isPaused()) {
+    void ensureStallWatchInstalled()
+      .then((r) => console.error(`[stall-watch] launchd watchdog: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+      .catch((e) => console.error("[stall-watch] watchdog install failed:", e?.message || e));
+  } else {
+    console.error("[stall-watch] launchd watchdog: skip (paused)");
+  }
   // Periodic host-resource sampler (memory/process snapshot -> local JSONL). Gives
   // us per-box resource history to diagnose RAM blowups (e.g. the agent-mode
   // session leak). Best-effort; never blocks boot. Disable with S4L_MEMORY_SNAPSHOT=0.
-  void ensureMemorySnapshotInstalled()
-    .then((r) => console.error(`[memory-snapshot] launchd sampler: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-    .catch((e) => console.error("[memory-snapshot] sampler install failed:", e?.message || e));
+  if (!isPaused()) {
+    void ensureMemorySnapshotInstalled()
+      .then((r) => console.error(`[memory-snapshot] launchd sampler: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+      .catch((e) => console.error("[memory-snapshot] sampler install failed:", e?.message || e));
+  } else {
+    console.error("[memory-snapshot] launchd sampler: skip (paused)");
+  }
   // On-screen overlay watcher supervisor. The harness status overlay only renders
   // while the watcher process is alive, and that watcher had no supervisor — when
   // it died nothing respawned it and the overlay silently vanished. Install it as
