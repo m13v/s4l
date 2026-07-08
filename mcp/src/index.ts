@@ -4015,6 +4015,68 @@ async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: str
   }
 }
 
+// Install/refresh the daily self-updater launchd job. This used to be bundled
+// into the now-deleted `autopilot` MCP tool (removed 2026-06-19, 88bd1cb9):
+// calling `autopilot enable` installed this job as a side effect, so removing
+// the tool silently orphaned it — UPDATER_LABEL/UPDATER_PLIST and the
+// auto_update_on status check survived (buildSnapshot still reports them), but
+// nothing has installed the plist since, on ANY box provisioned after that
+// commit (auto_update_on reads false forever). Restored here as its own
+// deterministic boot-time job, same pattern as its five siblings above.
+//
+// Points at scripts/s4l_box_update.sh, NOT skill/social-autoposter-update.sh:
+// the latter is the npm-lane updater (npm view + npx update) and is a silent
+// no-op on a .mcpb box, which has no npm/npx on PATH (see version.ts). The
+// .mcpb-lane equivalent downloads the .mcpb directly from the channel-resolved
+// GitHub release and unpacks it over the extension dir — see that script's own
+// header for the channel/no-downgrade/retry guards. Default mode there
+// downloads + unpacks + restarts Claude Desktop with NO human in the loop,
+// matching the original bundled updater's intent ("keeps a headless install
+// current"); RunAtLoad so a box that boots already-behind checks promptly.
+async function ensureUpdaterInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    if ((process.env.S4L_AUTO_UPDATE) === "0") return { ok: false, detail: "disabled (S4L_AUTO_UPDATE=0)" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: UPDATER_LABEL,
+      programArgs: ["/bin/bash", path.join(repoDir(), "scripts", "s4l_box_update.sh")],
+      intervalSecs: 86_400,
+      runAtLoad: true,
+      stdoutLog: path.join(logDir, "launchd-self-update-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-self-update-stderr.log"),
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(UPDATER_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(UPDATER_PLIST), { recursive: true });
+      fs.writeFileSync(UPDATER_PLIST, xml, "utf-8");
+      const res = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // Is the draft schedule registered AND running for the LIVE account?
 //   'ok'       — worker tasks present+enabled and FIRING (host actively running).
 //   'disabled' — present but a worker task is disabled.
@@ -5211,6 +5273,13 @@ async function main() {
   void ensureOverlayWatchInstalled()
     .then((r) => console.error(`[overlay-watch] launchd supervisor: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[overlay-watch] supervisor install failed:", e?.message || e));
+  // Daily self-updater: restored 2026-07-08 after 88bd1cb9 ("Remove autopilot
+  // tool") silently dropped its only install path (it used to be bundled into
+  // the deleted `autopilot enable` action). Best-effort; never blocks boot.
+  // Disable with S4L_AUTO_UPDATE=0.
+  void ensureUpdaterInstalled()
+    .then((r) => console.error(`[self-update] launchd updater: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[self-update] updater install failed:", e?.message || e));
   // Heal installs onboarded before short_links_live defaulted to false: such a
   // project wraps short links against the customer's own domain, which has no
   // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
