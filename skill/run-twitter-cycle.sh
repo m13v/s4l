@@ -1808,6 +1808,44 @@ except Exception:
 " 2>/dev/null)
 log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}"
 
+# --- Second engagement style for dual-draft review cards (2026-07-07) -------
+# Two-draft cards: pick a SECOND style ("Style B") this cycle, independent of
+# the first ("Style A" = PICKED_STYLE/PICKED_MODE above). The prep step drafts
+# every fresh candidate once under EACH style and the reviewer picks which
+# posts; see PREP_SCHEMA/PREP_PROMPT below. Bounded retry so the two styles
+# are actually different (a same-name pair defeats the whole point); INVENT
+# mode on either side is accepted immediately since an invented name is
+# definitionally distinct from a pinned one. This is orthogonal to the
+# treatment_v2/control_v2 draft-prompt A/B below (that varies WORDING of the
+# directive for the whole cycle; this varies STYLE per draft slot), so neither
+# experiment disturbs the other.
+STYLE_ASSIGN_FILE_B=$(mktemp -t s4l_twitter_assign_b_XXXXXX.json)
+for _style_b_attempt in 1 2 3; do
+    s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE_B" >/dev/null 2>&1 || true
+    PICKED_STYLE_B=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE_B') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+    PICKED_MODE_B=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE_B') as f:
+        d = json.load(f)
+    print(d.get('mode') or 'use')
+except Exception:
+    print('use')
+" 2>/dev/null)
+    if [ "$PICKED_MODE" = "invent" ] || [ "$PICKED_MODE_B" = "invent" ] || [ "$PICKED_STYLE_B" != "$PICKED_STYLE" ]; then
+        break
+    fi
+done
+log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)}"
+
 # --- Draft-prompt A/B: decouple product pivot (2026-06-29) -------------------
 # Per-CYCLE arm (the prep session drafts the whole batch from ONE prompt, so
 # assignment is at cycle granularity, not per post; the whole batch shares it).
@@ -1882,6 +1920,11 @@ if [ -n "$PICKED_STYLE" ]; then
 else
     TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
 fi
+if [ -n "$PICKED_STYLE_B" ]; then
+    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE_B" 2>/dev/null || echo "(top performers report unavailable)")
+else
+    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+fi
 
 # --- Generation trace -------------------------------------------------------
 # Snapshot the few-shot context this cycle will feed to Claude — top_performers
@@ -1924,9 +1967,26 @@ else
 fi
 
 STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" twitter posting)
-# Style assignment file is the same one we picked above; styles.sh already sourced.
+# Style B block: the assigned-style portion only (description/example/note/
+# length/grounding rule), NOT the full s4l_render_style_block — content rules,
+# anti-patterns, and the voice-relationship rule are platform/project-wide, not
+# per-style, and are already embedded once via STYLES_BLOCK above. Calling
+# get_assigned_style_prompt() directly here avoids repeating those shared
+# sections a second time and keeps skill/styles.sh untouched.
+STYLES_BLOCK_B=$(python3 -c "
+import json, sys
+sys.path.insert(0, '$REPO_DIR/scripts')
+from engagement_styles import get_assigned_style_prompt
+try:
+    with open('$STYLE_ASSIGN_FILE_B', 'r') as f:
+        assignment = json.load(f)
+    print(get_assigned_style_prompt('twitter', assignment, context='posting'))
+except Exception:
+    print('(style module unavailable)')
+" 2>/dev/null || echo "(style module unavailable)")
+# Style assignment files are the ones we picked above; styles.sh already sourced.
 # Cleanup at cycle end (best effort).
-trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
+trap 'rm -f "$STYLE_ASSIGN_FILE" "$STYLE_ASSIGN_FILE_B" 2>/dev/null || true' EXIT
 
 # Phase 2b is split into three sub-phases so the twitter-browser lock is only
 # held during actual browser work. The killer in the old single-session flow
@@ -2016,15 +2076,15 @@ export CLAUDE_SESSION_ID
 # Fields mirror engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the
 # downstream validate_or_register call accepts the block without a
 # second schema layer.
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"language":{"type":"string"},"reply_text_en":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"is_reused_draft":{"type":"boolean"},"draft_a_text":{"type":"string"},"draft_a_style":{"type":"string"},"draft_a_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_a_text_en":{"type":["string","null"]},"draft_b_text":{"type":["string","null"]},"draft_b_style":{"type":["string","null"]},"draft_b_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_b_text_en":{"type":["string","null"]},"recommended_draft":{"type":"string","enum":["a","b"]},"language":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","is_reused_draft","recommended_draft","draft_a_text","draft_a_style","draft_b_text","draft_b_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
   1. Read each candidate's thread context from the PRE-SCORED CANDIDATES block below (each entry's 'Text:' field is the parent tweet). You have WebSearch and WebFetch available: use them ONLY when a thread hinges on a current fact, a name, a release, or a claim you are not sure about, so your reply is specific and correct instead of vague. You do NOT have the Twitter/X browser this session — never fetch, navigate, or open a tweet/x.com URL, and never try to load the thread itself; the thread text you need is already inlined below. Most replies need no search at all; reach for it only when it materially improves the reply.
-  2. Draft a reply for each.
-  3. Persist each fresh draft via log_draft.py.
-  4. Emit a structured plan describing the chosen candidates, the reply text, and (when applicable) the SEO link keyword + slug.
+  2. Draft TWO independent replies for each fresh candidate, one under Draft A's assigned style and one under Draft B's assigned style below, then recommend the stronger one. The reviewer sees both and can pick either; your recommendation is only the default.
+  3. Persist the recommended fresh draft via log_draft.py.
+  4. Emit a structured plan describing the chosen candidates, both draft texts, and (when applicable) the SEO link keyword + slug.
 
 You will NOT post anything. You will NOT generate landing pages. You will NOT call log_post.py. The shell handles all of that AFTER your session ends, with the browser lock released for the long landing-page build.
 
@@ -2041,10 +2101,15 @@ $CORPUS_BLOCK
 Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
 All project configs: $ALL_PROJECTS_JSON
 
-## FEEDBACK FROM PAST PERFORMANCE:
+## DRAFT A: assigned style + feedback from past performance
 $TOP_REPORT
 
 $STYLES_BLOCK
+
+## DRAFT B: assigned style + feedback from past performance
+$TOP_REPORT_B
+
+$STYLES_BLOCK_B
 
 ## WORKFLOW
 There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
@@ -2053,14 +2118,19 @@ For each chosen candidate:
 1. Read the candidate's parent tweet from its 'Text:' field in the PRE-SCORED CANDIDATES block above.
 2. Understand the context from that inlined text (the thread text is already in this prompt; you do NOT have the Twitter browser, but you MAY use WebSearch/WebFetch for external facts when a thread needs them to be answered well).
 3. DRAFT HANDLING (existing vs fresh):
-   - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
-   - $DRAFT_DIRECTIVE
-3a. PERSIST FRESH DRAFTS (skip for reused drafts):
-     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'YOUR_REPLY_TEXT' --style STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
+   - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim as draft_a_text/draft_a_style (set is_reused_draft=true, draft_b_text=null, draft_b_style=null, recommended_draft="a"). Do NOT call log_draft.py; do NOT redraft; do NOT write a second variant, prior cycle already paid the LLM cost for the one draft you have.
+   - Otherwise (fresh candidate, is_reused_draft=false): write TWO independent drafts.
+     - draft_a_text: follow the DRAFT A style block above (its own description/example/note/length limit).
+     - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move because they follow different style templates, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.
+     - Then set recommended_draft to whichever ("a" or "b") is the stronger, more natural reply for THIS specific thread.
+   - $DRAFT_DIRECTIVE (applies to both drafts on fresh candidates; each still obeys its OWN style's length limit, not a shared one).
+3a. PERSIST THE RECOMMENDED FRESH DRAFT (skip entirely for reused drafts):
+     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'RECOMMENDED_DRAFT_TEXT' --style RECOMMENDED_DRAFT_STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
+   Pass whichever of draft_a_text/draft_b_text you set as recommended_draft, and its matching style, as --text/--style. Always pass the DRAFT A picker assignment ($PICKED_STYLE/$PICKED_MODE) here regardless of which draft was recommended, this call persists only enough to let a near-immediate next cycle reuse a draft verbatim (step 3 above); it does not need to represent Style B.
    The --assigned-style / --assigned-mode flags carry the orchestrator's picker output (this cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}') into the candidate row so the post pipeline can coerce drift and register invented styles. Pass them VERBATIM as shown.
-   If you are inventing a brand-new style this cycle (i.e. \$PICKED_MODE=invent and your STYLE is a new snake_case name not in the style block above), ALSO pass:
+   If the RECOMMENDED draft used an invented style (i.e. its slot's mode is invent and its STYLE is a new snake_case name not in that slot's style block), ALSO pass:
      --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
-   with the same description/example/why_existing_didnt_fit you put in the 'new_style' field of your output JSON for this candidate.
+   with the same description/example/why_existing_didnt_fit you put in that draft's '..._new_style' field of your output JSON for this candidate.
    Failure here is non-fatal, log a warning and continue.
 4. EMIT one entry in the structured 'candidates' array with these fields:
    - candidate_id (int): from the candidate block
@@ -2068,11 +2138,17 @@ For each chosen candidate:
    - thread_author (string): the @handle (no leading @)
    - thread_text (string): the parent tweet's text, condensed to <=500 chars if needed
    - matched_project (string): the project name to attribute this post to
-   - reply_text (string): the FINAL reply text WITHOUT any URL appended (the shell appends the URL later). 250 chars is the hard ceiling (leaves room for a 23-char t.co link inside the 280-char cap) — stay well under it, not up to it.
-   - engagement_style (string): style name applied (or 'reused' for an unchanged stale draft). In USE mode ($PICKED_MODE=use) this MUST be the assigned style name '${PICKED_STYLE}' verbatim; the orchestrator silently coerces drift back. In INVENT mode ($PICKED_MODE=invent) this MUST be a NEW snake_case style name not in the curated style block.
-   - new_style (object, REQUIRED iff INVENT mode produced a new name; OMIT or set null otherwise): {description (string), example (string), why_existing_didnt_fit (string), note (string, optional), target_chars (integer, REQUIRED)}. Same shape you passed to --new-style in step 3a. The post pipeline reads this and POSTs to /api/v1/engagement-styles/registry so the new style lands in engagement_styles_registry alongside Reddit/GitHub/Moltbook inventions. target_chars is the comment length THIS new style wins at, in characters. IMPORTANT: the example you write must be EXACTLY that length — the example IS the canonical length reference, and the hard ceiling is target_chars × 1.5. Write the example first, count its characters, then set target_chars to that count. Bias SHORT: one-liner style ~45, story-arc style up to ~180, never above 220.
+   - is_reused_draft (bool, REQUIRED): true iff you reused an existing draft verbatim per step 3 above, false for a freshly-drafted candidate.
+   - draft_a_text (string, REQUIRED): the FINAL Draft A reply text WITHOUT any URL appended (the shell appends the URL later). 250 chars is the hard ceiling (leaves room for a 23-char t.co link inside the 280-char cap) — stay well under it, not up to it. On a reused candidate this IS the reused text.
+   - draft_a_style (string, REQUIRED): style name applied to draft_a_text (or the reused candidate's existing style). In USE mode ($PICKED_MODE=use) this MUST be the Draft A assigned style name '${PICKED_STYLE}' verbatim; the orchestrator silently coerces drift back. In INVENT mode ($PICKED_MODE=invent) this MUST be a NEW snake_case style name not in the Draft A style block.
+   - draft_a_new_style (object, REQUIRED iff Draft A's INVENT mode produced a new name; OMIT or set null otherwise): {description (string), example (string), why_existing_didnt_fit (string), note (string, optional), target_chars (integer, REQUIRED)}. target_chars is the comment length THIS new style wins at, in characters; the example you write must be EXACTLY that length, write the example first, count its characters, then set target_chars to that count. Bias SHORT: one-liner style ~45, story-arc style up to ~180, never above 220.
+   - draft_a_text_en (string, REQUIRED when language != 'en'; null when language == 'en'): a faithful English translation of draft_a_text. Display-only: the review card shows it so the operator can understand a non-English draft; it is NEVER posted. Translate meaning, not word-by-word; no added commentary.
+   - draft_b_text (string, REQUIRED when is_reused_draft=false; null when is_reused_draft=true): the FINAL Draft B reply text, same rules as draft_a_text, written under the DRAFT B style block instead.
+   - draft_b_style (string, REQUIRED when is_reused_draft=false; null when is_reused_draft=true): style name applied to draft_b_text, same rules as draft_a_style but against the Draft B assignment (USE mode style '${PICKED_STYLE_B}', mode $PICKED_MODE_B).
+   - draft_b_new_style (object, REQUIRED iff Draft B's INVENT mode produced a new name; OMIT or set null otherwise): same shape as draft_a_new_style.
+   - draft_b_text_en (string, REQUIRED when is_reused_draft=false AND language != 'en'; null otherwise): faithful English translation of draft_b_text, same display-only rules as draft_a_text_en.
+   - recommended_draft (string, REQUIRED): "a" or "b", whichever draft you judge stronger for this thread. On a reused candidate this is always "a".
    - language (string): ISO 639-1 code (en, ja, zh, es, ...)
-   - reply_text_en (string, REQUIRED when language != 'en'; OMIT when language == 'en'): a faithful English translation of reply_text. Display-only: the review card shows it so the operator can understand a non-English draft; it is NEVER posted. Translate meaning, not word-by-word; no added commentary.
    - thread_text_en (string, REQUIRED when language != 'en'; OMIT when language == 'en'): a faithful English translation of thread_text (same <=500 char condensation). Display-only, never posted.
    - has_landing_pages (bool): true iff the matched project has BOTH landing_pages.repo AND landing_pages.base_url set in config.json. Otherwise false.
    - link_keyword (string, REQUIRED when has_landing_pages=true; OMIT otherwise): a SHORT 3-6 word phrase that captures the ESSENCE OF YOUR REPLY (not just the thread topic). Think: what would a reader search to find a useful page about what you just said?
