@@ -102,6 +102,7 @@ from AppKit import (
     NSEventModifierFlagShift,
     NSEventModifierFlagDeviceIndependentFlagsMask,
     NSViewWidthSizable,
+    NSColorSpace,
 )
 
 # Styling extras that may be missing on older AppKit; every consumer degrades
@@ -497,6 +498,22 @@ def _fill_color():
         return NSColor.quaternarySystemFillColor()
     except Exception:
         return NSColor.labelColor().colorWithAlphaComponent_(0.06)
+
+
+def _solid(color):
+    """Bake a dynamic/semantic NSColor (textBackgroundColor, controlAccentColor,
+    etc.) down to concrete sRGB components. The card sits inside an
+    NSVisualEffectView (see _frosted); dynamic system colors drawn in that
+    vibrant context render partially see-through against whatever is behind
+    the window instead of the flat opaque/solid color they look like in a
+    normal window (2026-07-08 feedback: the selection ring and its "opaque"
+    backing both still blended into a dark desktop behind the card). Once
+    converted to a plain sRGB color it is no longer a vibrancy-aware dynamic
+    color, so CALayer draws it as flat, fully opaque pixels."""
+    try:
+        return color.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace()) or color
+    except Exception:
+        return color
 
 
 def _round_rect(view, *, border=True):
@@ -1415,37 +1432,39 @@ class _ReviewController(NSObject):
     def _update_draft_borders(self):
         """Redraw the two draft boxes' selection ring in place (no re-render,
         so an in-progress edit/caret in either box is never disturbed): the
-        selected box's outline view gets a thicker system-accent outline (the
-        platform's own selection color, respects the user's macOS accent
-        choice and light/dark mode), the other a plain hairline. Applied to
-        the dedicated outline wrapper, not the scroll view itself; see the
-        comment at its construction in _render for why."""
+        selected box's outline view gets a thick, solid, fixed-blue outline
+        (deliberately NOT the user's system accent color — on a Graphite
+        accent it renders as plain gray and is indistinguishable from chrome;
+        2026-07-08 feedback wanted "a stronger color"), the other a plain
+        hairline. Every color here is baked via _solid() first: drawn as-is,
+        dynamic system colors render partially see-through against whatever is
+        behind the card's frosted/vibrant panel, which was why an earlier pass
+        still looked washed out over a dark desktop. Applied to the dedicated
+        outline wrapper, not the scroll view itself; see the comment at its
+        construction in _render for why."""
+        selected_blue = _solid(NSColor.systemBlueColor())
         for slot, outline in (self._draft_outlines or {}).items():
             try:
                 layer = outline.layer()
                 if layer is None:
                     continue
                 if slot == self._selected_draft:
-                    layer.setBorderWidth_(2.5)
-                    layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
-                    # A thin ring alone read as barely-there against the
-                    # translucent panel (2026-07-08 feedback). The margin
-                    # between this wrapper's edge and the inset scroll view is
-                    # otherwise plain textBackgroundColor, so tinting it toward
-                    # the accent turns that margin into a visible accent halo,
-                    # not just a hairline — obvious at a glance, not just on
-                    # close inspection.
-                    try:
-                        tint = NSColor.textBackgroundColor().blendedColorWithFraction_ofColor_(
-                            0.18, NSColor.controlAccentColor()
-                        )
-                        layer.setBackgroundColor_((tint or NSColor.textBackgroundColor()).CGColor())
-                    except Exception:
-                        layer.setBackgroundColor_(NSColor.textBackgroundColor().CGColor())
+                    layer.setBorderWidth_(3.0)
+                    layer.setBorderColor_(selected_blue.CGColor())
+                    # A ring alone read as barely-there against the frosted
+                    # panel. The margin between this wrapper's edge and the
+                    # inset scroll view is otherwise plain background, so
+                    # tinting it toward the same solid blue turns that margin
+                    # into a visible halo, not just a hairline — obvious at a
+                    # glance, not just on close inspection.
+                    tint = _solid(
+                        NSColor.textBackgroundColor()
+                    ).blendedColorWithFraction_ofColor_(0.30, selected_blue)
+                    layer.setBackgroundColor_((tint or selected_blue).CGColor())
                 else:
                     layer.setBorderWidth_(1.0)
-                    layer.setBorderColor_(NSColor.separatorColor().CGColor())
-                    layer.setBackgroundColor_(NSColor.textBackgroundColor().CGColor())
+                    layer.setBorderColor_(_solid(NSColor.separatorColor()).CGColor())
+                    layer.setBackgroundColor_(_solid(NSColor.textBackgroundColor()).CGColor())
             except Exception:
                 pass
 
