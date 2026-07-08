@@ -23,6 +23,8 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import s4l_state as st  # mcp/menubar/s4l_state.py — shared pause_s4l/resume_s4l
+
 HOME = os.path.expanduser("~")
 
 
@@ -200,7 +202,17 @@ def _handle_tool(name, args):
             "runtime_ready": s.get("runtime_ready"),
             "provisioning": s.get("runtime_provisioning"),
             "onboarding": s.get("onboarding"),
+            "paused": st.is_paused(),
         })
+    if name == "pause_s4l":
+        action = args.get("action") or "status"
+        if action == "pause":
+            res = st.pause_s4l()
+        elif action == "resume":
+            res = st.resume_s4l()
+        else:
+            res = {"ok": True, "paused": st.is_paused()}
+        return _result({"action": action, **res})
     if name == "engagement_mode":
         action = args.get("action") or "get"
         if action == "toggle":
