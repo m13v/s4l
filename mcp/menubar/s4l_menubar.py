@@ -2269,10 +2269,14 @@ class S4LMenuBar(rumps.App):
         # never nag the user mid-onboarding — only the value is now always honest.
         schedule_state = self._schedule_state()
         self._schedule_state_cache = schedule_state
-        # 'stalled' (task present + enabled, host scheduler stopped launching it:
-        # the Desktop warm-session wedge or an account-switch orphan) needs
-        # attention just like missing/disabled, but its primary fix is a Claude
-        # Desktop restart, not re-arm (Karol, 2026-07-06).
+        # 'stalled' (task present + enabled FOR THE ACTIVE ACCOUNT, host
+        # scheduler stopped launching it: the Desktop warm-session wedge,
+        # Karol 2026-07-06) needs attention just like missing/disabled.
+        # schedule_state.py is account-scoped (2026-07-08): an account switch
+        # now correctly resolves to 'missing' (the active account genuinely
+        # has no registration), not 'stalled' — a stale OTHER account's
+        # registry is never consulted for the active account's health, so
+        # 'stalled' can no longer be misdiagnosed here.
         attention = setup_complete and schedule_state in ("missing", "disabled", "stalled")
         # Routines-lane rate limit (429): the draft tasks ARE registered and firing
         # for this account, but every run dies on a Claude rate limit, so nothing
@@ -2304,13 +2308,12 @@ class S4LMenuBar(rumps.App):
         # draft_stuck shadowed the missing/disabled branch in _build_menu — the user
         # saw "worker keeps getting killed" with NO Re-arm button instead of "Draft
         # tasks aren't scheduled on this account" + the one-click fix (Karol,
-        # 2026-07-06). "stalled" is deliberately included (2026-07-08): that branch's
-        # only offered fix is "Restart Claude Desktop", but a job that has sat this
-        # long — claimed-and-hung, OR never claimed at all (see the ⧖ prefix check
-        # below) — means a restart was either already tried and didn't help, or
-        # isn't the right first move; Diagnose is the more useful single action once
-        # we have DRAFT_STUCK_SECONDS of direct evidence from the queue itself,
-        # which is a more reliable signal than the host's lastRunAt staleness.
+        # 2026-07-06). "stalled" is deliberately included (2026-07-08): that
+        # branch's fix (Set up draft schedule / re-arm) works for it too, but a
+        # job that has sat this long — claimed-and-hung, OR never claimed at all
+        # (see the ⧖ prefix check below) — is more specific, direct evidence
+        # from the queue itself than the host's lastRunAt staleness, so it's
+        # worth surfacing as its own reason even under "stalled".
         if (
             setup_complete
             and schedule_state in ("ok", "stalled")
@@ -2965,16 +2968,20 @@ class S4LMenuBar(rumps.App):
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             elif schedule_state == "stalled":
-                # Task registered + enabled but the host stopped launching it: the
-                # Claude Desktop warm-session wedge (finished worker sessions never
-                # exit; the overlap guard skips every fire) or an account-switch
-                # orphan. Re-arm goes through the same real create_scheduled_task
+                # Task registered + enabled FOR THE ACTIVE ACCOUNT (schedule_state.py
+                # is account-scoped, 2026-07-08 — see its module docstring) but the
+                # host stopped launching it: the Claude Desktop warm-session wedge
+                # (finished worker sessions never exit; the overlap guard skips
+                # every fire). Re-arm goes through the same real create_scheduled_task
                 # path as onboarding — a verified fix the user has seen work —
                 # rather than a silent Claude Desktop quit/relaunch with no visible
                 # feedback, which field evidence (2026-07-08) showed doesn't
-                # reliably clear the underlying stall. Distinct label from the
-                # "aren't scheduled" case below since the task DOES exist here;
-                # same one-click remedy either way.
+                # reliably clear the underlying stall (that field incident turned
+                # out to be a DIFFERENT bug: schedule_state.py was reading a stale,
+                # no-longer-active account's registry — now fixed, so "stalled"
+                # here means what it says: same account, task present, just not
+                # firing). Distinct label from the "aren't scheduled" case below
+                # since the task DOES exist here; same one-click remedy either way.
                 items.append(self._label("⚠ Drafts stopped — Claude’s scheduler is stuck"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
