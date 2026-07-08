@@ -18,6 +18,24 @@ import os
 _EMBEDDED_DSN = "https://4d44ac907262c6545cf8681703528d04@o4507617161314304.ingest.us.sentry.io/4511598804336640"
 
 _initialized = False
+_install_id_cache: str | None = None
+
+
+def _install_id() -> str | None:
+    """Cached install_id lookup, used to fingerprint events per-install (see
+    capture_exception/capture_message). Best-effort: "" (not None) is cached on
+    failure so a broken identity.py doesn't re-attempt the read on every call."""
+    global _install_id_cache
+    if _install_id_cache is not None:
+        return _install_id_cache or None
+    try:
+        from identity import get_identity
+
+        ident = get_identity() or {}
+        _install_id_cache = str(ident.get("install_id") or "")
+    except Exception:
+        _install_id_cache = ""
+    return _install_id_cache or None
 
 
 def init() -> None:
@@ -79,12 +97,17 @@ def capture_exception(err, tags=None) -> None:
     except Exception:
         return
     try:
-        if tags:
-            with sentry_sdk.push_scope() as scope:
-                for k, v in tags.items():
-                    scope.set_tag(str(k), str(v))
-                sentry_sdk.capture_exception(err)
-        else:
+        with sentry_sdk.push_scope() as scope:
+            for k, v in (tags or {}).items():
+                scope.set_tag(str(k), str(v))
+            # Mix install_id into the grouping key so the SAME exception on two
+            # different customer boxes lands in two different issues, not one
+            # conflated issue whose "latest event" can silently belong to a
+            # different install than the one you filtered for (default grouping
+            # is by exception type + location, which ignores tags entirely).
+            iid = _install_id()
+            if iid:
+                scope.fingerprint = ["{{ default }}", iid]
             sentry_sdk.capture_exception(err)
     except Exception:
         return
@@ -100,7 +123,12 @@ def capture_message(message, level="error", tags=None, extra=None) -> None:
     `extra` is a dict of larger structured values (e.g. the scheduled-task
     registry summary) attached as event extras — tags are capped at 200 chars
     and would truncate them. Added 2026-07-06: the "needs attention: missing"
-    events carried no registry detail, which cost hours on the Karol case."""
+    events carried no registry detail, which cost hours on the Karol case.
+
+    Fingerprint: mixed with install_id (see capture_exception) — capture_message
+    events group by the message TEXT by default, so two installs hitting the
+    identically-worded stall alert (e.g. "autopilot stalled... sustained N
+    checks") would otherwise merge into one issue and hide per-install history."""
     if not _initialized:
         return
     try:
@@ -108,14 +136,14 @@ def capture_message(message, level="error", tags=None, extra=None) -> None:
     except Exception:
         return
     try:
-        if tags or extra:
-            with sentry_sdk.push_scope() as scope:
-                for k, v in (tags or {}).items():
-                    scope.set_tag(str(k), str(v))
-                for k, v in (extra or {}).items():
-                    scope.set_extra(str(k), v)
-                sentry_sdk.capture_message(str(message), level=level)
-        else:
+        with sentry_sdk.push_scope() as scope:
+            for k, v in (tags or {}).items():
+                scope.set_tag(str(k), str(v))
+            for k, v in (extra or {}).items():
+                scope.set_extra(str(k), v)
+            iid = _install_id()
+            if iid:
+                scope.fingerprint = ["{{ default }}", iid]
             sentry_sdk.capture_message(str(message), level=level)
     except Exception:
         return
