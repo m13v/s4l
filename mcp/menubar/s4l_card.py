@@ -316,15 +316,41 @@ def _engagement_line(stats):
     return " · ".join(parts)
 
 
+def _reply_heading_suffix(d):
+    """Concise 'project/lane · viral N' readout appended straight onto the
+    'Reply (editable):' heading (2026-07-07), so the two facts a reviewer
+    checks first don't require opening the details eye. Pulled from the same
+    fields _details_lines used to render as 'Project:'/'Lane:'/'Virality
+    score:' rows; those three are omitted from the popover now to avoid
+    showing the same numbers twice. Empty string when neither is known."""
+    d = d or {}
+    project = (d.get("project") or "").strip()
+    lane = ((d.get("experiments") or {}).get("lane") or "").strip()
+    bits = []
+    if project and lane:
+        bits.append(f"{project}/{lane}")
+    elif project:
+        bits.append(project)
+    elif lane:
+        bits.append(lane)
+    v = (d.get("stats") or {}).get("virality_score")
+    if v is not None:
+        try:
+            bits.append(f"viral {float(v):g}")
+        except (TypeError, ValueError):
+            pass
+    return " · ".join(bits)
+
+
 def _details_lines(d):
     """Drafting metadata for the reply row's eye popover: how this draft came
-    to be (project routing, engagement style, discovery query, link choice).
-    Everything comes from fields the plan candidate already carries; fields the
-    pipeline didn't stamp are omitted, and an empty list skips the icon."""
+    to be (engagement style, discovery query, link choice). Project, lane,
+    and virality score live inline on the heading itself (_reply_heading_suffix)
+    and are deliberately NOT repeated here. Everything else comes from fields
+    the plan candidate already carries; fields the pipeline didn't stamp are
+    omitted, and an empty list skips the icon."""
     d = d or {}
     lines = []
-    if d.get("project"):
-        lines.append(f"Project: {d['project']}")
     style = (d.get("engagement_style") or "").strip()
     if style:
         lines.append(f"Style: {style}")
@@ -350,10 +376,10 @@ def _details_lines(d):
             def _exp_describe(_name, _variant):
                 return None
     for name in sorted(exps):
-        label = (
-            "Lane" if name == "lane"
-            else f"Experiment {str(name).replace('_', ' ')}"
-        )
+        if name == "lane":
+            # Already surfaced inline on the heading via _reply_heading_suffix.
+            continue
+        label = f"Experiment {str(name).replace('_', ' ')}"
         line = f"{label}: {exps[name]}"
         exp_desc = _exp_describe(name, exps[name])
         if exp_desc:
@@ -384,12 +410,6 @@ def _details_lines(d):
         lines.append(f"Link: {kw}" if kw else f"Link: {d['link_url']}")
     elif (d.get("link_source") or "").strip():
         lines.append(f"Link: none ({d['link_source'].strip().replace('_', ' ')})")
-    v = (d.get("stats") or {}).get("virality_score")
-    if v is not None:
-        try:
-            lines.append(f"Virality score: {float(v):g}")
-        except (TypeError, ValueError):
-            pass
     return lines
 
 
@@ -954,19 +974,26 @@ class _ReviewController(NSObject):
             thread_tv.setDelegate_(self)
         thread_tv.textStorage().setAttributedString_(body)
         content.addSubview_(thread_tv)
-        # Reply heading — black. Right-aligned on the same line: an eye icon
-        # whose hover/click popover carries the DRAFTING metadata (project
-        # routing, engagement style, discovery query, link choice), mirroring
+        # Reply heading — black, with a concise "project/lane · viral N" tag
+        # folded straight into the text (2026-07-07) so those two numbers
+        # don't require opening the eye popover. Right-aligned on the same
+        # line: an eye icon whose hover/click popover carries the remaining
+        # DRAFTING metadata (style, discovery query, link choice), mirroring
         # the author row's engagement-stats eye. Skipped when the plan carries
         # none of it (older plans).
+        heading = (
+            f"Reply (posts in {_lang_name(card_lang)}, editable)"
+            if is_foreign
+            else "Reply (editable)"
+        )
+        heading_suffix = _reply_heading_suffix(d)
+        if heading_suffix:
+            heading += f" · {heading_suffix}"
+        heading += ":"
         content.addSubview_(
             _label(
                 NSMakeRect(M, H - 172, W - 2 * M - 24, 16),
-                (
-                    f"Reply (posts in {_lang_name(card_lang)}, editable):"
-                    if is_foreign
-                    else "Reply (editable):"
-                ),
+                heading,
                 size=12,
                 bold=True,
                 muted=True,
