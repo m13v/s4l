@@ -2968,12 +2968,15 @@ class S4LMenuBar(rumps.App):
                 # Task registered + enabled but the host stopped launching it: the
                 # Claude Desktop warm-session wedge (finished worker sessions never
                 # exit; the overlap guard skips every fire) or an account-switch
-                # orphan. _restart_claude_fix_work already runs the registry
-                # self-heal (ensure-worker/orphan repair) while Claude is down,
-                # before relaunching — so it covers both known causes in one click,
-                # making it the one relevant action here (Karol, 2026-07-06).
+                # orphan. Re-arm goes through the same real create_scheduled_task
+                # path as onboarding — a verified fix the user has seen work —
+                # rather than a silent Claude Desktop quit/relaunch with no visible
+                # feedback, which field evidence (2026-07-08) showed doesn't
+                # reliably clear the underlying stall. Distinct label from the
+                # "aren't scheduled" case below since the task DOES exist here;
+                # same one-click remedy either way.
                 items.append(self._label("⚠ Drafts stopped — Claude’s scheduler is stuck"))
-                items.append(rumps.MenuItem("Restart Claude Desktop to fix", callback=self._restart_claude_fix))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
