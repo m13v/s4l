@@ -217,6 +217,36 @@ def _sentry():
     return sentry_init
 
 
+def _report_recovery(total_duration_s: float, paged_duration_s: float | None) -> None:
+    """Log a recovery milestone (with duration) once per stall episode that
+    actually paged. Previously this had to be hand-reconstructed per incident by
+    diffing DB/log timestamps after the fact (see the Karol 2026-07-07
+    update-orphan investigation); this makes it a first-class, queryable Sentry
+    event so incident severity is trackable fleet-wide over time instead of
+    per-investigation. Only fires for episodes that crossed ALERT_AFTER — a
+    stall that self-clears before paging is normal jitter, not an incident."""
+    try:
+        sentry = _sentry()
+        sentry.init()
+        total_min = total_duration_s / 60.0
+        paged_str = f"{paged_duration_s / 60.0:.1f} min" if paged_duration_s is not None else "n/a"
+        sentry.capture_message(
+            "social-autoposter autopilot recovered: draft jobs draining again "
+            f"after {total_min:.1f} min stalled ({paged_str} since it paged).",
+            level="info",
+            tags={"component": "autopilot", "issue": "stall_recovered"},
+            extra={
+                "stall_total_duration_seconds": round(total_duration_s, 1),
+                "stall_paged_duration_seconds": (
+                    round(paged_duration_s, 1) if paged_duration_s is not None else None
+                ),
+            },
+        )
+        sentry.flush()
+    except Exception:
+        sys.stderr.write(f"[stall-watch] recovered after {total_duration_s:.0f}s but Sentry report failed\n")
+
+
 def main() -> int:
     age = _oldest_pending_age()
     run_age = _oldest_running_age()
@@ -239,14 +269,27 @@ def main() -> int:
     st = _read_state()
     consecutive = int(st.get("consecutive", 0))
     alerted = bool(st.get("alerted", False))
+    # first_seen_at: first check this episode looked stalled at all (predates
+    # paging by ALERT_AFTER checks). alerted_at: the single moment we paged.
+    # Both are stamped once and carried forward untouched for the rest of the
+    # episode — NOT refreshed every check — so they measure the episode's
+    # start, not "last time we saw it stalled".
+    first_seen_at = st.get("first_seen_at")
+    alerted_at = st.get("alerted_at")
 
     if not stalled:
         # Recovered (or never stalled) -> reset the episode so the next stall pages.
         if consecutive or alerted:
+            if alerted and first_seen_at:
+                total_duration = time.time() - float(first_seen_at)
+                paged_duration = (time.time() - float(alerted_at)) if alerted_at else None
+                _report_recovery(total_duration, paged_duration)
             _write_state({"consecutive": 0, "alerted": False})
         return 0
 
     consecutive += 1
+    if first_seen_at is None:
+        first_seen_at = time.time()
     age_str = f"{int(age)}s" if age is not None else "n/a (between cycles)"
     run_age_str = f"{int(run_age)}s" if run_age is not None else "n/a (none in flight)"
     # Distinguish the two shapes so the alert points at the right cause: a claimed-
@@ -285,8 +328,15 @@ def main() -> int:
                 f"pending_age={age_str}, running_age={run_age_str}) but Sentry report failed\n"
             )
         alerted = True
+        alerted_at = time.time()
 
-    _write_state({"consecutive": consecutive, "alerted": alerted, "at": time.time()})
+    _write_state({
+        "consecutive": consecutive,
+        "alerted": alerted,
+        "first_seen_at": first_seen_at,
+        "alerted_at": alerted_at,
+        "at": time.time(),
+    })
     return 0
 
 
