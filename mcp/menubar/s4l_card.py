@@ -879,7 +879,7 @@ class _ReviewController(NSObject):
                 )
         else:
             content.addSubview_(
-                _label(NSMakeRect(M + 78, H - 70, handle_w, 18), "thread", size=12, bold=True)
+                _label(NSMakeRect(M + 78, H - 70, handle_w, 18), "thread", size=12, bold=True, muted=True)
             )
         # Non-English drafts: the prep step stamps display-only English
         # translations (thread_text_en / reply_text_en) on the candidate. The
@@ -899,7 +899,18 @@ class _ReviewController(NSObject):
         )
         thread_tv.setEditable_(False)
         thread_tv.setSelectable_(True)  # links only respond when selectable
-        thread_tv.setDrawsBackground_(False)
+        # Quote-style block (subtle rounded fill, like a quoted tweet) so the
+        # thread reads as *their* content and the editor below as *ours*.
+        # Same frame as the old flat text; only the skin changed.
+        if _round_rect(thread_tv, border=False):
+            thread_tv.setDrawsBackground_(True)
+            thread_tv.setBackgroundColor_(_fill_color())
+            try:
+                thread_tv.setTextContainerInset_(NSMakeSize(6, 5))
+            except Exception:
+                pass
+        else:
+            thread_tv.setDrawsBackground_(False)
         # An NSTextView grows vertically by default; long threads inflated the
         # frame over the author row above (non-flipped superview: growth goes
         # UP) and pushed the trailing ↗ out of the box. Pin the frame and
@@ -944,6 +955,7 @@ class _ReviewController(NSObject):
                 ),
                 size=12,
                 bold=True,
+                muted=True,
             )
         )
         if _details_lines(d):
@@ -984,7 +996,7 @@ class _ReviewController(NSObject):
         content.addSubview_(scroll)
         self._textview = tv
 
-        self._panel.setContentView_(content)
+        self._panel.setContentView_(_frosted(content))
         # Counter lives in the native title bar, not inside the content, with
         # the product name so a stray card is identifiable at a glance.
         self._panel.setTitle_(
@@ -1127,7 +1139,7 @@ class _ReviewController(NSObject):
         _link_targets so one openLink: selector serves every link on the card."""
         btn = NSButton.alloc().initWithFrame_(frame)
         btn.setBordered_(False)
-        font = NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
+        font = _font(size, bold)
         attrs = {
             NSFontAttributeName: font,
             NSForegroundColorAttributeName: NSColor.linkColor(),
@@ -1321,6 +1333,10 @@ class _ReviewController(NSObject):
         skip = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 150, H - 42, 150, 30))
         skip.setTitle_("Reject, no reason")
         skip.setBezelStyle_(NSBezelStyleRounded)
+        try:
+            skip.setHasDestructiveAction_(True)  # red title on macOS 12+
+        except Exception:
+            pass
         skip.setTarget_(self)
         skip.setAction_("rejectSkip:")
         content.addSubview_(skip)
