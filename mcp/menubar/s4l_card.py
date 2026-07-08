@@ -1086,6 +1086,7 @@ class _ReviewController(NSObject):
         drafts = d.get("drafts")
         dual = isinstance(drafts, list) and len(drafts) == 2
         sel_idx = self._selected_draft if (dual and self._selected_draft in (0, 1)) else 0
+        print(f"DEBUG dual={dual} drafts={drafts!r} sel_idx={sel_idx}", flush=True)
         if dual:
             self._selected_draft = sel_idx
 
@@ -1373,15 +1374,20 @@ class _ReviewController(NSObject):
             try:
                 layer = scroll.layer()
                 if layer is None:
+                    print(f"DEBUG slot={slot} layer is None")
                     continue
                 if slot == self._selected_draft:
                     layer.setBorderWidth_(2.0)
                     layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
+                    print(f"DEBUG slot={slot} SELECTED set width=2.0 accent")
                 else:
                     layer.setBorderWidth_(1.0)
                     layer.setBorderColor_(NSColor.separatorColor().CGColor())
-            except Exception:
-                pass
+                    print(f"DEBUG slot={slot} plain set width=1.0 separator")
+            except Exception as e:
+                import traceback
+                print(f"DEBUG EXCEPTION slot={slot}: {e}")
+                traceback.print_exc()
 
     @objc.python_method
     def _current_text(self):
