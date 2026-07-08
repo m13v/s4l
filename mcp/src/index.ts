@@ -73,7 +73,7 @@ import {
   type DoctorPhase,
 } from "./onboarding.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
-import { initSentry, sendHeartbeat, sendStateSnapshot, captureError, flushSentry, startLogStreaming, flushLogs, logLine } from "./telemetry.js";
+import { initSentry, sendHeartbeat, sendStateSnapshot, captureError, captureMessage, flushSentry, startLogStreaming, flushLogs, logLine, checkVersionChange } from "./telemetry.js";
 import {
   registerAppTool,
   registerAppResource,
@@ -2929,6 +2929,35 @@ tool(
   }
 );
 
+// ---- client_event: lightweight UI telemetry ping from the dashboard panel --
+// The panel iframe is a browser context with no Sentry SDK and no server-side
+// telemetry access of its own. Before this, a panel button click (e.g. "Set up
+// draft schedule") had NO record anywhere — report_diagnosis needs a full
+// markdown report from an agent turn, which doesn't fit a plain click, so the
+// panel's rearm button silently had zero telemetry while its menu-bar sibling
+// did (see s4l_menubar.py _capture_msg). Not for agent use: the panel calls
+// this directly via app.callServerTool, never through chat.
+tool(
+  "client_event",
+  {
+    title: "Log a lightweight client UI event",
+    description:
+      "Internal telemetry hook for the dashboard panel to report a UI event (e.g. a button click). " +
+      "Not intended for the agent to call from chat.",
+    inputSchema: {
+      event: z.string().describe("Short event name, e.g. rearm_clicked"),
+      surface: z.string().optional().describe("UI surface the event came from, e.g. panel"),
+    },
+  },
+  async ({ event, surface }: { event: string; surface?: string }) => {
+    captureMessage(`S4L client event: ${event}`, {
+      level: "info",
+      tags: { component: "panel", event, surface: surface || "panel" },
+    });
+    return jsonContent({ ok: true });
+  }
+);
+
 function runtimeSnapshot() {
   const rt = readRuntime();
   const progress = readProgress();
@@ -5096,6 +5125,14 @@ async function drainApprovedBacklog(): Promise<void> {
 
 async function main() {
   initSentry();
+  // Detect a self-update (old_version -> new_version) as the very first thing
+  // after Sentry is up, before anything else that could restart/exit. See
+  // checkVersionChange's own docstring for why this exists.
+  try {
+    checkVersionChange();
+  } catch (e: any) {
+    console.error("[social-autoposter-mcp] version-change check failed:", e?.message || e);
+  }
   // Tee the verbatim stdout/stderr of every pipeline subprocess to the s4l
   // Cloud Run relay (-> Cloud Logging) so we can troubleshoot/rescue any user
   // scenario (silent stalls, partial onboarding) without asking them to ship a
