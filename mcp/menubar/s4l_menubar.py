@@ -2884,12 +2884,22 @@ class S4LMenuBar(rumps.App):
                 else:
                     res = st.post_drafts(batch, post=[n], clear_link=cl, activity_label=activity_label)
                 if res is None:
-                    # Loopback unreachable (Claude closed). Mark failed so the card
-                    # falls back to manual review rather than silently vanishing.
-                    st.approved_queue_set_status(batch, n, "failed", error="loopback_unreachable")
-                    st.store_mark_post_failed(batch, n, decision.get("candidate_id"), "loopback_unreachable")
+                    # Loopback unreachable (Claude closed, mid-restart, or an
+                    # account switch tore down the old MCP server before a new
+                    # one registered). Unlike a real posting failure, nothing
+                    # was ever attempted here — post_drafts never reached a
+                    # server — so there's no double-post risk in retrying.
+                    # Deliberately do NOT call store_mark_post_failed / set
+                    # status "failed": both would exclude this card from
+                    # store_pending_posts()/approved_queue_pending(), which is
+                    # exactly what _resume_approved_queue() reads on the next
+                    # unreachable->reachable edge. Leaving it "queued" lets
+                    # that existing restart-recovery path retry it
+                    # automatically once a server re-registers, instead of
+                    # stranding it for manual dashboard retry.
+                    st.approved_queue_set_status(batch, n, "queued", error="loopback_unreachable")
                     self._notify(
-                        "S4L", "Couldn't post — open Claude Desktop and try the draft again."
+                        "S4L", "Server unreachable — will retry automatically once Claude Desktop reconnects."
                     )
                 else:
                     posted = res.get("posted") if isinstance(res, dict) else None
