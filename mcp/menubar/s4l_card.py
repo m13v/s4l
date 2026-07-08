@@ -114,6 +114,12 @@ try:
     from AppKit import NSVisualEffectView
 except Exception:
     NSVisualEffectView = None
+try:
+    # Registers the CGColor bridge type; without it every NSColor.CGColor()
+    # call in _round_rect logs an ObjCPointerWarning to menubar.err.log.
+    import Quartz  # noqa: F401
+except Exception:
+    pass
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
 # (the classic "button click crashes" footgun).
@@ -1354,27 +1360,46 @@ class _ReviewController(NSObject):
             btn.setAction_("rejectReason:")
             content.addSubview_(btn)
             y -= 32
-        note = NSTextField.alloc().initWithFrame_(NSMakeRect(M, 14, W - 2 * M, y + 28 - 14 - 8))
-        note.setEditable_(True)
-        note.setBezeled_(True)
-        # Same rounded-rect skin as the reply editor; square bezel is the fallback.
-        if _round_rect(note):
-            note.setBezeled_(False)
+        # Optional-note field, skinned like the reply editor: a rounded-rect
+        # wrapper carries the fill + hairline border while the borderless
+        # field sits inset inside it so the text doesn't hug the border (an
+        # unbezeled NSTextField has zero internal padding). Same outer frame
+        # as the old bezeled field, which remains the fallback.
+        note_frame = NSMakeRect(M, 14, W - 2 * M, y + 28 - 14 - 8)
+        wrap = NSView.alloc().initWithFrame_(note_frame)
+        if _round_rect(wrap):
             try:
-                note.setDrawsBackground_(True)
-                note.setBackgroundColor_(NSColor.textBackgroundColor())
+                wrap.layer().setBackgroundColor_(
+                    NSColor.textBackgroundColor().CGColor()
+                )
+            except Exception:
+                pass
+            note = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(
+                    6, 4, note_frame.size.width - 12, note_frame.size.height - 8
+                )
+            )
+            note.setBezeled_(False)
+            note.setDrawsBackground_(False)
+            try:
                 # The square focus ring fights the rounded skin (renders as a
                 # heavy outline); the border already marks the field.
                 note.setFocusRingType_(1)  # NSFocusRingTypeNone
             except Exception:
                 pass
+            wrap.addSubview_(note)
+            content.addSubview_(wrap)
+        else:
+            note = NSTextField.alloc().initWithFrame_(note_frame)
+            note.setBezeled_(True)
+            content.addSubview_(note)
+        note.setEditable_(True)
         note.setFont_(NSFont.systemFontOfSize_(12))
         try:
             note.setPlaceholderString_("Optional note (sent with whichever reason you pick)")
             note.cell().setWraps_(True)
         except Exception:
             pass
-        content.addSubview_(note)
         self._reason_field = note
 
         self._textview = None
