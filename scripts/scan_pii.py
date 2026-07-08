@@ -56,6 +56,14 @@ SECRET_PATTERNS = [
 # Absolute home path leak. Placeholder forms (/Users/<you>, /Users/USERNAME) pass.
 HOME_PATH_RE = re.compile(r"/Users/(?!<|USER|USERNAME|you\b|me\b|name\b)[a-z0-9._-]{2,}", re.I)
 
+
+def _home_path_exempt(path: str) -> bool:
+    """launchd .plist files legitimately require absolute paths — launchd does not
+    expand ~ or $HOME in ProgramArguments/StandardOutPath/etc. The repo already
+    tracks 70+ of them, so exempt this file class from the absolute-home-path rule.
+    Secrets, PII, and image checks still apply."""
+    return path.startswith("launchd/") and path.endswith(".plist")
+
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff"}
 
 
@@ -146,7 +154,7 @@ def scan(paths: list[str], staged: bool) -> tuple[list[str], list[str]]:
             if deny_re and deny_re.search(text):
                 m = deny_re.search(text)
                 hard.append(f"{path}:{lineno}: PII denylist match ('{m.group(0)}')")
-            if HOME_PATH_RE.search(text):
+            if HOME_PATH_RE.search(text) and not _home_path_exempt(path):
                 m = HOME_PATH_RE.search(text)
                 (hard if staged else soft).append(
                     f"{path}:{lineno}: absolute home path ('{m.group(0)}...')"
