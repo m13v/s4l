@@ -1242,12 +1242,31 @@ class _ReviewController(NSObject):
         try:
             return str(self._textview.string())
         except Exception:
-            return self._drafts[self._idx].get("reply_text") or ""
+            d = self._drafts[self._idx]
+            drafts = d.get("drafts")
+            if isinstance(drafts, list) and len(drafts) == 2 and self._selected_draft in (0, 1):
+                return drafts[self._selected_draft].get("text") or ""
+            return d.get("reply_text") or ""
 
     @objc.python_method
     def _record(self, approved, reject_category=None, reject_note=None, loved=False):
         d = self._drafts[self._idx]
-        orig = (d.get("reply_text") or "").strip()
+        # Two-draft cards: `orig` (what counts as "unedited") is whichever
+        # draft is CURRENTLY SELECTED, not always the plan's default
+        # reply_text. Otherwise picking the non-recommended draft without
+        # further hand-editing would show up as `edited=True` with the
+        # recommended draft as `original_text`, which would look exactly
+        # like a human rewrite to the edit-learning digest and pollute it.
+        drafts = d.get("drafts")
+        dual = isinstance(drafts, list) and len(drafts) == 2
+        sel_idx = self._selected_draft if (dual and self._selected_draft in (0, 1)) else None
+        if sel_idx is not None:
+            chosen_draft = drafts[sel_idx]
+            orig = (chosen_draft.get("text") or "").strip()
+            draft_variant = chosen_draft.get("variant") or ("a" if sel_idx == 0 else "b")
+        else:
+            orig = (d.get("reply_text") or "").strip()
+            draft_variant = None
         link = d.get("link_url") or ""
         drop_link = False
         if approved:
@@ -1268,6 +1287,8 @@ class _ReviewController(NSObject):
             body = re.sub(r"[ \t]{2,}", " ", text).strip()
         else:
             body = orig
+        rec_idx = d.get("recommended_draft_index")
+        rec_idx = rec_idx if rec_idx in (0, 1) else 0
         self._decisions.append(
             {
                 "n": d["n"],
@@ -1295,6 +1316,13 @@ class _ReviewController(NSObject):
                 # edit/reject patterns per language. draft_text/original_text
                 # stay in the ORIGINAL language (that is what posts).
                 "language": d.get("language"),
+                # Two-draft cards: which draft ("a"|"b") was showing when this
+                # decision was made, its 0/1 index, and whether that matches
+                # the model's own recommendation. None/False on single-draft
+                # candidates. Kept separate from `edited` above by design.
+                "draft_variant": draft_variant,
+                "draft_index": sel_idx,
+                "draft_auto_selected": bool(dual and sel_idx is not None and sel_idx == rec_idx),
             }
         )
         self._last_decision_at = time.time()
@@ -1348,6 +1376,21 @@ class _ReviewController(NSObject):
             pass
 
     # ObjC selectors (trailing underscore -> "approve:" etc.)
+    def selectDraft_(self, sender):
+        # Two-draft cards: switch which draft (0=a, 1=b) seeds the editable
+        # field. Discards any in-progress hand-edit of the previously-shown
+        # draft (the toggle is a "look at the other one" action, not a merge)
+        # and re-renders the card fresh from the newly-selected draft's text.
+        try:
+            slot = int(sender.tag())
+        except Exception:
+            return
+        if slot not in (0, 1) or slot == self._selected_draft:
+            return
+        self._selected_draft = slot
+        self._track(f"draft_select_{'a' if slot == 0 else 'b'}")
+        self._render()
+
     def approve_(self, sender):
         # One emoji row, one click: the clicked emoji's tag IS the approval
         # level. Commits and advances immediately; level 2+ is the loved
