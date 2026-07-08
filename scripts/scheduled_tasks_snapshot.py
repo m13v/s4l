@@ -159,6 +159,108 @@ def build_summary() -> dict:
     }
 
 
+STATE_CACHE_PATH = os.path.join(
+    os.path.expanduser("~"), ".social-autoposter-mcp", "scheduled-tasks-last-state.json"
+)
+
+
+def _load_last_state() -> dict:
+    try:
+        with open(STATE_CACHE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_last_state(state: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(STATE_CACHE_PATH), exist_ok=True)
+        tmp = f"{STATE_CACHE_PATH}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, STATE_CACHE_PATH)
+    except Exception:
+        pass
+
+
+def _registry_key(reg: dict) -> str:
+    return f"{reg.get('data_dir')}/{reg.get('account')}/{reg.get('session')}"
+
+
+def _report_registry_change(message: str, changes: list) -> None:
+    """Best-effort Sentry breadcrumb for a registry transition. Silent no-op if
+    sentry-sdk/S4L_REPO_DIR are unavailable, so this stays additive and never
+    threatens the script's primary --summary (heartbeat) path."""
+    try:
+        repo = os.environ.get("S4L_REPO_DIR")
+        if repo:
+            scripts_dir = os.path.join(repo, "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+        import sentry_init
+
+        sentry_init.init()
+        sentry_init.capture_message(
+            message,
+            level="info",
+            tags={"component": "scheduled-tasks-snapshot", "issue": "registry_change"},
+            extra={"changes": changes},
+        )
+        sentry_init.flush()
+    except Exception:
+        pass
+
+
+def diff_and_emit(per_registry: list) -> list:
+    """Compare the current per-registry worker_ids/enabled state against the
+    last observed state (cached locally) and emit ONE distinct event per real
+    transition: a registry gaining/losing the worker task, `enabled` flipping,
+    or a registry appearing/disappearing entirely. Silent when nothing changed.
+
+    This exists because reconstructing "when did the registry actually change"
+    previously required diffing dozens of raw --summary snapshots by hand (see
+    the Karol 2026-07-07 update-orphan investigation) — every poll logged full
+    state unconditionally, with no distinct signal for an actual transition.
+    Returns the list of change strings (empty if nothing changed). Best-effort:
+    never raises, and never touches the registry files themselves."""
+    changes: list = []
+    try:
+        last = _load_last_state()
+        current = {}
+        for reg in per_registry:
+            key = _registry_key(reg)
+            snap = {
+                "worker_ids": sorted(reg.get("worker_ids") or []),
+                "enabled": bool(reg.get("enabled")),
+            }
+            current[key] = snap
+            prev = last.get(key)
+            if prev is None:
+                if snap["worker_ids"]:
+                    changes.append(
+                        f"{key}: registry appeared with worker_ids={snap['worker_ids']} "
+                        f"enabled={snap['enabled']}"
+                    )
+                continue
+            if prev.get("worker_ids") != snap["worker_ids"] or prev.get("enabled") != snap["enabled"]:
+                changes.append(
+                    f"{key}: worker_ids {prev.get('worker_ids')}->{snap['worker_ids']} "
+                    f"enabled {prev.get('enabled')}->{snap['enabled']}"
+                )
+        for key, prev in last.items():
+            if key not in current and (prev or {}).get("worker_ids"):
+                changes.append(f"{key}: registry disappeared (had worker_ids={prev.get('worker_ids')})")
+
+        if changes:
+            message = "scheduled-tasks registry changed: " + "; ".join(changes)
+            sys.stderr.write(f"[scheduled-tasks-snapshot] {message}\n")
+            _report_registry_change(message, changes)
+        _save_last_state(current)
+    except Exception:
+        pass
+    return changes
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -169,6 +271,11 @@ def main() -> int:
     args = parser.parse_args()
 
     summary = build_summary()
+    # Side effect deliberately confined to the standalone-script path (not
+    # build_summary(), which s4l_menubar.py also imports in-process on every
+    # warning capture — doing the diff there would cache-thrash and could
+    # double-report on every menu-bar poll instead of once per real change).
+    diff_and_emit(summary.get("per_registry") or [])
     if args.summary:
         sys.stdout.write(json.dumps(summary, separators=(",", ":")))
     else:
