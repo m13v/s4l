@@ -2508,7 +2508,20 @@ tool(
         .optional()
         .describe("1-based draft numbers to post as drafted, e.g. [1, 3, 5]."),
       edits: z
-        .array(z.object({ n: z.number().int().positive(), text: z.string() }))
+        .array(
+          z.object({
+            n: z.number().int().positive(),
+            text: z.string(),
+            variant: z
+              .enum(["a", "b"])
+              .optional()
+              .describe(
+                "Two-draft cards only: which of candidate n's `drafts` entries this text came " +
+                  "from, so the candidate's style/assigned_style/assigned_mode are switched to " +
+                  "match (otherwise engagement_style stats would be attributed to the wrong style)."
+              ),
+          })
+        )
         .optional()
         .describe("Rewrites: each {n, text} replaces draft n's wording, then posts it."),
       post_all: z.boolean().optional().describe("Post every draft in the batch."),
@@ -2573,7 +2586,22 @@ tool(
         warnings.push(`ignored empty edit for #${e.n}`);
         return;
       }
-      candidates[e.n - 1].reply_text = text;
+      const c = candidates[e.n - 1];
+      c.reply_text = text;
+      // Two-draft cards: the human switched to the OTHER draft (with or
+      // without further hand-editing its text). Carry that draft's own
+      // style/assigned_style/assigned_mode onto the candidate so
+      // twitter_post_plan.py's per-candidate drift-coercion posts under (and
+      // logs) the style that's ACTUALLY posting, not whichever draft was
+      // recommended at plan-write time.
+      if (e.variant && Array.isArray(c.drafts)) {
+        const chosen = c.drafts.find((d) => d.variant === e.variant);
+        if (chosen) {
+          c.engagement_style = chosen.style ?? c.engagement_style;
+          c.assigned_style = chosen.assigned_style ?? null;
+          c.assigned_mode = chosen.assigned_mode ?? c.assigned_mode;
+        }
+      }
       approve.add(e.n);
       editedCount++;
     });
