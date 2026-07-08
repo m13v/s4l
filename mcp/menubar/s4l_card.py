@@ -1134,7 +1134,6 @@ class _ReviewController(NSObject):
                 content.addSubview_(scroll)
                 self._draft_scrolls[slot] = scroll
                 self._draft_textviews[slot] = tv
-            self._update_draft_borders()
             tv = self._draft_textviews[sel_idx]
         else:
             reply = d.get("reply_text") or ""
@@ -1162,6 +1161,13 @@ class _ReviewController(NSObject):
         self._textview = tv
 
         self._panel.setContentView_(_frosted(content))
+        if dual:
+            # Layer border properties set before a view is attached to its
+            # eventual window get silently dropped when AppKit backs the view
+            # for real on attach, so the accent outline must be (re)applied
+            # only after setContentView_ installs the view tree, not during
+            # construction above.
+            self._update_draft_borders()
         # Counter lives in the native title bar, not inside the content, with
         # the product name so a stray card is identifiable at a glance.
         self._panel.setTitle_(
