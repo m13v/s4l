@@ -127,7 +127,11 @@ except Exception:
 _active = None
 
 W = 380
-H = 300
+# 2026-07-08: raised 300 -> 420 so two-draft cards can show both drafts at
+# full, comfortable editing height simultaneously (see _render()'s dual
+# branch); single-draft cards get the same extra room, which is a net
+# improvement there too, not a regression.
+H = 420
 M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
 
@@ -612,13 +616,19 @@ class _ReviewController(NSObject):
         self._interactions = []
         self._card_shown_at = None
         self._reason_field = None
-        # Two-draft cards: which slot (0=a, 1=b) is currently showing in the
-        # editable field. None = not yet chosen this card, _render() defaults
-        # it to the candidate's recommended_draft_index. Reset to None on
-        # every NEW card (see _render()'s "fresh card" branch below), so a
-        # switch made on one card never bleeds into the next.
+        # Two-draft cards (2026-07-08 redesign): both drafts render at once as
+        # separate editable boxes; `_selected_draft` (0=a, 1=b) is "whichever
+        # box the reviewer is currently in", driven by focus (see
+        # textDidBeginEditing_ below), not a button. None = not yet chosen
+        # this card, _render() defaults it to recommended_draft_index. Reset
+        # to None on every NEW card (see _render()'s "fresh card" branch
+        # below), so a switch made on one card never bleeds into the next.
+        # _draft_textviews/_draft_scrolls map slot -> its NSTextView/
+        # NSScrollView so the delegate callback and border-styling helper can
+        # find them; both empty on single-draft cards.
         self._selected_draft = None
-        self._draft_toggle_btns = {}
+        self._draft_textviews = {}
+        self._draft_scrolls = {}
         # Attention anchors for the unattended-review watchdog: the stack counts
         # as "touched" on present, on any tracked interaction, and on any
         # decision. No touch past the watchdog threshold = the user is not
