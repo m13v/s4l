@@ -82,6 +82,85 @@ def state_dir() -> str:
     )
 
 
+# ---- pause/resume: stop drafting/posting without touching Claude Desktop ---
+# Real mechanics (flag file + launchctl bootout/bootstrap), NOT a loopback call
+# to the MCP: this needs to work from BOTH the menu bar (s4l_menubar.py) and
+# the Claude-independent dashboard_server.py, which share this process but
+# are a different process from the MCP server, so there's no way to delegate
+# to mcp/src/index.ts's pauseS4L/resumeS4L here. Mirrors those functions
+# (same 4 labels, same flag path) for the common pause->resume case. What it
+# deliberately does NOT do: mcp/src/index.ts's resumeS4L also re-runs the
+# readiness-gated install logic (persona/project/X-verified checks, content-
+# aware plist rewrite) via ensure*Installed() — that only matters for a box
+# that was never fully set up before Pause, an edge case the next Claude
+# boot / project_config call naturally heals once unpaused. This resume just
+# reloads the exact plists Pause unloaded (Pause never deletes anything).
+PAUSE_TARGET_LABELS = (
+    AUTOPILOT_LABEL,
+    "com.m13v.social-claude-reaper",
+    "com.m13v.social-autopilot-stall-watch",
+    "com.m13v.social-memory-snapshot",
+)
+
+
+def pause_flag_path() -> str:
+    return os.path.join(state_dir(), "paused.flag")
+
+
+def is_paused() -> bool:
+    return os.path.exists(pause_flag_path())
+
+
+def pause_s4l() -> dict:
+    if is_paused():
+        return {"ok": True, "paused": True, "detail": "already paused"}
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(pause_flag_path(), "w") as fh:
+            fh.write(f"paused at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
+    except Exception as e:
+        return {"ok": False, "paused": is_paused(), "detail": f"could not write pause flag: {e}"}
+    uid = os.getuid()
+    results = []
+    for label in PAUSE_TARGET_LABELS:
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{uid}/{label}"],
+                capture_output=True, timeout=15,
+            )
+            results.append(f"{label}: unloaded")
+        except Exception as e:
+            results.append(f"{label}: {e}")
+    return {"ok": True, "paused": True, "detail": "; ".join(results)}
+
+
+def resume_s4l() -> dict:
+    try:
+        os.remove(pause_flag_path())
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    uid = os.getuid()
+    la_dir = str(Path.home() / "Library" / "LaunchAgents")
+    results = []
+    for label in PAUSE_TARGET_LABELS:
+        plist = os.path.join(la_dir, f"{label}.plist")
+        if not os.path.exists(plist):
+            results.append(f"{label}: no plist, skip")
+            continue
+        try:
+            subprocess.run(["launchctl", "enable", f"gui/{uid}/{label}"], capture_output=True, timeout=15)
+            r = subprocess.run(
+                ["launchctl", "bootstrap", f"gui/{uid}", plist],
+                capture_output=True, timeout=15,
+            )
+            results.append(f"{label}: rc={r.returncode}")
+        except Exception as e:
+            results.append(f"{label}: {e}")
+    return {"ok": True, "paused": is_paused(), "detail": "; ".join(results)}
+
+
 def read_json(name: str):
     try:
         return json.loads((Path(state_dir()) / name).read_text())
