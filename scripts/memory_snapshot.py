@@ -699,6 +699,7 @@ def build_summary() -> dict[str, Any]:
         "reaper": reaper_status(),
         "menubar": menubar_status(),
         "twitter_cycle": twitter_cycle_status(),
+        "draft_publish": draft_publish_wrapper_status(),
         "process_count": len(rows),
         "mem": {
             "total_mb": total,
@@ -866,6 +867,32 @@ def twitter_cycle_status() -> dict[str, Any] | None:
             "log": p.name,
             "age_sec": round(time.time() - p.stat().st_mtime, 1),
             "last_lines": [ln[:200] for ln in lines[-3:]],
+        }
+    except Exception:
+        return None
+
+
+def draft_publish_wrapper_status() -> dict[str, Any] | None:
+    """Tail of run-draft-and-publish.sh's launchd stderr log.
+
+    run-twitter-cycle.sh's OWN log (see twitter_cycle_status above) only shows
+    that a cycle drafted; it says nothing about whether those drafts actually
+    became review cards. That decision happens one level up, in the
+    [run-draft-and-publish]/[merge_review_queue] lines this wrapper prints to
+    its own stderr (draft-only on/off, posting-defer skips, merge success/
+    failure/count). Those lines land in a real file via the launchd plist's
+    StandardErrorPath, but nothing centrally tailed them, which blinded the
+    2026-07-08 Karol investigation to whether merges were succeeding even
+    though the inner cycle log looked healthy. Best-effort."""
+    try:
+        p = REPO_DIR / "skill" / "logs" / "launchd-twitter-cycle-stderr.log"
+        if not p.exists():
+            return None
+        lines = [ln.strip() for ln in _tail_lines(p, 16) if ln.strip()]
+        return {
+            "log": p.name,
+            "age_sec": round(time.time() - p.stat().st_mtime, 1),
+            "last_lines": [ln[:200] for ln in lines[-8:]],
         }
     except Exception:
         return None
