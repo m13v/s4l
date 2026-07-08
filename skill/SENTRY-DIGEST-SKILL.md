@@ -62,7 +62,7 @@ Your prompt gives you:
   ```
 - The ledger path (persistent state across runs, same file the scan compared
   against).
-- The outcome file path (mandatory to write, see Step 6).
+- The outcome file path (mandatory to write, see Step 7).
 
 ## Ledger (persistent state across runs)
 
@@ -128,7 +128,44 @@ For each issue you're investigating:
    `failure_reasons`, `skip_reasons`, `exit_code` if present on this event
    type).
 
-2. **Find the crashing code.** Look at stack frames for paths under
+2. **Identify the affected install(s).** Don't leave "1 install" as an
+   opaque number, Matt cannot act on an install_id alone. Get the full
+   install_id(s) from Sentry's tag facet:
+   ```bash
+   curl -s -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+     "https://sentry.io/api/0/issues/{numericId}/tags/install_id/"
+   ```
+   (`topValues[].name` are the full UUIDs; the scan JSON only has a count.)
+   Then look each one up in Postgres, read-only:
+   ```bash
+   psql "$(security find-generic-password -s s4l-database-url -w)" -c "
+   SELECT install_id, hostname, git_email, os, os_version, first_ip, last_ip,
+          first_country, last_country, first_seen_at, last_seen_at, app_version
+   FROM installations WHERE install_id = '<uuid>';"
+   ```
+   Judge test-box vs real customer from what comes back:
+   - **Looks like a test/staging box**: `app_version` is an `-rc.N` build (per
+     this repo's release policy, only staging boxes pull release candidates,
+     real customers only get stable X.Y.Z), and/or `hostname` is generic
+     (numeric, no personal name), and/or the install is very new
+     (`first_seen_at` within the last day or so). If you can, also check
+     `state_snapshot->'runtime'->>'repo_dir'` or similar paths in
+     `state_snapshot` for `/Users/<generic>/` account paths (an
+     `administrator` home dir, etc.) or other generic account
+     names (another test-box tell):
+     ```bash
+     psql "$(security find-generic-password -s s4l-database-url -w)" -t -c "
+     SELECT jsonb_pretty(state_snapshot) FROM installations
+     WHERE install_id = '<uuid>';" | grep -m3 '/Users/'
+     ```
+   - **Looks like a real customer**: stable `app_version` (no `-rc.` suffix),
+     `git_email` set, `first_seen_at` well in the past (an established
+     install, not something that just appeared).
+   State your read plainly in the email (e.g. "test/staging box, not a real
+   customer" or "real customer, git_email X"). If you truly can't tell,
+   say that instead of guessing confidently.
+
+3. **Find the crashing code.** Look at stack frames for paths under
    `/social-autoposter/` (skip stdlib and third-party package frames). Read
    that file with the Read tool at the relevant line. If the title/message
    itself names a script (e.g. "twitter post pipeline issues", "Error:
@@ -138,13 +175,13 @@ For each issue you're investigating:
    frame (some of these are structured error reports from bash wrappers, not
    raw exceptions).
 
-3. **Check recent history** on the implicated file:
+4. **Check recent history** on the implicated file:
    ```bash
    cd ~/social-autoposter && git log --oneline --since="2 weeks ago" -- <file>
    ```
    A recent change touching the crashing code is a strong signal of cause.
 
-4. **Check local logs if relevant.** Some issue types map to a known log
+5. **Check local logs if relevant.** Some issue types map to a known log
    file under `~/social-autoposter/skill/logs/` (e.g. anything about "twitter
    post pipeline" or "browser locked" correlates with `run-twitter-cycle*`
    logs; "autopilot stalled" / "draft jobs are not being drained" correlates
@@ -154,7 +191,7 @@ For each issue you're investigating:
    Don't go looking for a log file that doesn't obviously exist; skip this
    sub-step rather than guessing.
 
-5. **Cross-reference known context.** This repo's CLAUDE.md documents a lot
+6. **Cross-reference known context.** This repo's CLAUDE.md documents a lot
    of pipeline behavior (locked files, known gotchas, the browser-lock
    architecture, the strike-alert rail, etc). If an issue matches something
    already documented there (e.g. a `BrokenPipeError` from a known
@@ -162,7 +199,7 @@ For each issue you're investigating:
    locking design), say so explicitly rather than re-diagnosing from
    scratch.
 
-6. **Form a verdict.** Rank by **install impact**, not raw event count (a
+7. **Form a verdict.** Rank by **install impact**, not raw event count (a
    single install retry-looping produces high event counts with near-zero
    real reach). Lean toward `-noise` when it's a known transient
    (`TimeoutError`, single-install `TypeError: fetch failed` with no clear
@@ -184,6 +221,10 @@ table dump. Structure per issue:
 
 ```
 ## S4L-8: BrokenPipeError (29 events, 3 installs, growing from 5/1)
+
+Install: <hostname>, <test/staging box OR real customer, per Step 4.2's read>,
+app_version <X>, first seen <date>. <install_id if there are multiple
+affected installs, list each with its own one-line read>
 
 What broke: <plain-English description of the failure>
 
