@@ -1317,8 +1317,18 @@ def review_event_add(event):
             p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "a") as f:
                 f.write(json.dumps(ev) + "\n")
-    except Exception:
-        pass
+    except Exception as err:
+        # Was a silent `pass` — a card's approve/reject decision could vanish
+        # with zero trace anywhere (2026-07-08: two approved-and-posted cards
+        # had no review_events row at all, and this was one of the candidate
+        # causes with nothing to confirm or rule it out). Never never write to
+        # the outbox again for THIS event, so it's worth saying loudly.
+        sys.stderr.write(
+            f"[s4l-state] review_event_add: failed to append to outbox ({type(err).__name__}: {err}); "
+            f"event DROPPED event_uuid={ev.get('event_uuid')} decision={ev.get('decision')} "
+            f"candidate_id={ev.get('candidate_id')}\n"
+        )
+        sys.stderr.flush()
     flush_review_events_async()
 
 
@@ -1339,16 +1349,29 @@ def flush_review_events():
                 if not p.exists():
                     return
                 lines = [ln for ln in p.read_text().splitlines() if ln.strip()]
-        except Exception:
+        except Exception as err:
+            sys.stderr.write(f"[s4l-state] flush_review_events: failed to read outbox: {type(err).__name__}: {err}\n")
+            sys.stderr.flush()
             return
         events = []
         for ln in lines:
             try:
                 ev = json.loads(ln)
-                if isinstance(ev, dict) and ev.get("event_uuid"):
-                    events.append(ev)
-            except Exception:
+            except Exception as err:
+                sys.stderr.write(
+                    f"[s4l-state] flush_review_events: dropping unparseable outbox line "
+                    f"({type(err).__name__}: {err}): {ln[:200]!r}\n"
+                )
+                sys.stderr.flush()
                 continue  # corrupt line: dropped on the next rewrite
+            if isinstance(ev, dict) and ev.get("event_uuid"):
+                events.append(ev)
+            else:
+                sys.stderr.write(
+                    f"[s4l-state] flush_review_events: dropping malformed outbox line "
+                    f"(not a dict, or missing event_uuid): {ln[:200]!r}\n"
+                )
+                sys.stderr.flush()
         if not events:
             if lines:  # only corrupt lines left — clear the file
                 _outbox_remove(set())
@@ -1357,7 +1380,12 @@ def flush_review_events():
         # import lazily so a missing pipeline repo degrades to buffer-only.
         try:
             from http_api import api_post
-        except Exception:
+        except Exception as err:
+            sys.stderr.write(
+                f"[s4l-state] flush_review_events: http_api unavailable ({type(err).__name__}: {err}); "
+                f"{len(events)} event(s) staying buffered in the outbox\n"
+            )
+            sys.stderr.flush()
             return
         shipped = set()
         for i in range(0, len(events), 100):
@@ -1365,7 +1393,12 @@ def flush_review_events():
             try:
                 api_post("/api/v1/review-events", {"events": batch})
                 shipped.update(e["event_uuid"] for e in batch)
-            except Exception:
+            except Exception as err:
+                sys.stderr.write(
+                    f"[s4l-state] flush_review_events: POST failed ({type(err).__name__}: {err}); "
+                    f"{len(batch)} event(s) in this batch (and any after it) staying buffered for the next kick\n"
+                )
+                sys.stderr.flush()
                 break  # network/API down: keep the rest for the next kick
         _outbox_remove(shipped, keep_only_valid=True)
     finally:
