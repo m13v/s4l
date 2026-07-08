@@ -262,12 +262,14 @@ export interface PlanCandidate {
   terminal?: boolean;
   terminal_reason?: string;
   our_url?: string;
-  // Two-draft cards (2026-07-07): a fresh candidate carries both drafts (one
-  // per assigned engagement style this cycle) plus which one the model
-  // recommends. Absent on reused/stale-draft candidates and legacy plans,
-  // the card then falls back to the single-draft UI driven by reply_text/
-  // engagement_style above. assigned_style/assigned_mode per draft feed
-  // twitter_post_plan.py's per-candidate drift-coercion override.
+  // Two-draft cards (2026-07-07; no-recommendation pass 2026-07-08): a
+  // fresh candidate carries both drafts (one per assigned engagement style
+  // this cycle). The model doesn't rank them, the card defaults to Draft A
+  // (index 0) and the reviewer's own click can switch to Draft B. Absent on
+  // reused/stale-draft candidates and legacy plans, the card then falls
+  // back to the single-draft UI driven by reply_text/engagement_style
+  // above. assigned_style/assigned_mode per draft feed twitter_post_plan.py's
+  // per-candidate drift-coercion override.
   drafts?: Array<{
     variant: "a" | "b";
     text: string;
@@ -276,7 +278,6 @@ export interface PlanCandidate {
     assigned_style?: string | null;
     assigned_mode?: string | null;
   }>;
-  recommended_draft_index?: number;
   [k: string]: unknown;
 }
 
