@@ -1524,21 +1524,6 @@ class _ReviewController(NSObject):
             pass
 
     # ObjC selectors (trailing underscore -> "approve:" etc.)
-    def selectDraft_(self, sender):
-        # Two-draft cards: switch which draft (0=a, 1=b) seeds the editable
-        # field. Discards any in-progress hand-edit of the previously-shown
-        # draft (the toggle is a "look at the other one" action, not a merge)
-        # and re-renders the card fresh from the newly-selected draft's text.
-        try:
-            slot = int(sender.tag())
-        except Exception:
-            return
-        if slot not in (0, 1) or slot == self._selected_draft:
-            return
-        self._selected_draft = slot
-        self._track(f"draft_select_{'a' if slot == 0 else 'b'}")
-        self._render()
-
     def approve_(self, sender):
         # One emoji row, one click: the clicked emoji's tag IS the approval
         # level. Commits and advances immediately; level 2+ is the loved
