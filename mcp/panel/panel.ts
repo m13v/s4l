@@ -578,6 +578,10 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
 // registers them via create_scheduled_task \u2014 no dependency on queue_setup.
 btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026", async () => {
   log("Asking Claude to schedule the draft tasks for this account\u2026");
+  // Fire-and-forget telemetry: previously this button had zero click record
+  // anywhere (unlike its menu-bar sibling), so "did a human actually trigger
+  // this, and from which surface" was unanswerable after the fact.
+  void call("client_event", { event: "rearm_clicked", surface: "panel" }).catch(() => {});
   try {
     const res = await app.sendMessage({
       role: "user",
