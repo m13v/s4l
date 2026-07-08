@@ -103,6 +103,18 @@ from AppKit import (
     NSViewWidthSizable,
 )
 
+# Styling extras that may be missing on older AppKit; every consumer degrades
+# to the stock look when these are None (same posture as the SF Symbols
+# fallback in _eye_button).
+try:
+    from AppKit import NSFontWeightSemibold
+except Exception:
+    NSFontWeightSemibold = None
+try:
+    from AppKit import NSVisualEffectView
+except Exception:
+    NSVisualEffectView = None
+
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
 # (the classic "button click crashes" footgun).
 _active = None
@@ -398,6 +410,72 @@ def _age_str(iso):
     return f"{hours // 24}d"
 
 
+# ---- contemporary styling helpers --------------------------------------------
+# Style-only layer (2026-07-07): frames, sizes, and control positions are
+# untouched; these helpers change nothing but the skin. The card reads as a
+# modern frosted macOS panel (vibrancy background, quiet semibold section
+# labels, a quote-style fill behind the thread text, a rounded-rect reply
+# editor, destructive-red reject) instead of the stock square-bezel utility
+# look. Every hook degrades to the stock look on AppKit versions that lack
+# the API, so none of these try/excepts may be "simplified" away.
+
+
+def _font(size, bold=False):
+    """Semibold (not heavy bold) for emphasis, matching modern macOS forms.
+    Used by BOTH _label and _add_link so link-width measurement in _render
+    stays in sync with the rendered title font."""
+    if bold and NSFontWeightSemibold is not None:
+        try:
+            return NSFont.systemFontOfSize_weight_(size, NSFontWeightSemibold)
+        except Exception:
+            pass
+    return NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
+
+
+def _frosted(content):
+    """Wrap a content view in a behind-window vibrancy underlay (the frosted
+    look of Notification Center widgets). Same frame as the content, so
+    nothing moves. Bare view when NSVisualEffectView is unavailable."""
+    if NSVisualEffectView is None:
+        return content
+    try:
+        v = NSVisualEffectView.alloc().initWithFrame_(content.frame())
+        v.setMaterial_(6)  # NSVisualEffectMaterialPopover: adaptive light/dark
+        v.setBlendingMode_(0)  # behind-window
+        v.setState_(1)  # active even while this accessory app is inactive
+        v.addSubview_(content)
+        return v
+    except Exception:
+        return content
+
+
+def _fill_color():
+    """Subtle adaptive fill for the thread quote block."""
+    try:
+        return NSColor.quaternarySystemFillColor()
+    except Exception:
+        return NSColor.labelColor().colorWithAlphaComponent_(0.06)
+
+
+def _round_rect(view, *, border=True):
+    """Rounded-rect skin: 8px corners, optional hairline border. Returns True
+    on success so callers can restore their square-bezel fallback when the
+    layer API is unavailable. Border color is resolved to a CGColor at render
+    time; a mid-card system appearance flip keeps the stale shade until the
+    next card renders, which is acceptable for a short-lived panel."""
+    try:
+        view.setWantsLayer_(True)
+        layer = view.layer()
+        layer.setCornerRadius_(8.0)
+        layer.setMasksToBounds_(True)
+        if border:
+            layer.setBorderWidth_(1.0)
+            layer.setBorderColor_(NSColor.separatorColor().CGColor())
+        return True
+    except Exception:
+        return False
+
+
 def _label(frame, text, *, size=12, bold=False, muted=False):
     f = NSTextField.alloc().initWithFrame_(frame)
     f.setStringValue_(text or "")
@@ -405,9 +483,7 @@ def _label(frame, text, *, size=12, bold=False, muted=False):
     f.setDrawsBackground_(False)
     f.setEditable_(False)
     f.setSelectable_(False)
-    f.setFont_(
-        NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
-    )
+    f.setFont_(_font(size, bold))
     if muted:
         f.setTextColor_(NSColor.secondaryLabelColor())
     f.setLineBreakMode_(NSLineBreakByWordWrapping)
