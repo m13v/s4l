@@ -356,6 +356,33 @@ MANDATORY reply flow for every item:
           a) Re-snapshot the page to refresh element state.
           b) Find the reply textbox: role="textbox" with name like "Post your reply"
              or "Post text". Click it.
+             If the textbox is NOT found, do NOT assume a technical glitch or
+             conclude "blocked" from a screenshot alone -- X removes the
+             composer but still renders the tweet normally when the author has
+             blocked us, so a missing textbox is genuinely ambiguous by itself.
+             Determine which deterministically:
+               i.   Click the article's reply icon (data-testid="reply" on the
+                    target article, NOT the submit button).
+               ii.  Wait ~2s, then read the page text (snapshot or DOM query).
+               iii. If the text contains "has blocked you" (case-insensitive):
+                    this is a confirmed, permanent block. Do NOT retry. Skip
+                    this reply: python3 reply_db.py skipped ID "author_blocked_us"
+                    Then hard-block the author so future items from them are
+                    never drafted (same mechanism as the escape hatch above):
+                      python3 \$REPO_DIR/scripts/reply_db.py blocklist add x HANDLE \\
+                        --reason "X reported this author has blocked our account (live reply attempt, engage-twitter)" \\
+                        --classification blocked_by_author \\
+                        --added-by block_probe \\
+                        --source-reply-id REPLY_ID
+                    Move on to the next assigned reply.
+               iv.  If that text is NOT present: this was a transient render
+                    miss, not a block. The click in (i) may have opened the
+                    composer -- re-snapshot; if the textbox is now present,
+                    continue with it below. If still absent, retry this whole
+                    step once more before treating it as a failed technical
+                    attempt.
+             NEVER conclude "blocked" from a screenshot alone -- only the
+             literal "has blocked you" text match above is sufficient evidence.
           c) Type YOUR_REPLY_TEXT (post-Step-3b short-link-wrapped form, post-Step-3a
              suffix) into that textbox. Do NOT auto-submit; we click the Reply
              button explicitly in step e.
