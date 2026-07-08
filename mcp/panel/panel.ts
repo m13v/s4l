@@ -226,15 +226,19 @@ function renderOnboarding(progress?: OnboardingSnapshot) {
     onboardingDetails.hidden = true;
     return;
   }
-  // The header always carries the setup dropdown once a ledger exists, so the
-  // milestone details stay reachable even after setup completes.
-  setupSummary.hidden = false;
-
-  const total = progress.milestones.length;
-  const completed = progress.milestones.filter((m) => m.status === "complete").length;
   // Header state keys off the SAME setup_complete the menu bar uses — never the
   // milestone ledger — so the two surfaces can't disagree about "set up".
   const done = isSetupComplete(state);
+  // Once setup is complete, drop the dropdown entirely (no lingering "Setup ▾"
+  // affordance) rather than collapsing it to a bare history view.
+  setupSummary.hidden = done;
+  if (done && setupDetailsOpen) {
+    setupDetailsOpen = false;
+    applySetupDetails();
+  }
+
+  const total = progress.milestones.length;
+  const completed = progress.milestones.filter((m) => m.status === "complete").length;
   const blocked = !!progress.current_blocker && !done;
   setupSummary.classList.toggle("complete", done);
   setupSummary.classList.toggle("blocked", blocked);
