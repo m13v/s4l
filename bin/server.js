@@ -13820,7 +13820,17 @@ function syncStatusHeadings() {
 function renderActivityStats(payload) {
   const grid = document.getElementById('stats-grid');
   const totalEl = document.getElementById('stats-total');
+  const dbErrorEl = document.getElementById('stats-db-error');
   if (!grid) return;
+  // A DB query failure reports rows:[] with dbError:true (see /api/activity/stats).
+  // Treating that as "0 events" is exactly the 2026-07-08 masking bug: leave
+  // whatever was already on screen (stale-but-real data, or the loading state)
+  // and just surface the banner, instead of overwriting it with a confident zero.
+  if (payload && payload.dbError) {
+    if (dbErrorEl) dbErrorEl.style.display = '';
+    return;
+  }
+  if (dbErrorEl) dbErrorEl.style.display = 'none';
   const rows = (payload && payload.rows) || [];
   const hours = (payload && payload.windowHours) || 24;
   const byType = {};
@@ -13941,7 +13951,7 @@ async function loadActivityStats(force) {
     if (proj && proj !== 'all') params.push('project='  + encodeURIComponent(proj));
     const res = await fetch('/api/activity/stats?' + params.join('&'));
     const data = await res.json();
-    if (data && !data.error) statsCacheSet('activity', cacheKey, data);
+    if (data && !data.error && !data.dbError) statsCacheSet('activity', cacheKey, data);
     renderActivityStats(data);
   } catch {} finally {
     if (!haveStale && grid) grid.classList.remove('is-loading');
