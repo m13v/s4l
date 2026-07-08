@@ -616,13 +616,15 @@ class _ReviewController(NSObject):
         self._interactions = []
         self._card_shown_at = None
         self._reason_field = None
-        # Two-draft cards (2026-07-08 redesign): both drafts render at once as
-        # separate editable boxes; `_selected_draft` (0=a, 1=b) is "whichever
-        # box the reviewer is currently in", driven by focus (see
-        # textDidBeginEditing_ below), not a button. None = not yet chosen
-        # this card, _render() defaults it to recommended_draft_index. Reset
-        # to None on every NEW card (see _render()'s "fresh card" branch
-        # below), so a switch made on one card never bleeds into the next.
+        # Two-draft cards (2026-07-08 redesign, no-recommendation pass same
+        # day): both drafts render at once as separate editable boxes;
+        # `_selected_draft` (0=a, 1=b) is "whichever box the reviewer is
+        # currently in", driven by focus (see textDidBeginEditing_ below),
+        # not a button. None = not yet chosen this card, _render() defaults
+        # it to slot 0 (Draft A) — the model never picks a favorite, so
+        # there's no recommendation to default to instead. Reset to None on
+        # every NEW card (see _render()'s "fresh card" branch below), so a
+        # switch made on one card never bleeds into the next.
         # _draft_textviews/_draft_scrolls map slot -> its NSTextView/
         # NSScrollView so the delegate callback and border-styling helper can
         # find them; both empty on single-draft cards.
@@ -1070,19 +1072,20 @@ class _ReviewController(NSObject):
             content.addSubview_(deye)
             self._details_btn = deye
 
-        # Two-draft cards (2026-07-08 redesign): show BOTH drafts at once,
-        # stacked, each independently editable, rather than a toggle that
-        # swaps one field's content. No buttons: selection is "whichever box
-        # the reviewer is currently in", shown via that box's own border (an
-        # accent outline vs a plain hairline, mirroring a standard focus
-        # ring) and updated live by textDidBeginEditing_ below. Absent/short
-        # (reused stale draft, legacy plan) falls back to one full-height
-        # editable box, same as before.
+        # Two-draft cards (2026-07-08 redesign; no-recommendation pass same
+        # day): show BOTH drafts at once, stacked, each independently
+        # editable, rather than a toggle that swaps one field's content. No
+        # buttons: selection is "whichever box the reviewer is currently in",
+        # shown via that box's own border (an accent outline vs a plain
+        # hairline, mirroring a standard focus ring) and updated live by
+        # textDidBeginEditing_ below. The model never picks a favorite
+        # (removed 2026-07-08 per user: no ask-the-model-to-recommend), so
+        # Draft A (slot 0) is simply the fixed default until the reviewer
+        # clicks into Draft B. Absent/short (reused stale draft, legacy plan)
+        # falls back to one full-height editable box, same as before.
         drafts = d.get("drafts")
         dual = isinstance(drafts, list) and len(drafts) == 2
-        rec_idx = d.get("recommended_draft_index")
-        rec_idx = rec_idx if rec_idx in (0, 1) else 0
-        sel_idx = self._selected_draft if (dual and self._selected_draft in (0, 1)) else rec_idx
+        sel_idx = self._selected_draft if (dual and self._selected_draft in (0, 1)) else 0
         if dual:
             self._selected_draft = sel_idx
 
@@ -1101,7 +1104,7 @@ class _ReviewController(NSObject):
         self._draft_scrolls = {}
         if dual:
             avail_h = edit_top - M
-            gap = 8
+            gap = 5
             label_h = 15
             unit = (avail_h - gap) / 2.0
             box_h = unit - label_h
@@ -1112,17 +1115,12 @@ class _ReviewController(NSObject):
                 box_y = M if slot == 1 else M + unit + gap
                 label_y = box_y + box_h
                 draft = drafts[slot]
-                tag_bits = []
-                if slot == rec_idx:
-                    tag_bits.append("recommended")
                 draft_text_en = (draft.get("text_en") or "").strip()
                 if is_foreign and draft_text_en:
-                    tag_bits.append(f"EN: {_truncate(draft_text_en, 90)}")
-                if tag_bits:
                     content.addSubview_(
                         _label(
                             NSMakeRect(M, label_y, W - 2 * M, label_h),
-                            "  ·  ".join(tag_bits),
+                            f"EN: {_truncate(draft_text_en, 90)}",
                             size=10,
                             muted=True,
                             truncates=True,
