@@ -42,6 +42,7 @@ import time
 # SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
 # scheduled-task prompts still export SAPS_*; this process reads S4L_*.
 import s4l_env  # noqa: E402  (lives next to this file in scripts/)
+import identity  # noqa: E402  (lives next to this file in scripts/)
 
 s4l_env.mirror()
 
@@ -429,12 +430,19 @@ def main() -> int:
             else:
                 cause = "scheduled-task routines likely orphaned — Claude Desktop account change?"
                 stall_shape = "not_draining"
+            # Our own staging/QA/dev boxes (identity.is_internal_install) get set
+            # up and rebuilt with nobody actively feeding the queue, which looks
+            # identical to a real stall on the signals above. Downgrade those to
+            # warning instead of error so they don't page as a customer incident
+            # (the digest only scans error/fatal) while still leaving a Sentry
+            # record if we ever need to look one up by hand.
+            is_internal = identity.is_internal_install()
             sentry.capture_message(
                 "social-autoposter autopilot stalled: draft jobs are not being "
                 f"drained ({cause}). producer consecutive timeouts={timeouts}, "
                 f"oldest pending job age={age_str}, oldest in-flight (running) job "
                 f"age={run_age_str}, sustained {consecutive} checks.",
-                level="error",
+                level=("warning" if is_internal else "error"),
                 tags={
                     "component": "autopilot",
                     "issue": "stall",
@@ -443,6 +451,7 @@ def main() -> int:
                     "oldest_pending_age_s": str(int(age)) if age is not None else "",
                     "oldest_running_age_s": str(int(run_age)) if run_age is not None else "",
                     "batches_stuck": str(batches_stuck),
+                    "internal_install": str(is_internal),
                 },
             )
             sentry.flush()
