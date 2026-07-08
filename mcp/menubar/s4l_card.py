@@ -1086,11 +1086,10 @@ class _ReviewController(NSObject):
         drafts = d.get("drafts")
         dual = isinstance(drafts, list) and len(drafts) == 2
         sel_idx = self._selected_draft if (dual and self._selected_draft in (0, 1)) else 0
-        print(f"DEBUG dual={dual} drafts={drafts!r} sel_idx={sel_idx}", flush=True)
         if dual:
             self._selected_draft = sel_idx
 
-        edit_top = H - 172 - 6
+        edit_top = H - 172 - 3
         link = d.get("link_url")
 
         # Tail link baked at draft time is normally already in each draft's
@@ -1395,30 +1394,26 @@ class _ReviewController(NSObject):
 
     @objc.python_method
     def _update_draft_borders(self):
-        """Redraw the two draft boxes' borders in place (no re-render, so an
-        in-progress edit/caret in either box is never disturbed): the
-        selected box gets a thicker system-accent outline (the platform's own
-        selection color, respects the user's macOS accent choice and
-        light/dark mode), the other a plain hairline, matching the existing
-        thread-quote/editable-field border look."""
-        for slot, scroll in (self._draft_scrolls or {}).items():
+        """Redraw the two draft boxes' selection ring in place (no re-render,
+        so an in-progress edit/caret in either box is never disturbed): the
+        selected box's outline view gets a thicker system-accent outline (the
+        platform's own selection color, respects the user's macOS accent
+        choice and light/dark mode), the other a plain hairline. Applied to
+        the dedicated outline wrapper, not the scroll view itself; see the
+        comment at its construction in _render for why."""
+        for slot, outline in (self._draft_outlines or {}).items():
             try:
-                layer = scroll.layer()
+                layer = outline.layer()
                 if layer is None:
-                    print(f"DEBUG slot={slot} layer is None")
                     continue
                 if slot == self._selected_draft:
-                    layer.setBorderWidth_(8.0)
-                    layer.setBorderColor_(NSColor.redColor().CGColor())
-                    print(f"DEBUG slot={slot} SELECTED set width=8.0 RED layer={layer}")
+                    layer.setBorderWidth_(2.0)
+                    layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
                 else:
-                    layer.setBorderWidth_(8.0)
-                    layer.setBorderColor_(NSColor.blueColor().CGColor())
-                    print(f"DEBUG slot={slot} plain set width=8.0 BLUE layer={layer}")
-            except Exception as e:
-                import traceback
-                print(f"DEBUG EXCEPTION slot={slot}: {e}")
-                traceback.print_exc()
+                    layer.setBorderWidth_(1.0)
+                    layer.setBorderColor_(NSColor.separatorColor().CGColor())
+            except Exception:
+                pass
 
     @objc.python_method
     def _current_text(self):
