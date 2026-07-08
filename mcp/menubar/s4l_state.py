@@ -975,13 +975,13 @@ def review_drafts(plan, batch="review-queue"):
                 # scripts/active_experiments.py. Generic: the card renders
                 # whatever is here, so new experiments surface with no UI work.
                 "experiments": c.get("experiments") or {},
-                # Two-draft cards (2026-07-07): present only when the prep step
-                # wrote two independent drafts (fresh candidate, not a reused
-                # stale draft). The card renders a Draft A/B toggle defaulting
-                # to recommended_draft_index; absent on reused/legacy
+                # Two-draft cards (2026-07-07; no-recommendation pass
+                # 2026-07-08): present only when the prep step wrote two
+                # independent drafts (fresh candidate, not a reused stale
+                # draft). The card shows both, defaulting to Draft A (slot 0,
+                # no model recommendation involved); absent on reused/legacy
                 # candidates, which fall back to the single-draft UI above.
                 "drafts": c.get("drafts"),
-                "recommended_draft_index": c.get("recommended_draft_index"),
             }
         )
     # The review queue is append-only, so the highest stable index is newest and
