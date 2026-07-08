@@ -327,7 +327,18 @@ def _reply_heading_suffix(d):
     project = (d.get("project") or "").strip()
     lane = ((d.get("experiments") or {}).get("lane") or "").strip()
     bits = []
-    if project and lane:
+    # Project and lane are independent concepts most of the time (project
+    # "fazm" drafted under lane "personal_brand"), but the operator's own
+    # PersonalBrand project IS the personal_brand lane, so project=="PersonalBrand"
+    # + lane=="personal_brand" is the SAME fact twice, not two facts — compare
+    # with punctuation/case stripped so "PersonalBrand" vs "personal_brand"
+    # collapses to one token instead of "PersonalBrand/personal_brand".
+    same = project and lane and re.sub(r"[^a-z0-9]", "", project.lower()) == re.sub(
+        r"[^a-z0-9]", "", lane.lower()
+    )
+    if same:
+        bits.append(project)
+    elif project and lane:
         bits.append(f"{project}/{lane}")
     elif project:
         bits.append(project)
@@ -974,31 +985,48 @@ class _ReviewController(NSObject):
             thread_tv.setDelegate_(self)
         thread_tv.textStorage().setAttributedString_(body)
         content.addSubview_(thread_tv)
-        # Reply heading — black, with a concise "project/lane · viral N" tag
-        # folded straight into the text (2026-07-07) so those two numbers
-        # don't require opening the eye popover. Right-aligned on the same
-        # line: an eye icon whose hover/click popover carries the remaining
-        # DRAFTING metadata (style, discovery query, link choice), mirroring
-        # the author row's engagement-stats eye. Skipped when the plan carries
-        # none of it (older plans).
-        heading = (
-            f"Reply (posts in {_lang_name(card_lang)}, editable)"
+        # Reply heading — bold. A concise "project/lane · viral N" tag rides
+        # right after it in a SEPARATE, regular-weight label (2026-07-08:
+        # was folded into the same bold string, which made the metadata read
+        # as loudly as the heading itself; split + measured-width placement
+        # mirrors the "@handle · followers" pattern in the author row above).
+        # Right-aligned on the same line: an eye icon whose hover/click
+        # popover carries the remaining DRAFTING metadata (style, discovery
+        # query, link choice), mirroring the author row's engagement-stats
+        # eye. Skipped when the plan carries none of it (older plans).
+        heading_text = (
+            f"Reply (posts in {_lang_name(card_lang)}, editable):"
             if is_foreign
-            else "Reply (editable)"
+            else "Reply (editable):"
         )
-        heading_suffix = _reply_heading_suffix(d)
-        if heading_suffix:
-            heading += f" · {heading_suffix}"
-        heading += ":"
+        heading_w = min(
+            int(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    heading_text, {NSFontAttributeName: _font(12, True)}
+                ).size().width
+            ) + 4,
+            W - 2 * M - 24,
+        )
         content.addSubview_(
             _label(
-                NSMakeRect(M, H - 172, W - 2 * M - 24, 16),
-                heading,
+                NSMakeRect(M, H - 172, heading_w, 16),
+                heading_text,
                 size=12,
                 bold=True,
                 muted=True,
             )
         )
+        heading_suffix = _reply_heading_suffix(d)
+        suffix_w = W - 2 * M - 24 - heading_w
+        if heading_suffix and suffix_w > 20:
+            content.addSubview_(
+                _label(
+                    NSMakeRect(M + heading_w, H - 172, suffix_w, 16),
+                    f" · {heading_suffix}",
+                    size=11,
+                    muted=True,
+                )
+            )
         if _details_lines(d):
             # No y nudge needed here (unlike the author row): this label is
             # 16px, so an 18px button at the same y already centers its image
