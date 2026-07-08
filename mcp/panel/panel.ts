@@ -664,7 +664,6 @@ switchPause.addEventListener("click", async () => {
   switchPause.setAttribute("aria-checked", String(wasPaused)); // optimistic flip
   try {
     const res = await call("pause_autopilot", { action });
-    if (typeof res?.paused === "boolean") applyState({ paused: res.paused });
     log(
       res?.ok
         ? action === "pause"
@@ -672,6 +671,7 @@ switchPause.addEventListener("click", async () => {
           : "S4L resumed."
         : `Couldn’t ${action} S4L${res?.detail ? ": " + res.detail : "."}`
     );
+    await refresh(); // always re-sync to server truth, ok or not
   } catch (e: any) {
     log(`Couldn’t ${action} S4L: ` + (e?.message || e));
     await refresh(); // roll the optimistic flip back to the server truth
