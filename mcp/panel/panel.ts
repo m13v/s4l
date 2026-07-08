@@ -84,6 +84,11 @@ interface Snapshot {
   // False only when the always-on tray app was quit while the runtime is ready
   // (macOS only). Drives the "Restart menu bar" banner.
   menubar_running?: boolean;
+  // True while the pipeline (kicker + support daemons) is paused via
+  // pause_autopilot. Independent of menubar_running/setup_complete — Pause
+  // leaves Claude Desktop, the tray, and X connection untouched. Drives the
+  // Autopilot switch; undefined = unknown = render as running (no false nag).
+  paused?: boolean;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -133,6 +138,9 @@ const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
 const switchPersonal = $("switch-personal") as HTMLButtonElement;
 const switchPromo = $("switch-promo") as HTMLButtonElement;
+const switchPause = $("switch-pause") as HTMLButtonElement;
+const pauseName = $("pause-name");
+const pauseDesc = $("pause-desc");
 const splitRow = $("split-row");
 const splitDesc = $("split-desc");
 const splitSlider = $("split-slider") as HTMLInputElement;
@@ -342,6 +350,16 @@ function render() {
         ? "No lane on; the cycle falls back to personal brand."
         : "";
 
+  // Autopilot pause switch — independent of setup/menubar state, mirrors the
+  // menu bar's Pause S4L item. undefined (unknown) renders as running so a
+  // slow first snapshot never flashes a false "paused".
+  const paused = state.paused === true;
+  switchPause.setAttribute("aria-checked", String(!paused));
+  pauseName.textContent = paused ? "Autopilot paused" : "Autopilot running";
+  pauseDesc.textContent = paused
+    ? "Drafting and posting are stopped. Claude Desktop and this tray stay up."
+    : "Scanning, drafting, and posting are active.";
+
   // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
   // product is configured and posting. Hide them until setup is complete so the
   // pre-setup view stays a minimal "just set up" interface; the Install card
@@ -427,6 +445,7 @@ async function refresh() {
       ...fromSetupStatus(setupStatus),
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
       ...(typeof rt.menubar_running === "boolean" ? { menubar_running: rt.menubar_running } : {}),
+      ...(typeof rt.paused === "boolean" ? { paused: rt.paused } : {}),
       onboarding: rt.onboarding || setupStatus.onboarding || state?.onboarding,
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
@@ -633,6 +652,33 @@ function wireLaneSwitch(el: HTMLButtonElement, lane: "personal_brand" | "promoti
 }
 wireLaneSwitch(switchPersonal, "personal_brand");
 wireLaneSwitch(switchPromo, "promotion");
+
+// Autopilot pause switch: calls pause_autopilot (unloads/reinstalls the kicker
+// + support daemons; does NOT touch Claude Desktop, the tray, or X). Checked
+// means running, unchecked means paused — inverse of the flip direction.
+switchPause.addEventListener("click", async () => {
+  if (switchPause.disabled) return;
+  const wasPaused = switchPause.getAttribute("aria-checked") !== "true";
+  const action = wasPaused ? "resume" : "pause";
+  switchPause.disabled = true;
+  switchPause.setAttribute("aria-checked", String(wasPaused)); // optimistic flip
+  try {
+    const res = await call("pause_autopilot", { action });
+    if (typeof res?.paused === "boolean") applyState({ paused: res.paused });
+    log(
+      res?.ok
+        ? action === "pause"
+          ? "S4L paused — drafting and posting are stopped."
+          : "S4L resumed."
+        : `Couldn’t ${action} S4L${res?.detail ? ": " + res.detail : "."}`
+    );
+  } catch (e: any) {
+    log(`Couldn’t ${action} S4L: ` + (e?.message || e));
+    await refresh(); // roll the optimistic flip back to the server truth
+  } finally {
+    switchPause.disabled = false;
+  }
+});
 
 // Lane split slider: live-update the caption while dragging, persist on
 // commit (change) via engagement_mode action:'split' (mode.json only, same
