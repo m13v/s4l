@@ -1094,9 +1094,17 @@ echo "Phase A: chose project=$PA_PROJECT topic='$PA_SEARCH_TOPIC' activity=$PA_A
 
 # Look up the chosen project's full config (only this one).
 PROJECT_FULL=$(python3 -c "
-import json, os
+import json, os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+import learned_preferences as lp
 c = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 p = next((p for p in c.get('projects',[]) if p['name']=='$PA_PROJECT'), {})
+# learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
+# scripts/learned_preferences.py), not one per project. Stamped in under the
+# same key so the existing prose below ('learned_preferences.draft_style_notes
+# entry ... overrides the engagement style') keeps working unchanged.
+p = dict(p)
+p['learned_preferences'] = lp.get_global_block(c)
 print(json.dumps(p, indent=2))
 ")
 
