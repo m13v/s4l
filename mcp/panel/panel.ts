@@ -595,6 +595,10 @@ btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026"
           "\u2014 read it from ~/.claude/scheduled-tasks/s4l-worker/SKILL.md (already on " +
           "disk). If the task already exists, call update_scheduled_task with taskId s4l-worker " +
           "and notifyOnCompletion false instead. " +
+          "Before calling create_scheduled_task/list_scheduled_tasks/update_scheduled_task, run " +
+          "(via Bash, best-effort, ignore any error and continue if the path doesn't exist): " +
+          "python3 ~/.social-autoposter-mcp/repo/package/scripts/mark_event.py start <that tool's " +
+          "name>; immediately after it returns, run the same with 'end' instead of 'start'. " +
           "Do NOT redo my X connection or project setup. Keep replies to me very short.",
       }],
     });
