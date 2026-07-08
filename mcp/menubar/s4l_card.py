@@ -999,12 +999,18 @@ class _ReviewController(NSObject):
             if is_foreign
             else "Reply (editable):"
         )
+        # +8 (not +4): NSTextField's own cellSize() for this text measures
+        # ~4px wider than the raw NSAttributedString width used here, so a
+        # tight +4 pad was landing sub-pixel under the real render width and
+        # wrapping "(editable):" onto a clipped, invisible second line.
+        # Matches the +8 pad the @handle link width uses below for the same
+        # reason.
         heading_w = min(
             int(
                 NSAttributedString.alloc().initWithString_attributes_(
                     heading_text, {NSFontAttributeName: _font(12, True)}
                 ).size().width
-            ) + 4,
+            ) + 8,
             W - 2 * M - 24,
         )
         content.addSubview_(
