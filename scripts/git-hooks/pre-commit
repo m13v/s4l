@@ -54,8 +54,11 @@ PROTECTED_FILES=(
 )
 for pfile in "${PROTECTED_FILES[@]}"; do
     if git diff --cached --name-only | grep -q "^${pfile}$"; then
-        removed=$(git diff --cached -- "$pfile" | grep '^-' | grep -v '^---' | wc -l | tr -d ' ')
-        added=$(git diff --cached -- "$pfile" | grep '^+' | grep -v '^+++' | wc -l | tr -d ' ')
+        # `|| true`: grep exits 1 when it matches nothing (e.g. a pure-addition
+        # diff has zero removed lines). Without this, `set -euo pipefail` would
+        # kill the hook silently with exit 1 and block the commit with no message.
+        removed=$( (git diff --cached -- "$pfile" | grep '^-' | grep -v '^---' | wc -l | tr -d ' ') || true)
+        added=$( (git diff --cached -- "$pfile" | grep '^+' | grep -v '^+++' | wc -l | tr -d ' ') || true)
         net_removed=$(( removed - added ))
         if [ "$net_removed" -gt 50 ]; then
             echo "REJECTED: Commit removes $net_removed more lines than it adds in $pfile ($removed removed, $added added)."
