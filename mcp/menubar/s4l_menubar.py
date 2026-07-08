@@ -1817,6 +1817,71 @@ class S4LMenuBar(rumps.App):
                     pass
         except Exception:
             pass
+        # Fix 5 (2026-07-08): the orphan heal above (fix 4) only EDITS registry
+        # files the glob finds — it can never create one where none exists. An
+        # account that's never had a scheduled-tasks.json at all (e.g. just
+        # switched into, never scheduled on this box before) got nothing written
+        # despite fix 4 running: found on a real test box, where the active
+        # account's entire claude-code-sessions/<uuid>/ tree held zero
+        # scheduled-tasks.json files (only regular chat transcripts), so the
+        # per-file loop above had nothing to iterate for it — the schedule read
+        # as 'missing' forever, and every "just restart Claude" attempt did
+        # nothing because there was never a file to fix.
+        # The worker entry carries no account-specific data (id/filePath/cwd are
+        # shared constants; only cronExpression/enabled get copied as a
+        # template), so writing a fresh copy into an account that has none is
+        # exactly equivalent to what create_scheduled_task would produce — just
+        # via a direct file write in the same safe quit-then-heal-then-relaunch
+        # window this whole method already runs in, not a live host-tool call.
+        # Reuses scripts/schedule_state.py's account resolution (config.json's
+        # lastKnownAccountUuid, verified correct against real installs
+        # 2026-07-08) instead of a second implementation of that lookup.
+        try:
+            import schedule_state
+            if worker_skill_ok and not any_disabled:
+                for cfg in schedule_state._config_json_paths():
+                    root = os.path.dirname(cfg)
+                    uuid = schedule_state._active_account_uuid(cfg)
+                    if not uuid:
+                        continue
+                    account_dir = os.path.join(root, "claude-code-sessions", uuid)
+                    existing = glob.glob(os.path.join(account_dir, "*", "scheduled-tasks.json"))
+                    if existing:
+                        continue  # fix 4 above already covers this account
+                    session_dirs = [
+                        p for p in glob.glob(os.path.join(account_dir, "*"))
+                        if os.path.isdir(p)
+                    ]
+                    if not session_dirs:
+                        continue  # Desktop has never created a session for this
+                                  # account on this box -- nowhere safe to write
+                    # Most-recently-touched session dir is the best available
+                    # guess for "the one Desktop is actively using".
+                    target_dir = max(session_dirs, key=lambda p: os.path.getmtime(p))
+                    target_file = os.path.join(target_dir, "scheduled-tasks.json")
+                    new_entry = {
+                        "id": WORKER_TASK_ID,
+                        "cronExpression": tmpl_cron,
+                        "enabled": True,
+                        "filePath": os.path.join(
+                            os.path.expanduser("~"), ".claude",
+                            "scheduled-tasks", WORKER_TASK_ID, "SKILL.md",
+                        ),
+                        "createdAt": int(time.time() * 1000),
+                        "cwd": WORKER_CWD,
+                    }
+                    try:
+                        fd, tmp = tempfile.mkstemp(dir=target_dir)
+                        with os.fdopen(fd, "w") as fh:
+                            json.dump(
+                                {"scheduledTasks": [new_entry], "recordedSkips": []},
+                                fh, indent=2,
+                            )
+                        os.replace(tmp, target_file)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # Remove retired tasks' on-disk SKILL.md dirs too, so they can't be
         # re-registered from a stale prompt file (and the MCP's boot refresh
         # stops resurrecting the legacy prompts).
