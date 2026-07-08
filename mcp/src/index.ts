@@ -2887,35 +2887,37 @@ tool(
   }
 );
 
-// ---- pause_autopilot: temporarily stop drafting/posting, reversibly --------
+// ---- pause_s4l: temporarily stop drafting/posting, reversibly --------------
 // The lighter alternative to Quit: unloads only the launchd jobs that scan,
 // draft, and post (plus their support daemons), leaving Claude Desktop, the
 // S4L tray, X connection, and the draft schedule registration untouched.
 // Fully reversible — action:'resume' reinstalls the exact same daemons via the
-// same idempotent ensure*Installed() functions boot uses.
+// same idempotent ensure*Installed() functions boot uses. NOT "autopilot": S4L
+// is draft-first (a human approves every post), so this pauses/resumes the
+// draft pipeline itself, not some autonomous posting mode.
 tool(
-  "pause_autopilot",
+  "pause_s4l",
   {
-    title: "Pause or resume the S4L autopilot",
+    title: "Pause or resume S4L",
     description:
-      "Pause temporarily stops S4L's own pipeline (the launchd kicker that scans/drafts/posts, plus " +
-      "its reaper/stall-watch/memory-snapshot support jobs) WITHOUT touching Claude Desktop, the S4L " +
-      "tray, your X connection, or the draft schedule registration — nothing is deleted, so it survives " +
-      "a Claude Desktop restart and Resume brings it right back. Use when the user asks to pause, stop, " +
-      "or temporarily disable S4L, or to resume/unpause it. This is NOT the same as Quit (which kills " +
-      "and restarts Claude Desktop and removes the draft schedule) — Pause is the lighter, fully " +
-      "reversible option. action:'status' (default) reports whether it's currently paused.",
+      "Pause temporarily stops S4L's own draft pipeline (the launchd kicker that scans/drafts/posts, " +
+      "plus its reaper/stall-watch/memory-snapshot support jobs) WITHOUT touching Claude Desktop, the " +
+      "S4L tray, your X connection, or the draft schedule registration — nothing is deleted, so it " +
+      "survives a Claude Desktop restart and Resume brings it right back. Use when the user asks to " +
+      "pause, stop, or temporarily disable S4L, or to resume/unpause it. This is NOT the same as Quit " +
+      "(which kills and restarts Claude Desktop and removes the draft schedule) — Pause is the lighter, " +
+      "fully reversible option. action:'status' (default) reports whether it's currently paused.",
     inputSchema: {
       action: z.enum(["status", "pause", "resume"]).optional(),
     },
   },
   async ({ action }: { action?: "status" | "pause" | "resume" }) => {
     if (action === "pause") {
-      const res = await pauseAutopilot();
+      const res = await pauseS4L();
       return jsonContent({ action: "pause", paused: isPaused(), ...res });
     }
     if (action === "resume") {
-      const res = await resumeAutopilot();
+      const res = await resumeS4L();
       return jsonContent({ action: "resume", paused: isPaused(), ...res });
     }
     return jsonContent({ action: "status", paused: isPaused() });
@@ -4003,7 +4005,7 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
 // checks the same flag file and reports "no work" instantly instead of
 // draining the queue, so nothing drafts or posts while paused even if a
 // worker session wakes up mid-pause. A flag file (nothing is deleted) is what
-// makes Resume a plain reinstall of the same 4 daemons — see resumeAutopilot.
+// makes Resume a plain reinstall of the same 4 daemons — see resumeS4L.
 function pauseFlagPath(): string {
   return path.join(s4lStateDir(), "paused.flag");
 }
@@ -4023,7 +4025,7 @@ const PAUSE_TARGETS: Array<{ label: string; plist: string }> = [
   { label: MEMORY_SNAPSHOT_LABEL, plist: MEMORY_SNAPSHOT_PLIST },
 ];
 
-async function pauseAutopilot(): Promise<{ ok: boolean; detail: string }> {
+async function pauseS4L(): Promise<{ ok: boolean; detail: string }> {
   if (isPaused()) return { ok: true, detail: "already paused" };
   try {
     fs.mkdirSync(path.dirname(pauseFlagPath()), { recursive: true });
@@ -4044,7 +4046,7 @@ async function pauseAutopilot(): Promise<{ ok: boolean; detail: string }> {
   return { ok: true, detail: results.join("; ") };
 }
 
-async function resumeAutopilot(): Promise<{ ok: boolean; detail: string }> {
+async function resumeS4L(): Promise<{ ok: boolean; detail: string }> {
   try {
     fs.rmSync(pauseFlagPath(), { force: true });
   } catch {
@@ -5350,8 +5352,8 @@ async function main() {
   }
   // The 4 pipeline daemons (kicker, reaper, stall-watch, memory-snapshot) are
   // skipped at boot while paused.flag is present, so a Claude Desktop restart
-  // during a Pause doesn't silently un-pause the autopilot — see pauseAutopilot/
-  // resumeAutopilot. Feedback-digest is NOT gated: it only distills past review
+  // during a Pause doesn't silently un-pause the pipeline — see pauseS4L/
+  // resumeS4L. Feedback-digest is NOT gated: it only distills past review
   // decisions, not drafting/posting, so it's harmless to keep running.
   if (!isPaused()) {
     void ensureQueueKickerInstalled()
