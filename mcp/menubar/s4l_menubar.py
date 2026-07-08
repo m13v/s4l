@@ -2836,10 +2836,23 @@ class S4LMenuBar(rumps.App):
                 with self._review_lock:
                     activity_label = self._posting_activity_label_locked()
                 cl = [n] if decision.get("drop_link") else None
-                if decision.get("edited"):
+                # Two-draft cards: a draft_variant means the human picked
+                # (or kept) a specific slot on a dual-draft card, route
+                # through edits=[...] even with no hand-typed change, so the
+                # candidate's style/assigned_style/assigned_mode switch to
+                # match whichever draft is actually posting (mcp/src/index.ts
+                # post_drafts applies both from the same entry). Without
+                # this, a card where the human accepted the recommended
+                # draft as-is (edited=False) would still need its variant
+                # tag carried through for consistency with a later switch.
+                draft_variant = decision.get("draft_variant")
+                if decision.get("edited") or draft_variant:
+                    edit = {"n": n, "text": decision.get("text") or ""}
+                    if draft_variant:
+                        edit["variant"] = draft_variant
                     res = st.post_drafts(
                         batch,
-                        edits=[{"n": n, "text": decision.get("text") or ""}],
+                        edits=[edit],
                         clear_link=cl,
                         activity_label=activity_label,
                     )
