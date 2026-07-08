@@ -269,6 +269,43 @@ def _refresh_snapshot_bg():
         _snap_refreshing[0] = False
 
 
+# ---- version/update check: refreshed independently of the full snapshot ----
+# compute() calls _x_status() FIRST, which can block up to 90s in a subprocess
+# (setup_twitter_auth.py -> CDP to Chrome) whenever a scan job has the browser
+# busy. That stalls _refresh_snapshot_bg() for the whole duration, so
+# update_available/latest_version stay frozen on a busy box even though the
+# GitHub check itself is a ~1s curl. Poll scripts/snapshot.py::version_status()
+# on its own short cadence, gated by its own lock, so the "Update available"
+# banner never waits on X/Chrome state.
+_ver_cache = {"val": None, "at": 0.0}
+_ver_refreshing = [False]
+_VER_REFRESH_TTL = 20.0
+
+
+def _refresh_version_bg():
+    try:
+        val = _snapshot_module().version_status()
+        if isinstance(val, dict) and "update_available" in val:
+            with _snap_lock:
+                _ver_cache["val"] = val
+                _ver_cache["at"] = time.time()
+    except Exception:
+        pass
+    finally:
+        _ver_refreshing[0] = False
+
+
+def _version_overlay():
+    now = time.time()
+    with _snap_lock:
+        cached = _ver_cache["val"]
+        age = now - _ver_cache["at"]
+    if (cached is None or age > _VER_REFRESH_TTL) and not _ver_refreshing[0]:
+        _ver_refreshing[0] = True
+        threading.Thread(target=_refresh_version_bg, daemon=True).start()
+    return cached
+
+
 def snapshot():
     """Full snapshot computed DIRECTLY from the stateful files via
     scripts/snapshot.py — the SAME single-source module the MCP shells out to, so
@@ -278,7 +315,9 @@ def snapshot():
     a BACKGROUND thread; this returns the last cached result instantly.
 
     Tiers: (1) the background-computed local snapshot; (2) the server's last
-    persisted `status-summary.json`; (3) the onboarding ledger."""
+    persisted `status-summary.json`; (3) the onboarding ledger. The version/update
+    fields are always overlaid from the independent _version_overlay() cache
+    (see above) so they stay live even while tier (1)'s compute() is blocked."""
     now = time.time()
     with _snap_lock:
         cached = _snap_cache["val"]
@@ -286,29 +325,40 @@ def snapshot():
     if (cached is None or age > 4.0) and not _snap_refreshing[0]:
         _snap_refreshing[0] = True
         threading.Thread(target=_refresh_snapshot_bg, daemon=True).start()
+
     if cached is not None:
         out = dict(cached)
         out["_live"] = True
-        return out
-    summ = read_json("status-summary.json")
-    if isinstance(summ, dict) and "projects_total" in summ:
-        summ["_live"] = False
-        summ["_from_summary"] = True
-        return summ
-    ob = read_onboarding()
-    return {
-        "_live": False,
-        "runtime_ready": runtime_ready(),
-        "onboarding": ob,
-        "autopilot_on": autopilot_loaded(),
-        "x_connected": False,  # unknowable offline; State derives from onboarding
-        "x_handle": None,
-        "projects_ready": 0,
-        "projects_total": 0,
-        "version": version(),
-        "update_available": False,
-        "latest_version": None,
-    }
+    else:
+        summ = read_json("status-summary.json")
+        if isinstance(summ, dict) and "projects_total" in summ:
+            out = dict(summ)
+            out["_live"] = False
+            out["_from_summary"] = True
+        else:
+            ob = read_onboarding()
+            out = {
+                "_live": False,
+                "runtime_ready": runtime_ready(),
+                "onboarding": ob,
+                "autopilot_on": autopilot_loaded(),
+                "x_connected": False,  # unknowable offline; State derives from onboarding
+                "x_handle": None,
+                "projects_ready": 0,
+                "projects_total": 0,
+                "version": version(),
+                "update_available": False,
+                "latest_version": None,
+            }
+
+    ver = _version_overlay()
+    if ver is not None:
+        out["version"] = ver.get("version", out.get("version"))
+        out["channel"] = ver.get("channel", out.get("channel"))
+        out["latest_version"] = ver.get("latest_version", out.get("latest_version"))
+        out["latest_tag"] = ver.get("latest_tag", out.get("latest_tag"))
+        out["update_available"] = ver.get("update_available", out.get("update_available"))
+    return out
 
 
 def stats_7d():
