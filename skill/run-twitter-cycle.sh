@@ -2085,21 +2085,23 @@ CLAUDE_SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 export CLAUDE_SESSION_ID
 
 # PREP_SCHEMA — strict JSON schema for the prep envelope. Two-draft cards
-# (2026-07-07): each candidate carries draft_a_* / draft_b_* (one per
-# assigned style) instead of a single reply_text/engagement_style, plus
-# recommended_draft (a|b) and is_reused_draft. Includes optional
+# (2026-07-07, no-recommendation redesign 2026-07-08): each candidate
+# carries draft_a_* / draft_b_* (one per assigned style) instead of a
+# single reply_text/engagement_style, plus is_reused_draft. The model does
+# NOT pick a favorite; Draft A is always the default shown/selected on the
+# review card, the reviewer's own click chooses otherwise. Includes optional
 # `draft_a_new_style` / `draft_b_new_style` per candidate (inner objects) that
 # the model MUST populate when that slot's picker set mode=invent and it
 # invented a snake_case name. Fields mirror
 # engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the downstream
 # validate_or_register call accepts the block without a second schema layer.
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"is_reused_draft":{"type":"boolean"},"draft_a_text":{"type":"string"},"draft_a_style":{"type":"string"},"draft_a_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_a_text_en":{"type":["string","null"]},"draft_b_text":{"type":["string","null"]},"draft_b_style":{"type":["string","null"]},"draft_b_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_b_text_en":{"type":["string","null"]},"recommended_draft":{"type":"string","enum":["a","b"]},"language":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","is_reused_draft","recommended_draft","draft_a_text","draft_a_style","draft_b_text","draft_b_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"is_reused_draft":{"type":"boolean"},"draft_a_text":{"type":"string"},"draft_a_style":{"type":"string"},"draft_a_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_a_text_en":{"type":["string","null"]},"draft_b_text":{"type":["string","null"]},"draft_b_style":{"type":["string","null"]},"draft_b_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_b_text_en":{"type":["string","null"]},"language":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","is_reused_draft","draft_a_text","draft_a_style","draft_b_text","draft_b_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
   1. Read each candidate's thread context from the PRE-SCORED CANDIDATES block below (each entry's 'Text:' field is the parent tweet). You have WebSearch and WebFetch available: use them ONLY when a thread hinges on a current fact, a name, a release, or a claim you are not sure about, so your reply is specific and correct instead of vague. You do NOT have the Twitter/X browser this session — never fetch, navigate, or open a tweet/x.com URL, and never try to load the thread itself; the thread text you need is already inlined below. Most replies need no search at all; reach for it only when it materially improves the reply.
-  2. Draft TWO independent replies for each fresh candidate, one under Draft A's assigned style and one under Draft B's assigned style below, then recommend the stronger one. The reviewer sees both and can pick either; your recommendation is only the default.
+  2. Draft TWO independent replies for each fresh candidate, one under Draft A's assigned style and one under Draft B's assigned style below. Do not judge or rank them, the reviewer reads both and picks.
   3. Persist the recommended fresh draft via log_draft.py.
   4. Emit a structured plan describing the chosen candidates, both draft texts, and (when applicable) the SEO link keyword + slug.
 
@@ -2135,19 +2137,18 @@ For each chosen candidate:
 1. Read the candidate's parent tweet from its 'Text:' field in the PRE-SCORED CANDIDATES block above.
 2. Understand the context from that inlined text (the thread text is already in this prompt; you do NOT have the Twitter browser, but you MAY use WebSearch/WebFetch for external facts when a thread needs them to be answered well).
 3. DRAFT HANDLING (existing vs fresh):
-   - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim as draft_a_text/draft_a_style (set is_reused_draft=true, draft_b_text=null, draft_b_style=null, recommended_draft="a"). Do NOT call log_draft.py; do NOT redraft; do NOT write a second variant, prior cycle already paid the LLM cost for the one draft you have.
-   - Otherwise (fresh candidate, is_reused_draft=false): write TWO independent drafts.
+   - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim as draft_a_text/draft_a_style (set is_reused_draft=true, draft_b_text=null, draft_b_style=null). Do NOT call log_draft.py; do NOT redraft; do NOT write a second variant, prior cycle already paid the LLM cost for the one draft you have.
+   - Otherwise (fresh candidate, is_reused_draft=false): write TWO independent drafts. Do NOT judge, rank, or pick a favorite between them, both are shown to the reviewer, who decides.
      - draft_a_text: follow the DRAFT A style block above (its own description/example/note/length limit).
      - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move because they follow different style templates, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.
-     - Then set recommended_draft to whichever ("a" or "b") is the stronger, more natural reply for THIS specific thread.
    - $DRAFT_DIRECTIVE (applies to both drafts on fresh candidates; each still obeys its OWN style's length limit, not a shared one).
-3a. PERSIST THE RECOMMENDED FRESH DRAFT (skip entirely for reused drafts):
-     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'RECOMMENDED_DRAFT_TEXT' --style RECOMMENDED_DRAFT_STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
-   Pass whichever of draft_a_text/draft_b_text you set as recommended_draft, and its matching style, as --text/--style. Always pass the DRAFT A picker assignment ($PICKED_STYLE/$PICKED_MODE) here regardless of which draft was recommended, this call persists only enough to let a near-immediate next cycle reuse a draft verbatim (step 3 above); it does not need to represent Style B.
+3a. PERSIST DRAFT A (skip entirely for reused drafts):
+     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'DRAFT_A_TEXT' --style DRAFT_A_STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
+   Always persist draft_a_text/draft_a_style here (Draft A is the single-draft representative used if a near-immediate next cycle reuses this candidate's draft verbatim per step 3 above); never draft_b.
    The --assigned-style / --assigned-mode flags carry the orchestrator's picker output (this cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}') into the candidate row so the post pipeline can coerce drift and register invented styles. Pass them VERBATIM as shown.
-   If the RECOMMENDED draft used an invented style (i.e. its slot's mode is invent and its STYLE is a new snake_case name not in that slot's style block), ALSO pass:
+   If Draft A used an invented style (i.e. mode is invent and its STYLE is a new snake_case name not in the Draft A style block), ALSO pass:
      --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
-   with the same description/example/why_existing_didnt_fit you put in that draft's '..._new_style' field of your output JSON for this candidate.
+   with the same description/example/why_existing_didnt_fit you put in draft_a_new_style in your output JSON for this candidate.
    Failure here is non-fatal, log a warning and continue.
 4. EMIT one entry in the structured 'candidates' array with these fields:
    - candidate_id (int): from the candidate block
@@ -2164,7 +2165,6 @@ For each chosen candidate:
    - draft_b_style (string, REQUIRED when is_reused_draft=false; null when is_reused_draft=true): style name applied to draft_b_text, same rules as draft_a_style but against the Draft B assignment (USE mode style '${PICKED_STYLE_B}', mode $PICKED_MODE_B).
    - draft_b_new_style (object, REQUIRED iff Draft B's INVENT mode produced a new name; OMIT or set null otherwise): same shape as draft_a_new_style.
    - draft_b_text_en (string, REQUIRED when is_reused_draft=false AND language != 'en'; null otherwise): faithful English translation of draft_b_text, same display-only rules as draft_a_text_en.
-   - recommended_draft (string, REQUIRED): "a" or "b", whichever draft you judge stronger for this thread. On a reused candidate this is always "a".
    - language (string): ISO 639-1 code (en, ja, zh, es, ...)
    - thread_text_en (string, REQUIRED when language != 'en'; OMIT when language == 'en'): a faithful English translation of thread_text (same <=500 char condensation). Display-only, never posted.
    - has_landing_pages (bool): true iff the matched project has BOTH landing_pages.repo AND landing_pages.base_url set in config.json. Otherwise false.
@@ -2360,15 +2360,17 @@ except Exception as _e:
     print(f'prep: experiments stamp failed: {_e}', file=sys.stderr)
 for _c in candidates:
     _c['experiments'] = dict(_exps)
-    # Two-draft cards (2026-07-07): mirror the RECOMMENDED draft onto the
-    # canonical single-draft fields (reply_text/engagement_style/new_style/
-    # reply_text_en/assigned_style/assigned_mode) so every existing downstream
-    # consumer (tail-link baking, dedup, translations, posting, drift
-    # coercion) keeps working unchanged by default. Additionally attach a
-    # 'drafts' array + 'recommended_draft_index' for the review card to offer
+    # Two-draft cards (2026-07-07; no-recommendation redesign 2026-07-08):
+    # mirror Draft A onto the canonical single-draft fields (reply_text/
+    # engagement_style/new_style/reply_text_en/assigned_style/assigned_mode)
+    # so every existing downstream consumer (tail-link baking, dedup,
+    # translations, posting, drift coercion) keeps working unchanged by
+    # default. Draft A is always the default, the model is never asked to
+    # pick a favorite, only the reviewer's own click on the card overrides
+    # it. Additionally attach a 'drafts' array for the review card to offer
     # a switch; reused/stale candidates (single draft, no draft_b) don't get
     # a drafts array, so the card falls back to today's single-draft UI.
-    _rec = _c.get('recommended_draft') if _c.get('recommended_draft') in ('a', 'b') else 'a'
+    _rec = 'a'
     _is_reused = bool(_c.get('is_reused_draft'))
     _rec_text = _c.get(f'draft_{_rec}_text') or ''
     _rec_style = _c.get(f'draft_{_rec}_style') or ''
@@ -2399,7 +2401,6 @@ for _c in candidates:
                 'assigned_mode': '$PICKED_MODE_B' or 'use',
             },
         ]
-        _c['recommended_draft_index'] = 0 if _rec == 'a' else 1
 json.dump({'candidates': candidates,
            'session_id': '$CLAUDE_SESSION_ID',
            'assigned_style': '$PICKED_STYLE' or None,
@@ -2501,9 +2502,9 @@ if [ "$GEN_EXIT" -ne 0 ]; then
 fi
 
 # Two-draft cards: twitter_gen_links.py (above, locked/untouched) bakes the
-# tail link into reply_text in place for the RECOMMENDED draft only, it never
-# looks at the 'drafts' array. Sync the same suffix onto the non-recommended
-# draft so switching to it on the review card still posts with the link.
+# tail link into reply_text in place for Draft A only (the canonical default),
+# it never looks at the 'drafts' array. Sync the same suffix onto Draft B so
+# switching to it on the review card still posts with the link.
 # link_tail.py's apply_tail_link is documented APPEND-ONLY (concatenates the
 # bridge sentence onto the unmodified reply_text, never rewrites it), so
 # diffing the appended suffix and re-applying it verbatim is safe.
@@ -2521,9 +2522,8 @@ for c in plan.get('candidates') or []:
     drafts = c.get('drafts')
     if not isinstance(drafts, list) or len(drafts) != 2:
         continue
-    rec_idx = c.get('recommended_draft_index')
-    rec_idx = rec_idx if rec_idx in (0, 1) else 0
-    other_idx = 1 - rec_idx
+    rec_idx = 0  # Draft A is always the canonical default reply_text mirrors
+    other_idx = 1
     rec_draft = drafts[rec_idx]
     other_draft = drafts[other_idx]
     baked = (c.get('reply_text') or '')
