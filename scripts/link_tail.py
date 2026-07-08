@@ -247,27 +247,35 @@ def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
             f"  - \"we ship the same recall-on-revisit pattern in {project}, scores against a 4-axis rubric, {link_url}\""
         )
 
-    # X-specific hard length budget. Pass the agent the current body length AND
-    # the budget so it self-fits by compressing the body, keeping the link at
-    # the end. Other platforms (reddit/linkedin) have far larger ceilings, so we
-    # add no tight cap there.
+    # X-specific hard length budget. The reply's body is FIXED (never resized
+    # by the model); only the bridge sentence's own budget matters, computed
+    # by the caller from how much room the already-drafted body leaves.
+    # Other platforms (reddit/linkedin) have far larger ceilings, so we add
+    # no tight cap there.
     length_rule = ""
-    if platform == "twitter":
-        body_len = len(reply_text or "")
+    if platform == "twitter" and bridge_budget is not None:
         length_rule = (
-            f"HARD LENGTH LIMIT (X counts EVERY link as exactly 23 characters, "
-            f"no matter how long it looks):\n"
-            f"- The entire final reply must be \u2264 {TWEET_LIMIT} characters with "
-            f"the URL counted as {URL_WEIGHT}. That means everything EXCEPT the "
-            f"URL must total \u2264 {TWITTER_TEXT_BUDGET} characters.\n"
-            f"- The drafted body is currently {body_len} characters. If body + "
-            f"bridge would exceed {TWITTER_TEXT_BUDGET} chars of text, COMPRESS "
-            f"the body to make room: tighten wording, drop the weakest clause, "
-            f"but keep the single strongest claim and keep the URL at the very "
-            f"end. Never drop or move the link.\n"
+            f"HARD LENGTH LIMIT for YOUR SENTENCE ONLY (X counts EVERY link as "
+            f"exactly {URL_WEIGHT} characters, no matter how long it looks; "
+            f"that's already reserved below):\n"
+            f"- Everything you write BEFORE the URL must be \u2264 {max(bridge_budget, 0)} "
+            f"characters. The reply above is fixed length; you are not resizing "
+            f"it, only adding a short sentence after it.\n"
         )
 
-    return f"""You are writing the FINAL bridge sentence that folds a product link into a social media reply we already drafted. This is a one-shot task. Output ONLY the bridge sentence (no preamble, no explanation, no quotes).
+    learned_prefs_section = ""
+    if learned_prefs_block:
+        learned_prefs_section = (
+            learned_prefs_block.strip() + "\n"
+            "The draft_style_notes / edit_examples entries above are MANDATORY "
+            "for how you phrase your bridge sentence, same as they are for the "
+            "original draft; on conflict they override the example sentences "
+            "below. The audience/thread avoid-prefer entries are about "
+            "candidate judging, already applied earlier in the pipeline \u2014 not "
+            "your job here.\n"
+        )
+
+    return f"""You are writing ONLY the bridge sentence that gets APPENDED after a social media reply we already drafted (shown below). This is a one-shot task. Output ONLY the bridge sentence itself: no preamble, no explanation, no quotes, and do NOT repeat, paraphrase, or rewrite any part of the reply below \u2014 it is already final and will be appended before your output automatically, verbatim.
 
 PLATFORM: {platform}
 PROJECT: {project}
@@ -275,33 +283,32 @@ LANDING PAGE URL: {link_url}
 
 {voice_rule}
 
+{learned_prefs_section}
+
 {length_rule}
 
 ORIGINAL THREAD WE ARE REPLYING TO:
 {thread_text}
 
-REPLY WE ALREADY DRAFTED (its last sentence is what your bridge will REPLACE / EXTEND):
+REPLY ALREADY DRAFTED (fixed, DO NOT repeat or modify \u2014 your sentence is appended after this automatically):
 {reply_text}
 
 YOUR TASK:
-Rewrite the reply so the LAST sentence is a 1-sentence (≤ 22 words) bridge that:
-  1. References the SINGLE strongest specific claim, mechanism, or detail from the existing reply (e.g. "rephrasing on revisit", "a 4-axis rubric", "200ms p95", "automatic distractor scoring") — pick ONE concrete thing, not a category.
-  2. Names a CONCRETE PRODUCT MECHANISM that delivers it (verb + noun, inferred from the URL slug + project context). Do NOT say "a tool for this", "something that helps", "made this for it" — those are banned.
+Write ONE bridge sentence (\u2264 22 words) that:
+  1. References the SINGLE strongest specific claim, mechanism, or detail from the reply above (e.g. "rephrasing on revisit", "a 4-axis rubric", "200ms p95", "automatic distractor scoring") \u2014 pick ONE concrete thing, not a category.
+  2. Names a CONCRETE PRODUCT MECHANISM that delivers it (verb + noun, inferred from the URL slug + project context). Do NOT say "a tool for this", "something that helps", "made this for it" \u2014 those are banned.
   3. Ends with the URL exactly as given. No period after. No "click here", "check it out", "give it a try".
-  4. Reads in the voice of the reply (lowercase if reply is lowercase, casual if reply is casual).
+  4. Reads in the voice of the reply above (lowercase if reply is lowercase, casual if reply is casual).
   5. Obeys the VOICE RELATIONSHIP rule above. This rule overrides any default phrasing instinct.
-
-REPLACEMENT RULE:
-- If the reply has a clear empathy/advice body, KEEP that body verbatim and append the bridge as a new sentence (separated by a single space).
-- If the reply already trails off with weak filler, REPLACE just the trailing weak portion with the bridge.
+  6. Obeys the LEARNED PREFERENCES above when present. This rule overrides the example sentences below on conflict.
 
 OUTPUT FORMAT (strict):
-Output the FULL FINAL REPLY TEXT (body + bridge sentence ending in URL) on a single line. Nothing else. No JSON, no markdown, no quotes.
+Output ONLY your bridge sentence, ending in the URL, on a single line. Nothing else: no JSON, no markdown, no quotes, and absolutely none of the reply text shown above.
 
-Example bridge sentences (do NOT copy verbatim — these are FORM examples, voice-matched to this project):
+Example bridge sentences (do NOT copy verbatim \u2014 these are FORM examples, voice-matched to this project):
 {example_block}
 
-Write the final reply now."""
+Write the bridge sentence now."""
 
 
 def _unwrap_queue_envelope(text: str) -> str:
@@ -449,52 +456,51 @@ THIRD_PARTY_VOICE_VIOLATIONS = (
 )
 
 
-def passes_quality_gate(final_text: str, link_url: str,
+def passes_quality_gate(bridge: str, link_url: str,
                         voice_relationship: str = "first_party",
-                        limit: int | None = None
                         ) -> tuple[bool, str]:
     """Return (passes, reason_if_not).
+
+    Validates the model-written BRIDGE SENTENCE ALONE. reply_text is trusted,
+    already-vetted content that this function never sees and never judges —
+    the append-only contract means reply_text can't fail this gate, only the
+    newly generated bridge can.
 
     Hard rules:
       - must contain link_url
       - must end with link_url (allow trailing whitespace, nothing else)
       - must NOT contain banned phrases
-      - must not be shorter than reply text would have been (silly model fail)
+      - must not be wildly longer than a sentence (MAX_BRIDGE_CHARS): the
+        model ignored the "bridge sentence only" contract and is attempting
+        a full rewrite — a structural violation, not a phrasing nitpick
       - on third_party projects, must NOT use first-person-plural product
         ownership phrases ("we ship", "we built", "our product", ...). The
-        link_tail prompt now selects voice-matched examples but the model can
+        link_tail prompt selects voice-matched examples but the model can
         still drift; on violation we fall back to the mechanical concat so
         the post still ships without impersonating the client (root cause of
         the 2026-05-27 Agora OODAO incident).
     """
-    if not final_text:
+    if not bridge:
         return (False, "empty")
-    if link_url not in final_text:
+    if link_url not in bridge:
         return (False, "no_url")
     # Trailing-URL check (nothing meaningful after URL, optional ./! is fine
     # to strip; but our prompt forbids trailing period — so just check no
     # alphanumeric content follows).
-    tail = final_text.split(link_url, 1)[1].strip()
+    tail = bridge.split(link_url, 1)[1].strip()
     if tail and re.search(r"[A-Za-z0-9]", tail):
         return (False, f"content_after_url: {tail[:40]!r}")
-    lower = final_text.lower()
+    lower = bridge.lower()
     for phrase in BANNED_PHRASES:
         if phrase in lower:
             return (False, f"banned_phrase: {phrase!r}")
     if voice_relationship == "third_party":
         for rx in THIRD_PARTY_VOICE_VIOLATIONS:
-            m = rx.search(final_text)
+            m = rx.search(bridge)
             if m:
                 return (False, f"third_party_voice_violation: {m.group(0)!r}")
-    # Length sanity: model returning a 5-word stub is a fail.
-    if len(final_text.split()) < 8:
-        return (False, "too_short")
-    # Upper-length backstop (twitter): X-weighted length must fit the cap. The
-    # caller trims the body to fit BEFORE the gate, so this should only trip on
-    # a degenerate trim; on trip we fall back to the (also budget-enforced)
-    # mechanical concat.
-    if limit is not None and x_weighted_len(final_text) > limit:
-        return (False, f"too_long:{x_weighted_len(final_text)}>{limit}")
+    if len(bridge) > MAX_BRIDGE_CHARS:
+        return (False, f"bridge_too_long:{len(bridge)}>{MAX_BRIDGE_CHARS}")
     return (True, "")
 
 
@@ -568,14 +574,43 @@ def main() -> int:
         print(json.dumps(out), flush=True)
         return 0
 
-    voice_relationship = args.voice_relationship or resolve_voice_relationship(args.project)
+    project_entry = _load_project_entry(args.project)
+    voice_relationship = args.voice_relationship or resolve_voice_relationship(project_entry)
+    learned_prefs_block = resolve_learned_preferences_block(project_entry)
     # Length cap is X-specific; reddit/linkedin pass None (no tail trim).
     limit = TWEET_LIMIT if args.platform == "twitter" else None
+
+    # Deterministic no-room guard: if the already-drafted reply alone leaves
+    # no meaningful space for a bridge sentence before the (flat-weighted)
+    # URL, skip the Claude call outright — a squeezed-in fragment is worse
+    # than no bridge — and fall back to the mechanical concat like any other
+    # failure path.
+    bridge_budget = None
+    if limit is not None:
+        bridge_budget = limit - URL_WEIGHT - 1 - x_weighted_len(reply_text)
+        if bridge_budget < MIN_BRIDGE_CHARS:
+            fb_text, fb_trim = enforce_budget(
+                mechanical_fallback(reply_text, link_url), link_url, limit)
+            out = {
+                "ok": True,
+                "text": fb_text,
+                "tail": link_url,
+                "model_call_ok": False,
+                "fallback_used": True,
+                "budget_trimmed": fb_trim,
+                "error": f"no_room_for_bridge:{bridge_budget}",
+                "elapsed_sec": 0.0,
+            }
+            print(json.dumps(out), flush=True)
+            return 0
+
     prompt = build_prompt(
         reply_text=reply_text, link_url=link_url,
         thread_text=(args.thread_text or "").strip()[:2000],
         project=args.project, platform=args.platform,
         voice_relationship=voice_relationship,
+        learned_prefs_block=learned_prefs_block,
+        bridge_budget=bridge_budget,
     )
 
     started = time.time()
@@ -600,16 +635,9 @@ def main() -> int:
         print(json.dumps(out), flush=True)
         return 0
 
-    cleaned = clean_output(raw)
-    # Trim the body to fit BEFORE the gate so a good model bridge is preserved
-    # (we trim the body, never the link) instead of being thrown away for being
-    # a few chars over. No-op on non-twitter (limit is None).
-    budget_trimmed = False
-    if limit is not None:
-        cleaned, budget_trimmed = enforce_budget(cleaned, link_url, limit)
-    passes, reason = passes_quality_gate(cleaned, link_url,
-                                         voice_relationship=voice_relationship,
-                                         limit=limit)
+    bridge = clean_output(raw)
+    passes, reason = passes_quality_gate(bridge, link_url,
+                                         voice_relationship=voice_relationship)
     if not passes:
         fb_text, fb_trim = enforce_budget(
             mechanical_fallback(reply_text, link_url), link_url,
@@ -628,23 +656,24 @@ def main() -> int:
         print(json.dumps(out), flush=True)
         return 0
 
-    # Successful path: extract the bridge tail (everything after the original
-    # reply body's prefix, OR the last sentence containing the URL).
-    tail = ""
-    # Heuristic: the bridge is the last sentence in cleaned. Split on ". " or
-    # "! " or "? "; take the last chunk.
-    chunks = re.split(r"(?<=[.!?])\s+", cleaned)
-    for c in reversed(chunks):
-        if link_url in c:
-            tail = c.strip()
-            break
-    if not tail:
-        tail = cleaned
+    # Successful path: append the model-written bridge to the UNMODIFIED
+    # reply_text. This is the deterministic append-only guarantee — the
+    # model's output was validated above as a standalone sentence and is
+    # never substituted for reply_text, only concatenated after it.
+    final_text = f"{reply_text.rstrip()} {bridge}".strip()
+    budget_trimmed = False
+    if limit is not None:
+        # Belt-and-suspenders: should be a no-op given the bridge_budget
+        # precheck above, unless the model ignored the length rule. Trims
+        # from the END of the pre-URL text (the model's own bridge, appended
+        # last), so a well-behaved reply_text is only touched in the
+        # degenerate case where reply_text alone already exceeds the limit.
+        final_text, budget_trimmed = enforce_budget(final_text, link_url, limit)
 
     out = {
         "ok": True,
-        "text": cleaned,
-        "tail": tail,
+        "text": final_text,
+        "tail": bridge,
         "model_call_ok": True,
         "fallback_used": False,
         "budget_trimmed": budget_trimmed,
