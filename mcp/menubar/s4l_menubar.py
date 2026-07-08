@@ -693,7 +693,21 @@ class S4LMenuBar(rumps.App):
         clipboard, open Claude, and tell the user to paste it. (The dashboard
         widget's button does this in one click via app.sendMessage — no paste.) We
         do NOT auto-type (focus/timing flaky) and do NOT write the registry directly
-        (can't reliably target a just-switched-into account)."""
+        (can't reliably target a just-switched-into account).
+
+        The click itself is captured (mirroring _diagnose_fix) — previously this
+        button had NO telemetry at all, so a past incident (Karol, 2026-07-07)
+        could only establish "a human must have clicked SOMETHING" from the code
+        path, never which button or exactly when. The registry snapshot rides as
+        an extra so the pre-rearm state is on record without on-box forensics."""
+        sched = getattr(self, "_schedule_state_cache", "") or ""
+        _capture_msg(
+            "S4L rearm clicked",
+            phase="rearm",
+            surface="menubar",
+            schedule_state=sched or "unknown",
+            _extra={"registry": _registry_summary_for_capture()},
+        )
         self._clipboard_prompt(
             REARM_PROMPT,
             "Set up the draft schedule",
