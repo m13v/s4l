@@ -512,6 +512,26 @@ def _is_newer(latest, current) -> bool:
     return _ver_key(latest) > _ver_key(current)
 
 
+def version_status() -> dict:
+    """Version/update fields ONLY, independent of the rest of compute(). compute()
+    calls _x_status() first, which can block up to 90s in the setup_twitter_auth.py
+    subprocess (CDP to Chrome) whenever a scan job is holding the browser busy —
+    that freezes update_available/latest_version on an otherwise-busy box even
+    though the GitHub check itself is a ~1s curl. Callers that want the "Update
+    available" banner to stay live regardless of X/runtime state should poll this
+    directly instead of waiting on the full compute()."""
+    installed = _resolve_version()
+    channel = _channel()
+    latest, latest_tag = _latest_published(channel)
+    return {
+        "version": installed,
+        "channel": channel,
+        "latest_version": latest,
+        "latest_tag": latest_tag,
+        "update_available": bool(latest) and _is_newer(latest, installed),
+    }
+
+
 # ---- onboarding ledger + live overlay --------------------------------------
 def _onboarding_live(live_status):
     led = _read_json(os.path.join(_state_dir(), "onboarding-progress.json")) or {}
