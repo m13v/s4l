@@ -1426,17 +1426,18 @@ class _ReviewController(NSObject):
     def _update_draft_borders(self):
         """Redraw the two draft boxes' selection ring in place (no re-render,
         so an in-progress edit/caret in either box is never disturbed): the
-        selected box's outline view gets a thick, solid, fixed-blue outline
+        selected box's outline view gets a thick, solid black outline
         (deliberately NOT the user's system accent color — on a Graphite
         accent it renders as plain gray and is indistinguishable from chrome;
-        2026-07-08 feedback wanted "a stronger color"), the other a plain
-        hairline. Every color here is baked via _solid() first: drawn as-is,
-        dynamic system colors render partially see-through against whatever is
-        behind the card's frosted/vibrant panel, which was why an earlier pass
-        still looked washed out over a dark desktop. Applied to the dedicated
-        outline wrapper, not the scroll view itself; see the comment at its
-        construction in _render for why."""
-        selected_blue = _solid(NSColor.systemBlueColor())
+        2026-07-08 feedback wanted "a stronger color", then specifically
+        black), the other a plain hairline. Every color here is baked via
+        _solid() first: drawn as-is, dynamic system colors render partially
+        see-through against whatever is behind the card's frosted/vibrant
+        panel, which was why an earlier pass still looked washed out over a
+        dark desktop. Applied to the dedicated outline wrapper, not the
+        scroll view itself; see the comment at its construction in _render
+        for why."""
+        selected_color = NSColor.blackColor()
         for slot, outline in (self._draft_outlines or {}).items():
             try:
                 layer = outline.layer()
@@ -1444,17 +1445,17 @@ class _ReviewController(NSObject):
                     continue
                 if slot == self._selected_draft:
                     layer.setBorderWidth_(3.0)
-                    layer.setBorderColor_(selected_blue.CGColor())
+                    layer.setBorderColor_(selected_color.CGColor())
                     # A ring alone read as barely-there against the frosted
                     # panel. The margin between this wrapper's edge and the
                     # inset scroll view is otherwise plain background, so
-                    # tinting it toward the same solid blue turns that margin
-                    # into a visible halo, not just a hairline — obvious at a
-                    # glance, not just on close inspection.
+                    # tinting it toward black turns that margin into a visible
+                    # halo, not just a hairline — obvious at a glance, not
+                    # just on close inspection.
                     tint = _solid(
                         NSColor.textBackgroundColor()
-                    ).blendedColorWithFraction_ofColor_(0.30, selected_blue)
-                    layer.setBackgroundColor_((tint or selected_blue).CGColor())
+                    ).blendedColorWithFraction_ofColor_(0.30, selected_color)
+                    layer.setBackgroundColor_((tint or selected_color).CGColor())
                 else:
                     layer.setBorderWidth_(1.0)
                     layer.setBorderColor_(_solid(NSColor.separatorColor()).CGColor())
