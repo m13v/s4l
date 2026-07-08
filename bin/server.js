@@ -6282,24 +6282,6 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
-  // TEMP DEBUG (2026-07-08): one-off connection-exhaustion diagnosis, remove after use.
-  if (p === '/api/_debug/pg-conns' && req.method === 'GET') {
-    return (async () => {
-      const total = await pq("SELECT count(*)::int AS n FROM pg_stat_activity");
-      const maxConn = await pq("SELECT setting::int AS n FROM pg_settings WHERE name='max_connections'");
-      const byApp = await pq(
-        "SELECT COALESCE(application_name,'(none)') AS app, COALESCE(client_addr::text,'local') AS addr, state, count(*)::int AS n " +
-        "FROM pg_stat_activity GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 40"
-      );
-      const longest = await pq(
-        "SELECT COALESCE(application_name,'(none)') AS app, COALESCE(client_addr::text,'local') AS addr, state, " +
-        "EXTRACT(EPOCH FROM (NOW() - COALESCE(state_change, backend_start)))::int AS secs, LEFT(COALESCE(query,''),120) AS query " +
-        "FROM pg_stat_activity WHERE state IS NOT NULL ORDER BY secs DESC NULLS LAST LIMIT 15"
-      );
-      return json(res, { total, maxConn, byApp, longest });
-    })().catch(e => json(res, { error: e.message }, 500));
-  }
-
   // GET /api/views|upvotes|comments/per-day?days=N - total per-post metric
   // earned each day across all platforms. Two data sources merged:
   //   1) post_views_daily LAG delta (per-post snapshots, live from 2026-04-24
