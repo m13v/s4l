@@ -77,6 +77,10 @@ html, body {
   padding-bottom: 14px;
 }
 .head-left { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; }
+.head-right { display: inline-flex; align-items: center; gap: 12px; flex: none; }
+/* Pause/resume, inline with the title (primary control, not buried lower). */
+.head-pause { display: inline-flex; align-items: center; gap: 7px; }
+.head-pause-label { font-size: 11.5px; font-weight: 600; color: var(--muted); }
 .title {
   font-size: 19px;
   font-weight: 750;
