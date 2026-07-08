@@ -82,6 +82,7 @@ from AppKit import (
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskUtilityWindow,
     NSLineBreakByWordWrapping,
+    NSLineBreakByTruncatingTail,
     NSBezelStyleRounded,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
@@ -513,7 +514,7 @@ def _round_rect(view, *, border=True):
         return False
 
 
-def _label(frame, text, *, size=12, bold=False, muted=False):
+def _label(frame, text, *, size=12, bold=False, muted=False, truncates=False):
     f = NSTextField.alloc().initWithFrame_(frame)
     f.setStringValue_(text or "")
     f.setBezeled_(False)
@@ -523,6 +524,19 @@ def _label(frame, text, *, size=12, bold=False, muted=False):
     f.setFont_(_font(size, bold))
     if muted:
         f.setTextColor_(NSColor.secondaryLabelColor())
+    # truncates=True: single line, "…" at the end when it overflows its frame,
+    # instead of word-wrapping into a second line the fixed-height frame then
+    # silently clips. For tight one-line strips (e.g. the reply heading's
+    # inline project/lane/virality tag) where an exact pixel width can't be
+    # guaranteed against every value.
+    if truncates:
+        f.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        try:
+            f.cell().setWraps_(False)
+            f.cell().setScrollable_(False)
+        except Exception:
+            pass
+        return f
     f.setLineBreakMode_(NSLineBreakByWordWrapping)
     try:
         f.cell().setWraps_(True)
@@ -1022,6 +1036,10 @@ class _ReviewController(NSObject):
                 muted=True,
             )
         )
+        # Long headings (foreign-language variant) can leave very little room
+        # for the suffix; truncates=True ellipsizes it instead of the old
+        # word-wrap silently clipping mid-word ("fazm/" with no "…") into the
+        # fixed-height frame's invisible second line.
         heading_suffix = _reply_heading_suffix(d)
         suffix_w = W - 2 * M - 24 - heading_w
         if heading_suffix and suffix_w > 20:
@@ -1031,6 +1049,7 @@ class _ReviewController(NSObject):
                     f" · {heading_suffix}",
                     size=11,
                     muted=True,
+                    truncates=True,
                 )
             )
         if _details_lines(d):
