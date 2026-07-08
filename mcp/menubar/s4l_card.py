@@ -1602,11 +1602,14 @@ def present_review(drafts, on_decision=None, on_complete=None):
     draft time): the card then shows the English thread text, a muted read-only
     "EN:" translation of the reply, and a "posts in <language>" heading, while
     the editable field keeps the original-language reply_text (what posts).
-    Optional drafting metadata (project, engagement_style, style_description,
-    search_topic, language, link_source, link_keyword, experiments) feeds a
-    second eye on the "Reply (editable):" row whose popover explains how the
-    draft was made; experiments is a generic {name: variant} dict rendered
-    as-is, one line per active experiment/scenario arm.
+    project, the experiments["lane"] arm, and stats.virality_score render
+    inline on the "Reply (editable):" heading itself as a concise
+    "project/lane · viral N" tag (2026-07-07). The rest of the optional
+    drafting metadata (engagement_style, style_description, search_topic,
+    language, link_source, link_keyword, remaining experiments) feeds a
+    second eye on that same row whose popover explains how the draft was
+    made; experiments other than "lane" render generically, one line per
+    active experiment/scenario arm.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
