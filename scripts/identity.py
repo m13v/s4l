@@ -328,6 +328,32 @@ def get_identity_header(refresh: bool = False) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+# Our own infra: operator Mac, mk0r E2B sandbox fleet, MacStadium remote QA boxes.
+# Single source of truth for "is this install actually a customer" — consumed by
+# active_users.py (customer-roster dedupe) and autopilot_stall_watch.py (stall-page
+# severity) so the two lists can't drift apart. "71522" was the MacStadium box
+# retired by the 2026-07-06 hardware swap (ticket #10904); "71732" is its
+# replacement — both listed since the old box's hostname could still appear in
+# historical data.
+INTERNAL_EMAILS = {"i@m13v.com", "agent@mk0r.com", "matt@mediar.ai"}
+INTERNAL_HOSTNAME_SUBSTR = ("e2b.local", "71522", "71732")
+INTERNAL_HARDWARE_UUIDS = {"07CB793D-6E32-5EF8-82E2-7CDEABD47FBC"}
+
+
+def is_internal_install(ident: dict | None = None) -> bool:
+    """True when this install is our own infra (staging/QA/dev), not a real
+    customer. Local-only (no DB), so it works on shipped .mcpb installs too."""
+    ident = ident if ident is not None else get_identity()
+    if (ident.get("git_email") or "").strip().lower() in INTERNAL_EMAILS:
+        return True
+    hostname = ident.get("hostname") or ""
+    if any(sub in hostname for sub in INTERNAL_HOSTNAME_SUBSTR):
+        return True
+    if (ident.get("hardware_uuid") or "") in INTERNAL_HARDWARE_UUIDS:
+        return True
+    return False
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
     if cmd == "show":
