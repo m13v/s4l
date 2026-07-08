@@ -232,13 +232,29 @@ def autopilot_loaded() -> bool:
 # serves the menu bar's own dashboard_server (single path, per user 2026-07-03).
 # panel-endpoint.json is last-writer-wins across many short-lived MCP instances,
 # so treat reachability as best-effort.
+#
+# Bypass any configured system/env HTTP proxy for these calls. On macOS,
+# urllib.request honors the system proxy (via _scproxy) for ALL requests,
+# 127.0.0.1 included, unless a proxy is explicitly disabled per-request — a
+# plain urlopen() does NOT skip loopback the way browsers/curl typically do.
+# A machine with any system-wide proxy configured (corporate VPN client,
+# security software, a residential-IP proxy for platform fingerprinting,
+# etc.) whose bypass list doesn't happen to include 127.0.0.1/localhost will
+# have every loopback health check and post_drafts call silently routed out
+# through that proxy instead of hitting the MCP server directly — surfacing
+# as an opaque connection error/403 with no indication the proxy is at
+# fault. This is a local process talking to its own local server: it must
+# never go through any proxy, regardless of what's configured system-wide.
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _endpoint_url():
     ep = read_json("panel-endpoint.json")
     url = (ep or {}).get("url")
     if not url:
         return None
     try:
-        with urllib.request.urlopen(url + "health", timeout=1.5) as r:
+        with _NO_PROXY_OPENER.open(url + "health", timeout=1.5) as r:
             if r.status == 200:
                 return url
     except Exception as e:
@@ -287,7 +303,7 @@ def loopback_tool(name: str, args=None, timeout: float = 20.0):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _NO_PROXY_OPENER.open(req, timeout=timeout) as r:
             return _parse_tool_result(json.loads(r.read().decode()))
     except Exception as e:
         sys.stderr.write(f"[s4l-state] loopback_tool({name!r}) failed: {type(e).__name__}: {e}\n")
