@@ -27,6 +27,36 @@ const platform = require('./platform');
 const scheduler = require('./scheduler');
 const auth = require('./auth');
 
+// Best-effort Sentry init (mirrors scripts/sentry_init.py + mcp/src/telemetry.ts,
+// same DSN, org `mediar-n5`). Every pq() failure gets captured here instead of
+// only console.error'd to a local log file nobody was tailing — that silence
+// is exactly what let an ~18h Cloud SQL connectivity incident (2026-07-08) run
+// undetected. Must never throw into the request path.
+let Sentry = null;
+try {
+  Sentry = require('@sentry/node');
+  Sentry.init({
+    dsn: process.env.S4L_SENTRY_DSN || 'https://4d44ac907262c6545cf8681703528d04@o4507617161314304.ingest.us.sentry.io/4511598804336640',
+    environment: process.env.NODE_ENV === 'development' ? 'development' : 'production',
+    tracesSampleRate: 0,
+    sendDefaultPii: false,
+    serverName: 'social-autoposter-dashboard',
+  });
+} catch {
+  Sentry = null;
+}
+function captureDbError(e, tags) {
+  if (!Sentry) return;
+  try {
+    Sentry.withScope((scope) => {
+      for (const [k, v] of Object.entries(tags || {})) scope.setTag(k, v);
+      Sentry.captureException(e);
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 const DEST = path.join(os.homedir(), 'social-autoposter');
 const LOG_DIR = path.join(DEST, 'skill', 'logs');
 // S4L plugin runtime log dir (2026-07-06). The queue-backed twitter-cycle
@@ -533,6 +563,7 @@ async function pq(query, params) {
     // every pq() returned null without context).
     const snippet = (query || '').replace(/\s+/g, ' ').trim().slice(0, 140);
     console.error('[pq] query failed:', e.message, '| SQL:', snippet);
+    captureDbError(e, { component: 'pq', sql_snippet: snippet.slice(0, 100) });
     return null;
   }
 }
@@ -5469,7 +5500,13 @@ async function handleApi(req, res) {
       "ORDER BY 1 DESC LIMIT 500) r";
     return (async () => {
       const rows = await pq(q);
-      let events = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      // See the comment on /api/activity/stats: pq() returns null specifically
+      // on a DB error, distinct from a genuinely empty result. Report that
+      // distinction instead of silently rendering "no activity".
+      if (rows === null) {
+        return json(res, { events: [], dbError: true });
+      }
+      let events = (rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
       // Non-admin: drop events not tagged with an allowed project (including
       // octolens mentions, which have no project column). Strip Claude cost
       // fields; cost is operator-internal (API spend not charged to clients).
@@ -6276,7 +6313,16 @@ async function handleApi(req, res) {
       ") u" + platformWhere + " GROUP BY type, platform ORDER BY type, platform) r";
     return (async () => {
       const rows = await pq(q);
-      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      // pq() returns null specifically on a DB error (vs [] for a genuinely
+      // empty result set) — see pq()'s comment. Conflating the two here used
+      // to cache a DB timeout as a confident "0 events" for 5 minutes and
+      // render it identically to a real quiet window (2026-07-08 incident:
+      // this is what made a live Cloud SQL outage look like normal dashboard
+      // data). Only cache and report zero on an actual successful query.
+      if (rows === null) {
+        return json(res, { windowHours, rows: [], dbError: true });
+      }
+      const value = (rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
       activityStatsCache.set(cacheKey, { at: Date.now(), value });
       return json(res, { windowHours, rows: value });
     })().catch(e => json(res, { error: e.message }, 500));
@@ -9866,6 +9912,7 @@ const HTML = `<!DOCTYPE html>
   .stats-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
   .stats-title { font-size: 13px; font-weight: 600; color: var(--text); text-transform: uppercase; letter-spacing: 0.05em; }
   .stats-total { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .stats-db-error { font-size: 12px; font-weight: 600; color: var(--text); background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; }
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
   .stat-card {
     background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
@@ -10313,6 +10360,7 @@ const HTML = `<!DOCTYPE html>
       <span class="stats-title" id="stats-title">Last 24 hours</span>
       <span class="stats-total" id="stats-total"></span>
     </div>
+    <div class="stats-db-error" id="stats-db-error" style="display:none">Database query failed &mdash; counts below may be stale or incomplete, not actually zero.</div>
     <div class="stats-grid" id="stats-grid"></div>
   </div>
   <details class="style-stats-section" id="cohort-stats" open>
