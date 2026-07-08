@@ -2338,14 +2338,26 @@ class S4LMenuBar(rumps.App):
         # has been "drafting" past DRAFT_STUCK_SECONDS the worker keeps getting
         # killed mid-run (or never claims) and nothing is draining — flip to ⚠
         # instead of leaving the reassuring "drafting (8m)" spinner up. Skip when a
-        # more specific cause (rate limit) already owns the reason. Gated on
-        # schedule_state == "ok" (like the rate-limit check above): when the
-        # schedule is missing/disabled (e.g. orphaned by an account switch), the
-        # producer ALSO sits "drafting" forever, and without this gate draft_stuck
-        # shadowed the missing branch in _build_menu — the user saw "worker keeps
-        # getting killed" with NO Re-arm button instead of "Draft tasks aren't
-        # scheduled on this account" + the one-click fix (Karol, 2026-07-06).
-        if setup_complete and schedule_state == "ok" and self._stall_reason_info[0] != "rate_limited":
+        # more specific cause (rate limit) already owns the reason.
+        #
+        # Gated on schedule_state in ("ok", "stalled"), NOT missing/disabled: when
+        # the schedule is missing/disabled (e.g. orphaned by an account switch),
+        # the producer ALSO sits "drafting" forever, and without excluding those two
+        # draft_stuck shadowed the missing/disabled branch in _build_menu — the user
+        # saw "worker keeps getting killed" with NO Re-arm button instead of "Draft
+        # tasks aren't scheduled on this account" + the one-click fix (Karol,
+        # 2026-07-06). "stalled" is deliberately included (2026-07-08): that branch's
+        # only offered fix is "Restart Claude Desktop", but a job that has sat this
+        # long — claimed-and-hung, OR never claimed at all (see the ⧖ prefix check
+        # below) — means a restart was either already tried and didn't help, or
+        # isn't the right first move; Diagnose is the more useful single action once
+        # we have DRAFT_STUCK_SECONDS of direct evidence from the queue itself,
+        # which is a more reliable signal than the host's lastRunAt staleness.
+        if (
+            setup_complete
+            and schedule_state in ("ok", "stalled")
+            and self._stall_reason_info[0] != "rate_limited"
+        ):
             _act = st.read_activity()
             if (
                 _act
@@ -2397,6 +2409,19 @@ class S4LMenuBar(rumps.App):
                     "S4L Claude rate-limited",
                     "Drafts can’t run — this Claude account hit its rate limit. "
                     + (self._stall_reason_info[1] or "Wait for the limit to reset or switch account."),
+                )
+            elif self._stall_reason_info[0] == "draft_stuck":
+                # Previously unhandled here: fell through to the final `else`
+                # below and told the user to click "Set up draft schedule" — a
+                # button that doesn't exist in the draft_stuck menu (only
+                # Diagnose does). Fixed 2026-07-08 so the notification always
+                # matches the one button the menu actually shows.
+                _unclaimed = "⧖" in (self._stall_reason_info[1] or "")
+                self._notify(
+                    "S4L drafts not completing",
+                    ("No worker is claiming draft jobs. " if _unclaimed else
+                     "A worker claimed a draft job and never finished it. ")
+                    + "Open the S4L menu → “Diagnose & fix in Claude…”.",
                 )
             elif schedule_state == "disabled":
                 self._notify(
@@ -2952,10 +2977,18 @@ class S4LMenuBar(rumps.App):
                 ))
                 items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
             elif self._stall_reason_info[0] == "draft_stuck":
-                # Routines fire and the producer keeps narrating "drafting" but the
-                # worker keeps getting killed mid-run / never returns a result.
-                # Re-arm/restart can't fix this either — Diagnose is the one action.
-                items.append(self._label("⚠ Draft not completing — worker keeps getting killed"))
+                # Routines fire and the producer keeps narrating "drafting" but
+                # nothing is finishing. Two different root causes share this one
+                # reason code, and the label already tells us which: a '⧖' prefix
+                # (see _label_elapsed_secs) means the job has sat in the pending
+                # queue this whole time with no worker ever claiming it; no '⧖'
+                # means something DID claim it and then hung or died mid-run.
+                # Re-arm/restart can't fix either case — Diagnose is the one action.
+                _unclaimed = "⧖" in (self._stall_reason_info[1] or "")
+                items.append(self._label(
+                    "⚠ No worker is claiming draft jobs" if _unclaimed
+                    else "⚠ Draft not completing — worker keeps getting killed"
+                ))
                 items.append(self._label(
                     "   " + (self._stall_reason_info[1] or "drafting") + " — no result yet"
                 ))
