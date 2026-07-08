@@ -155,7 +155,14 @@ def _recent_batches_not_progressing(min_batches: int = BATCH_PROGRESSION_MIN_BAT
     signals took hours longer to latch. Requires network (via http_api); any
     failure (offline, endpoint missing, not enough batch history yet) returns
     False so this signal can only ever ADD confidence, never false-positive on
-    its own from a transient API hiccup."""
+    its own from a transient API hiccup.
+
+    NOTE: catches BaseException, not just Exception — scripts/http_api.py's
+    _request() deliberately raises SystemExit (not a plain Exception; it
+    inherits from BaseException) on a terminal 4xx/5xx, which is correct for
+    most one-shot pipeline callers but would silently kill this entire
+    best-effort watchdog process if left uncaught here. Caught by testing this
+    against a not-yet-deployed endpoint version during development."""
     try:
         repo = os.environ.get("S4L_REPO_DIR")
         if repo:
@@ -169,7 +176,7 @@ def _recent_batches_not_progressing(min_batches: int = BATCH_PROGRESSION_MIN_BAT
         if len(batches) < min_batches:
             return False  # not enough history yet to conclude a stall
         return all((b or {}).get("current_phase") not in BATCH_PROGRESSED_PHASES for b in batches)
-    except Exception:
+    except BaseException:
         return False
 
 
