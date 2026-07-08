@@ -162,7 +162,9 @@ def _endpoint_url():
         with urllib.request.urlopen(url + "health", timeout=1.5) as r:
             if r.status == 200:
                 return url
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[s4l-state] loopback health check failed: {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
         return None
     return None
 
@@ -208,7 +210,9 @@ def loopback_tool(name: str, args=None, timeout: float = 20.0):
         )
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return _parse_tool_result(json.loads(r.read().decode()))
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[s4l-state] loopback_tool({name!r}) failed: {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
         return None
 
 
@@ -244,6 +248,12 @@ def ver_key(v):
     with mcp/src/version.ts::verKey). The update verifier used to carry its
     own third copy, which drifted rc-blind (2026-07-03); do not re-add one."""
     return _snapshot_module()._ver_key(v)
+
+
+def version():
+    """Installed version, delegated to scripts/snapshot.py::_resolve_version so
+    there is exactly ONE Python implementation, same pattern as ver_key above."""
+    return _snapshot_module()._resolve_version()
 
 
 def _refresh_snapshot_bg():
