@@ -567,6 +567,13 @@ class _ReviewController(NSObject):
         self._interactions = []
         self._card_shown_at = None
         self._reason_field = None
+        # Two-draft cards: which slot (0=a, 1=b) is currently showing in the
+        # editable field. None = not yet chosen this card, _render() defaults
+        # it to the candidate's recommended_draft_index. Reset to None on
+        # every NEW card (see _render()'s "fresh card" branch below), so a
+        # switch made on one card never bleeds into the next.
+        self._selected_draft = None
+        self._draft_toggle_btns = {}
         # Attention anchors for the unattended-review watchdog: the stack counts
         # as "touched" on present, on any tracked interaction, and on any
         # decision. No touch past the watchdog threshold = the user is not
@@ -770,6 +777,7 @@ class _ReviewController(NSObject):
             self._rendered_idx = self._idx
             self._interactions = []
             self._card_shown_at = time.time()
+            self._selected_draft = None
         self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
@@ -972,19 +980,64 @@ class _ReviewController(NSObject):
             content.addSubview_(deye)
             self._details_btn = deye
 
+        # Two-draft cards (2026-07-07): a fresh candidate carries d["drafts"]
+        # (2 entries) + recommended_draft_index. Render a small A/B toggle
+        # between the heading and the editable field; clicking it (selectDraft_
+        # below) swaps which draft's text seeds the editable field and
+        # re-renders. Absent/short (reused stale draft, legacy plan) falls back
+        # to the single-draft reply_text path, no toggle rendered.
+        drafts = d.get("drafts")
+        dual = isinstance(drafts, list) and len(drafts) == 2
+        rec_idx = d.get("recommended_draft_index")
+        rec_idx = rec_idx if rec_idx in (0, 1) else 0
+        sel_idx = self._selected_draft if (dual and self._selected_draft in (0, 1)) else rec_idx
+        if dual:
+            self._selected_draft = sel_idx
+
+        edit_top = H - 172 - 6
+        self._draft_toggle_btns = {}
+        if dual:
+            toggle_h = 24
+            toggle_y = edit_top - toggle_h
+            gap = 6
+            btn_w = (W - 2 * M - gap) // 2
+            for slot in (0, 1):
+                label = "Draft A" if slot == 0 else "Draft B"
+                if slot == rec_idx:
+                    label += " · recommended"
+                selected = slot == sel_idx
+                if selected:
+                    label = "✓ " + label
+                bx = M if slot == 0 else M + btn_w + gap
+                btn = NSButton.alloc().initWithFrame_(NSMakeRect(bx, toggle_y, btn_w, toggle_h))
+                btn.setTitle_(label)
+                btn.setBezelStyle_(NSBezelStyleRounded)
+                btn.setFont_(_font(11, bold=selected))
+                btn.setTag_(slot)
+                btn.setTarget_(self)
+                btn.setAction_("selectDraft:")
+                content.addSubview_(btn)
+                self._draft_toggle_btns[slot] = btn
+            edit_top = toggle_y - 6
+
         # Editable reply. Since 2026-07-06 the tail link is folded into
         # reply_text at DRAFT time (scripts/twitter_gen_links.py::apply_tail_link),
         # so it's normally already there — only append link_url when reply_text
         # is genuinely link-free (older/fallback plans), else it shows twice.
-        reply = d.get("reply_text") or ""
+        if dual:
+            chosen = drafts[sel_idx]
+            reply = chosen.get("text") or ""
+            reply_en = (chosen.get("text_en") or "").strip() if is_foreign else ""
+        else:
+            reply = d.get("reply_text") or ""
         link = d.get("link_url")
         composed = reply if (not link or link in reply) else f"{reply} {link}"
         # Non-English draft with a stamped translation: a muted read-only
-        # "EN:" block sits between the heading and the editable field so the
-        # reviewer reads the draft in English while still editing (and
-        # posting) the original-language text below. Full translation lives
-        # in the details popover; inline is truncated to what ~3 lines fit.
-        edit_top = H - 172 - 6
+        # "EN:" block sits between the heading (or toggle) and the editable
+        # field so the reviewer reads the draft in English while still
+        # editing (and posting) the original-language text below. Full
+        # translation lives in the details popover; inline is truncated to
+        # what ~3 lines fit.
         if reply_en:
             tr_h = 42
             content.addSubview_(
