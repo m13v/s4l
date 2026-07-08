@@ -149,6 +149,14 @@ function runDoctorSync(options = {}) {
         "deferred until X connection to avoid an unexpected keychain prompt"
       );
     }
+    // Once the durable cookie mirror is populated, the X session no longer
+    // depends on this keychain item (see twitter_cookie_mirror.py — it exists
+    // precisely so a locked/missing Safe Storage key isn't fatal). Skip the
+    // probe instead of re-triggering + re-failing it on every doctor run;
+    // same mirrorCount() gate keychain_autolock already uses below.
+    if (mirrorCount() > 0) {
+      return result("pass", "skipped — durable cookie mirror already covers this");
+    }
     const r = spawnSync(
       "security",
       [
