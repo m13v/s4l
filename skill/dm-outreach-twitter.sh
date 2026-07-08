@@ -146,6 +146,25 @@ For each DM row, BEFORE you compose or send, do this in order:
    - Navigate to https://x.com/THEIR_AUTHOR (strip any leading @).
    - Snapshot the page. Extract: display name, handle, bio text, follower count, pinned/top-of-feed recent tweet topic summary.
    - If the profile is suspended, protected, or empty, capture what you can and note "profile_limited" or "profile_inaccessible".
+   - MANDATORY BLOCK CHECK (do this on every profile visit, not just when a
+     send later fails): read the page text (snapshot or DOM query) and check
+     for the literal string "has blocked you" (case-insensitive). This is the
+     ONLY sufficient evidence for concluding we're blocked -- never infer it
+     from a missing Message button, a screenshot, or a send failure alone
+     (a missing Message button just as often means "DMs closed", which is
+     chat_disabled below, not a block).
+     If that exact text IS present:
+       a. Skip this DM: python3 $REPO_DIR/scripts/dm_conversation.py mark-skipped \\
+            --dm-id DM_ID --reason "blocked_by_user"
+       b. Hard-block the author so future items from them are never drafted
+          (shared universal blocklist, same mechanism engage-twitter uses):
+            python3 $REPO_DIR/scripts/reply_db.py blocklist add x THEIR_AUTHOR \\
+              --reason "X reported this author has blocked our account (dm-outreach-twitter, profile check)" \\
+              --classification blocked_by_author \\
+              --added-by block_probe
+       c. Move on to the next DM row; do not attempt to send.
+     If that text is NOT present, proceed normally -- do not skip or block
+     based on any other signal from this step.
 
 3. Persist the profile fields:
    \`\`\`bash
