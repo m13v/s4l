@@ -1247,7 +1247,13 @@ def main() -> int:
                 "twitter post pipeline issues: "
                 f"posted={posted} failed={failed} attempted={len(candidates)} "
                 f"reasons={','.join(f'{k}:{v}' for k, v in machine.items())}",
-                level=("error" if (failed > 0 or posted == 0) else "warning"),
+                # error only when a REAL failure happened (failed > 0). A batch
+                # that's all benign operational skips (tweet_not_found because
+                # the target vanished before we replied, rate_limited, etc.)
+                # with posted==0 is not a problem, it's a batch of 1 that had
+                # nothing postable. Conflating "nothing posted" with "broken"
+                # used to file a fresh Sentry error for every such skip.
+                level=("error" if failed > 0 else "warning"),
                 tags={
                     "component": "twitter_post",
                     "posted": str(posted),
