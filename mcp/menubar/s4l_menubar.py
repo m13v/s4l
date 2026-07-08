@@ -28,6 +28,50 @@ import tempfile
 import threading
 import time
 
+# --- stderr timestamp wrapper -------------------------------------------------
+# menubar.err.log (this process's stderr, redirected by the launchd plist) has
+# never carried timestamps, so correlating a line like "[s4l-card] approved at
+# level 1" with the UTC-stamped logs elsewhere (post-*.log, post-preempt-
+# events.log, panel-events.log) meant guessing from file position alone
+# (2026-07-08 forensics). Wrap sys.stderr once, here, before any other module
+# gets a chance to print, so every line written to stderr for the rest of the
+# process gets a leading UTC timestamp in the same format those other logs
+# use — zero changes needed at any individual print()/write() call site
+# (s4l_card._log, the many sys.stderr.write(...) calls in this file, rumps'/
+# PyObjC's own warnings, …).
+class _TimestampedStderr:
+    def __init__(self, stream):
+        self._stream = stream
+        self._newline_pending = True  # True at the start of a fresh line
+
+    def write(self, data):
+        if not data:
+            return 0
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        lines = data.split("\n")
+        out = []
+        for i, line in enumerate(lines):
+            if i > 0:
+                out.append("\n")
+            starts_new_line = i > 0 or self._newline_pending
+            if starts_new_line and line:
+                out.append(f"[{ts}] ")
+            out.append(line)
+        self._newline_pending = data.endswith("\n")
+        return self._stream.write("".join(out))
+
+    def flush(self):
+        self._stream.flush()
+
+    def isatty(self):
+        try:
+            return self._stream.isatty()
+        except Exception:
+            return False
+
+
+sys.stderr = _TimestampedStderr(sys.stderr)
+
 # --- Sentry bootstrap --------------------------------------------------------
 # The menu bar runs as a standalone KeepAlive LaunchAgent off the owned venv,
 # a separate process from the MCP server, so it was a Sentry blind spot: a crash
