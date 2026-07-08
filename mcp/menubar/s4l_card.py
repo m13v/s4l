@@ -1070,12 +1070,14 @@ class _ReviewController(NSObject):
             content.addSubview_(deye)
             self._details_btn = deye
 
-        # Two-draft cards (2026-07-07): a fresh candidate carries d["drafts"]
-        # (2 entries) + recommended_draft_index. Render a small A/B toggle
-        # between the heading and the editable field; clicking it (selectDraft_
-        # below) swaps which draft's text seeds the editable field and
-        # re-renders. Absent/short (reused stale draft, legacy plan) falls back
-        # to the single-draft reply_text path, no toggle rendered.
+        # Two-draft cards (2026-07-08 redesign): show BOTH drafts at once,
+        # stacked, each independently editable, rather than a toggle that
+        # swaps one field's content. No buttons: selection is "whichever box
+        # the reviewer is currently in", shown via that box's own border (an
+        # accent outline vs a plain hairline, mirroring a standard focus
+        # ring) and updated live by textDidBeginEditing_ below. Absent/short
+        # (reused stale draft, legacy plan) falls back to one full-height
+        # editable box, same as before.
         drafts = d.get("drafts")
         dual = isinstance(drafts, list) and len(drafts) == 2
         rec_idx = d.get("recommended_draft_index")
@@ -1085,64 +1087,79 @@ class _ReviewController(NSObject):
             self._selected_draft = sel_idx
 
         edit_top = H - 172 - 6
-        self._draft_toggle_btns = {}
-        if dual:
-            toggle_h = 24
-            toggle_y = edit_top - toggle_h
-            gap = 6
-            btn_w = (W - 2 * M - gap) // 2
-            for slot in (0, 1):
-                label = "Draft A" if slot == 0 else "Draft B"
-                if slot == rec_idx:
-                    label += " · recommended"
-                selected = slot == sel_idx
-                if selected:
-                    label = "✓ " + label
-                bx = M if slot == 0 else M + btn_w + gap
-                btn = NSButton.alloc().initWithFrame_(NSMakeRect(bx, toggle_y, btn_w, toggle_h))
-                btn.setTitle_(label)
-                btn.setBezelStyle_(NSBezelStyleRounded)
-                btn.setFont_(_font(11, bold=selected))
-                btn.setTag_(slot)
-                btn.setTarget_(self)
-                btn.setAction_("selectDraft:")
-                content.addSubview_(btn)
-                self._draft_toggle_btns[slot] = btn
-            edit_top = toggle_y - 6
+        link = d.get("link_url")
 
-        # Editable reply. Since 2026-07-06 the tail link is folded into
-        # reply_text at DRAFT time (scripts/twitter_gen_links.py::apply_tail_link),
-        # so it's normally already there — only append link_url when reply_text
-        # is genuinely link-free (older/fallback plans), else it shows twice.
+        # Tail link baked at draft time is normally already in each draft's
+        # text (scripts/twitter_gen_links.py + the drafts-link-sync step in
+        # run-twitter-cycle.sh); only append link_url when a text is
+        # genuinely link-free (older/fallback plans), else it'd show twice.
+        def _compose(text):
+            text = text or ""
+            return text if (not link or link in text) else f"{text} {link}"
+
+        self._draft_textviews = {}
+        self._draft_scrolls = {}
         if dual:
-            chosen = drafts[sel_idx]
-            reply = chosen.get("text") or ""
-            reply_en = (chosen.get("text_en") or "").strip() if is_foreign else ""
+            avail_h = edit_top - M
+            gap = 8
+            label_h = 15
+            unit = (avail_h - gap) / 2.0
+            box_h = unit - label_h
+            for slot in (0, 1):
+                # slot 0 (Draft A) always renders on top, slot 1 (Draft B)
+                # always on the bottom: a fixed, predictable order so cards
+                # don't reshuffle as the reviewer switches between them.
+                box_y = M if slot == 1 else M + unit + gap
+                label_y = box_y + box_h
+                draft = drafts[slot]
+                tag_bits = []
+                if slot == rec_idx:
+                    tag_bits.append("recommended")
+                draft_text_en = (draft.get("text_en") or "").strip()
+                if is_foreign and draft_text_en:
+                    tag_bits.append(f"EN: {_truncate(draft_text_en, 90)}")
+                if tag_bits:
+                    content.addSubview_(
+                        _label(
+                            NSMakeRect(M, label_y, W - 2 * M, label_h),
+                            "  ·  ".join(tag_bits),
+                            size=10,
+                            muted=True,
+                            truncates=True,
+                        )
+                    )
+                scroll, tv = _editable_scroll(
+                    NSMakeRect(M, box_y, W - 2 * M, box_h), _compose(draft.get("text"))
+                )
+                tv.setDelegate_(self)
+                content.addSubview_(scroll)
+                self._draft_scrolls[slot] = scroll
+                self._draft_textviews[slot] = tv
+            self._update_draft_borders()
+            tv = self._draft_textviews[sel_idx]
         else:
             reply = d.get("reply_text") or ""
-        link = d.get("link_url")
-        composed = reply if (not link or link in reply) else f"{reply} {link}"
-        # Non-English draft with a stamped translation: a muted read-only
-        # "EN:" block sits between the heading (or toggle) and the editable
-        # field so the reviewer reads the draft in English while still
-        # editing (and posting) the original-language text below. Full
-        # translation lives in the details popover; inline is truncated to
-        # what ~3 lines fit.
-        if reply_en:
-            tr_h = 42
-            content.addSubview_(
-                _label(
-                    NSMakeRect(M, edit_top - tr_h, W - 2 * M, tr_h),
-                    f"EN: {_truncate(reply_en, 150)}",
-                    size=11,
-                    muted=True,
+            # Non-English draft with a stamped translation: a muted read-only
+            # "EN:" block sits between the heading and the editable field so
+            # the reviewer reads the draft in English while still editing
+            # (and posting) the original-language text below. Full
+            # translation lives in the details popover; inline is truncated
+            # to what ~3 lines fit.
+            if reply_en:
+                tr_h = 42
+                content.addSubview_(
+                    _label(
+                        NSMakeRect(M, edit_top - tr_h, W - 2 * M, tr_h),
+                        f"EN: {_truncate(reply_en, 150)}",
+                        size=11,
+                        muted=True,
+                    )
                 )
+                edit_top -= tr_h + 4
+            scroll, tv = _editable_scroll(
+                NSMakeRect(M, M, W - 2 * M, edit_top - M), _compose(reply)
             )
-            edit_top -= tr_h + 4
-        scroll, tv = _editable_scroll(
-            NSMakeRect(M, M, W - 2 * M, edit_top - M), composed
-        )
-        content.addSubview_(scroll)
+            content.addSubview_(scroll)
         self._textview = tv
 
         self._panel.setContentView_(_frosted(content))
@@ -1326,6 +1343,47 @@ class _ReviewController(NSObject):
         except Exception:
             pass
         return True
+
+    # NSTextView/NSText delegate: fires when a text view becomes the one
+    # being edited, i.e. right when it gains focus (click or tab), before any
+    # keystroke. Two-draft cards use this as the ONLY selection mechanism:
+    # whichever draft box the reviewer is in IS the selected one. Only the
+    # two draft boxes set self as delegate for this notification (the
+    # read-only thread quote never fires it), so no candidate_id lookup is
+    # needed, just a slot match against self._draft_textviews.
+    def textDidBeginEditing_(self, notification):
+        try:
+            tv = notification.object()
+        except Exception:
+            return
+        for slot, cand_tv in (self._draft_textviews or {}).items():
+            if cand_tv is tv and slot != self._selected_draft:
+                self._selected_draft = slot
+                self._textview = cand_tv
+                self._update_draft_borders()
+                break
+
+    @objc.python_method
+    def _update_draft_borders(self):
+        """Redraw the two draft boxes' borders in place (no re-render, so an
+        in-progress edit/caret in either box is never disturbed): the
+        selected box gets a thicker system-accent outline (the platform's own
+        selection color, respects the user's macOS accent choice and
+        light/dark mode), the other a plain hairline, matching the existing
+        thread-quote/editable-field border look."""
+        for slot, scroll in (self._draft_scrolls or {}).items():
+            try:
+                layer = scroll.layer()
+                if layer is None:
+                    continue
+                if slot == self._selected_draft:
+                    layer.setBorderWidth_(2.0)
+                    layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
+                else:
+                    layer.setBorderWidth_(1.0)
+                    layer.setBorderColor_(NSColor.separatorColor().CGColor())
+            except Exception:
+                pass
 
     @objc.python_method
     def _current_text(self):
