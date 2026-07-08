@@ -12,20 +12,31 @@
           <span class="title">S4L</span>
           <span class="ver" id="ver"></span>
         </div>
-        <!-- Inline setup summary + expand dropdown. The counter shows only while
-             setup is incomplete; once complete this collapses to just a "Setup"
-             dropdown so the milestone details stay inspectable on demand. -->
-        <button
-          class="setup-summary"
-          id="setup-summary"
-          type="button"
-          hidden
-          aria-expanded="false"
-        >
-          <span class="setup-summary-label">Setup</span>
-          <span class="setup-summary-count" id="onboarding-count"></span>
-          <span class="chevron" aria-hidden="true"></span>
-        </button>
+        <div class="head-right">
+          <!-- Pause/resume the draft pipeline (kicker + support daemons) without
+               touching Claude Desktop, this session, or X. Inline with the title
+               since it's the primary control, not buried lower on the page. -->
+          <div class="head-pause" id="pause-card">
+            <span class="head-pause-label" id="pause-name">Running</span>
+            <button class="switch" id="switch-pause" type="button" role="switch" aria-checked="true" aria-label="Pause S4L" title="Pause S4L">
+              <span class="knob"></span>
+            </button>
+          </div>
+          <!-- Inline setup summary + expand dropdown. The counter shows only while
+               setup is incomplete; once complete this collapses to just a "Setup"
+               dropdown so the milestone details stay inspectable on demand. -->
+          <button
+            class="setup-summary"
+            id="setup-summary"
+            type="button"
+            hidden
+            aria-expanded="false"
+          >
+            <span class="setup-summary-label">Setup</span>
+            <span class="setup-summary-count" id="onboarding-count"></span>
+            <span class="chevron" aria-hidden="true"></span>
+          </button>
+        </div>
       </header>
 
       <section class="onboarding-details" id="onboarding-details" hidden>
@@ -98,21 +109,6 @@
           <input type="range" id="split-slider" min="0" max="100" step="5" value="50" aria-label="Personal brand share of cycles (percent)" />
         </div>
         <div class="lane-note" id="mode-sub"></div>
-      </section>
-
-      <!-- Pause/Resume the pipeline (kicker + support daemons) without touching
-           Claude Desktop, the tray, or X. Always shown (mirrors the menu bar's
-           Pause S4L item), separate from Quit which lives only in the tray. -->
-      <section class="section" id="pause-card">
-        <div class="lane">
-          <div class="lane-text">
-            <div class="lane-name" id="pause-name">Autopilot running</div>
-            <div class="lane-desc" id="pause-desc">Scanning, drafting, and posting are active.</div>
-          </div>
-          <button class="switch" id="switch-pause" type="button" role="switch" aria-checked="true" aria-label="S4L autopilot">
-            <span class="knob"></span>
-          </button>
-        </div>
       </section>
 
       <section class="section" id="live-card" hidden>
