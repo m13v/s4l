@@ -1801,15 +1801,13 @@ class S4LMenuBar(rumps.App):
             return
         _activate_front()
         choice = _show_alert(
-            title="Tidy the S4L background tasks?",
+            title="Tidy S4L background tasks?",
             message=(
-                "S4L can tidy its background tasks: merge the old draft + query "
-                "tasks into ONE universal worker (s4l-worker) and make sure "
-                "their once-a-minute runs stay in a dedicated folder instead of "
-                "cluttering your `claude --resume` history.\n\n"
-                "Claude Desktop will restart once to apply — its window will "
-                "close and reopen in a moment. Your X login, drafts, and config "
-                "all stay."
+                "Move the background worker to a dedicated folder so its "
+                "once-a-minute runs stop cluttering your `claude --resume` "
+                "history.\n\n"
+                "Claude Desktop will restart once to apply. Your X login, "
+                "drafts, and config all stay."
             ),
             ok="Tidy & restart Claude", cancel="Later",
         )
