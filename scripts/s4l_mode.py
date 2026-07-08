@@ -249,11 +249,13 @@ def set_split(value) -> float:
 def get_draft_only() -> bool:
     """Whether every cycle stops at review cards (DEFAULT: True).
 
-    False (operator opt-out via `draft-only off`) means promotion-lane cycles
-    POST autonomously behind the rolling virality bar. Persona-lane cycles are
-    unaffected either way: they always stay draft-only so the user's own voice
-    keeps human review. Reads the retired `autopilot` key (inverted) from
-    mode.json files written before the 2026-07-06 rename.
+    False (operator opt-out via `draft-only off`) means EVERY lane (promotion
+    AND personal_brand) POSTs autonomously; promotion additionally runs behind
+    the rolling virality bar. As of 2026-07-08 this is a single global switch,
+    not promotion-only: see skill/run-draft-and-publish.sh's DRAFT_ONLY_FLAG
+    gate, which applies this value uniformly across lanes. Reads the retired
+    `autopilot` key (inverted) from mode.json files written before the
+    2026-07-06 rename.
     """
     try:
         data = json.loads(mode_file().read_text())
