@@ -123,20 +123,21 @@ if [ -n "${S4L_FORCE_PROJECT:-}" ]; then
     echo "[run-draft-and-publish] personal_brand mode: forcing project '$S4L_FORCE_PROJECT' (link-free)" >&2
 fi
 
-# Draft-only flag (2026-07-06). Per-cycle DRAFT_ONLY decision, overriding the
-# plist's baked DRAFT_ONLY=1 baseline:
-#   - draft-only ON (default), or persona cycle -> DRAFT_ONLY=1: draft stops
-#     before posting and the plan merges into review cards, exactly as before.
-#   - draft-only OFF + promotion cycle -> DRAFT_ONLY=0: the cycle POSTS its
-#     top-1 pick autonomously; the rolling virality bar activates automatically
-#     as the no-human quality gate.
-# S4L_CYCLE_LANE comes from the s4l_mode env eval above; when absent (e.g. a
-# personal_brand-only setup with no persona provisioned yet) we default to the
-# safe card path.
+# Draft-only flag (2026-07-06, made lane-uniform 2026-07-08). Per-cycle
+# DRAFT_ONLY decision, overriding the plist's baked DRAFT_ONLY=1 baseline:
+#   - draft-only ON (default): DRAFT_ONLY=1 for every lane; draft stops before
+#     posting and the plan merges into review cards, exactly as before.
+#   - draft-only OFF: DRAFT_ONLY=0 for every lane (promotion AND
+#     personal_brand); the cycle POSTS its top-1 pick autonomously. The
+#     rolling virality bar activates automatically as the no-human quality
+#     gate for promotion cycles.
+# Previously this only applied to the promotion lane (personal_brand always
+# forced DRAFT_ONLY=1). Operator instruction 2026-07-08: draft-only must be a
+# single global switch that covers every lane, not just promotion.
 DRAFT_ONLY_FLAG="$("$PY" "$REPO_DIR/scripts/s4l_mode.py" draft-only 2>/dev/null || echo 1)"
-if [ "${S4L_CYCLE_LANE:-}" = "promotion" ] && [ "$DRAFT_ONLY_FLAG" = "0" ]; then
+if [ "$DRAFT_ONLY_FLAG" = "0" ]; then
     export DRAFT_ONLY=0
-    echo "[run-draft-and-publish] draft-only OFF: promotion cycle will POST autonomously (DRAFT_ONLY=0, virality bar active)" >&2
+    echo "[run-draft-and-publish] draft-only OFF: cycle (lane=${S4L_CYCLE_LANE:-unknown}) will POST autonomously (DRAFT_ONLY=0)" >&2
 else
     export DRAFT_ONLY=1
 fi
