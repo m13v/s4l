@@ -424,10 +424,11 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     outcome: 'posted' | 'skipped' | 'failed'
     reason:  short failure key when outcome != 'posted', else ''.
 
-    picker_assignment: optional {assigned_style, assigned_mode} dict
-        sourced from the plan envelope. When present, drives the
-        validate_or_register call below so USE-mode drift coerces back
-        and INVENT-mode new_style blocks land in
+    picker_assignment: optional {assigned_style, assigned_mode} dict for
+        THIS candidate (per-candidate override when the plan carries one,
+        else the plan-level fallback, see call site in main()). When
+        present, drives the validate_or_register call below so USE-mode
+        drift coerces back and INVENT-mode new_style blocks land in
         engagement_styles_registry. None means legacy behaviour
         (uncoerced; whatever the model said is what gets logged).
     """
@@ -1031,13 +1032,14 @@ def main() -> int:
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     # Pull the picker assignment from the plan envelope (written by
-    # run-twitter-cycle.sh after s4l_pick_style). Shared across every
-    # candidate in the batch because the picker fires once per cycle.
-    # Falls back to None on legacy plans (pre-2026-05-22 envelopes that
-    # don't carry these keys); post_one then runs the legacy uncoerced
-    # path. Empty assigned_style + assigned_mode='invent' means the
-    # picker rolled INVENT this cycle; validate_or_register treats that
-    # as "register if the model produced a well-formed new_style block".
+    # run-twitter-cycle.sh after s4l_pick_style). This is the PLAN-LEVEL
+    # fallback, used verbatim for legacy plans (pre-2026-05-22 envelopes, or
+    # any candidate missing a per-candidate assignment) and as the last
+    # resort in the per-candidate override below. Falls back to None on
+    # legacy plans that don't carry these keys; post_one then runs the
+    # legacy uncoerced path. Empty assigned_style + assigned_mode='invent'
+    # means the picker rolled INVENT this cycle; validate_or_register treats
+    # that as "register if the model produced a well-formed new_style block".
     picker_assignment = {
         "assigned_style": plan.get("assigned_style") or None,
         "assigned_mode":  plan.get("assigned_mode")  or None,
@@ -1169,7 +1171,25 @@ def main() -> int:
                 except Exception:
                     pass
             try:
-                outcome, reason = post_one(c, picker_assignment=picker_assignment)
+                # Two-draft cards (2026-07-07): each candidate may carry its OWN
+                # (assigned_style, assigned_mode) reflecting whichever draft is
+                # actually posting, either the recommended one (stamped at
+                # plan-write time) or the other one (stamped by the MCP
+                # post_drafts edits path when a human switched drafts on the
+                # review card). Without this, every card would coerce back to
+                # ONE cycle-wide style even when it posted under the other
+                # style, silently corrupting the engagement_style label the
+                # picker's performance stats are learned from. Falls back to
+                # the plan-level assignment for any candidate/plan that
+                # predates this (assigned_mode key absent).
+                if "assigned_mode" in c:
+                    _cand_assignment = {
+                        "assigned_style": c.get("assigned_style"),
+                        "assigned_mode": c.get("assigned_mode"),
+                    }
+                else:
+                    _cand_assignment = picker_assignment
+                outcome, reason = post_one(c, picker_assignment=_cand_assignment)
             except Exception as e:
                 print(f"[post] candidate {c.get('candidate_id')} crashed: {e}",
                       flush=True)
