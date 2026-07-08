@@ -1142,6 +1142,21 @@ class _ReviewController(NSObject):
                 outline_frame = NSMakeRect(M, box_y, W - 2 * M, box_h)
                 outline = NSView.alloc().initWithFrame_(outline_frame)
                 _round_rect(outline)
+                try:
+                    # The inset gap between this wrapper's edge (where the ring
+                    # is drawn) and the scroll view's own opaque background sits
+                    # directly on the frosted/vibrancy panel behind it, which is
+                    # translucent and adapts dark in dark mode — a plain
+                    # hairline there read as invisible (2026-07-08 feedback:
+                    # "gray outline not obvious on a dark background"). Backing
+                    # the whole wrapper the same solid color as the text area
+                    # makes box + ring read as one opaque card regardless of
+                    # appearance, so the border has real contrast to sit on.
+                    outline.layer().setBackgroundColor_(
+                        NSColor.textBackgroundColor().CGColor()
+                    )
+                except Exception:
+                    pass
                 inset = 3
                 scroll, tv = _editable_scroll(
                     NSMakeRect(
