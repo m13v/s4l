@@ -329,11 +329,11 @@ def get_identity_header(refresh: bool = False) -> str:
 
 
 # Our own infra: operator Mac, mk0r E2B sandbox fleet, MacStadium remote QA boxes.
-# Single source of truth for "is this install actually a customer" — consumed by
+# Single source of truth for "is this install actually a customer", consumed by
 # active_users.py (customer-roster dedupe) and autopilot_stall_watch.py (stall-page
-# severity) so the two lists can't drift apart. "71522" was the MacStadium box
+# severity), so the two lists can't drift apart. "71522" was the MacStadium box
 # retired by the 2026-07-06 hardware swap (ticket #10904); "71732" is its
-# replacement — both listed since the old box's hostname could still appear in
+# replacement, both listed since the old box's hostname could still appear in
 # historical data.
 INTERNAL_EMAILS = {"i@m13v.com", "agent@mk0r.com", "matt@mediar.ai"}
 INTERNAL_HOSTNAME_SUBSTR = ("e2b.local", "71522", "71732")
