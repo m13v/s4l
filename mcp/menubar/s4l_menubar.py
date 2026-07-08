@@ -1139,23 +1139,16 @@ class S4LMenuBar(rumps.App):
         S4L's own scan/draft/post pipeline (the launchd kicker + its support
         daemons) while leaving Claude Desktop, this tray, and the draft
         schedule registration alone — nothing is deleted, so it survives a
-        Claude restart and Resume brings it right back. The real work
-        (launchctl bootout/bootstrap) needs to happen where the daemons are
-        defined, so this calls through the MCP's pause_s4l tool over the
-        same loopback the tray already uses for other tool calls; it does NOT
-        duplicate the launchctl logic here."""
+        Claude restart and Resume brings it right back. Runs the real
+        launchctl work directly via st.pause_s4l()/resume_s4l() (this process
+        already does its own launchctl calls elsewhere, e.g. _quit_work) so it
+        works even when Claude Desktop is closed — no MCP/loopback round trip."""
         action = "resume" if os.path.exists(PAUSE_FLAG) else "pause"
         self._notify("S4L", "Resuming…" if action == "resume" else "Pausing…")
         threading.Thread(target=self._pause_work, args=(action,), daemon=True).start()
 
     def _pause_work(self, action):
-        res = st.loopback_tool("pause_s4l", {"action": action})
-        if res is None:
-            self._notify(
-                "S4L",
-                f"Couldn't reach S4L to {action} — make sure Claude Desktop is running.",
-            )
-            return
+        res = st.pause_s4l() if action == "pause" else st.resume_s4l()
         ok = bool(res.get("ok"))
         if action == "pause":
             self._notify(
