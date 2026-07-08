@@ -1074,11 +1074,26 @@ async function postApproved(batchId: string, plan: Plan) {
   {
     const gateDeadline = Date.now() + 8 * 60_000;
     let waited = false;
+    let waitStartedAt = 0;
     while ((postingActive || isPeerDrainActive()) && Date.now() < gateDeadline) {
+      if (!waited) {
+        waitStartedAt = Date.now();
+        // This loop was previously silent end-to-end (2026-07-08 forensics: a
+        // ~1:45 gap in a user's approval batch had zero trace anywhere). Log
+        // once on entry (not per 5s tick, to avoid spamming the file) so a
+        // later "why did card N take so long" question has a starting point.
+        logPostEvent(`postApproved_wait_start batch=${batchId} blocked_by=${describePostingBlocker()}`);
+      }
       waited = true;
       await sleepMs(5000);
     }
-    if (postingActive || isPeerDrainActive()) {
+    const timedOut = postingActive || isPeerDrainActive();
+    if (waited) {
+      logPostEvent(
+        `postApproved_wait_end batch=${batchId} waited_ms=${Date.now() - waitStartedAt} timed_out=${timedOut}`
+      );
+    }
+    if (timedOut) {
       return {
         attempted: 0,
         exit_code: 0,
@@ -4524,8 +4539,14 @@ function writePanelUrl(url: string): void {
       // and fully usable via `url` for anything that already has it (e.g. this
       // process's own Code side-panel proxy); we just don't publish ourselves
       // as THE shared menu-bar target.
+      logPanelEvent(`panel_cede existing_pid=${existing.pid}`);
       return;
     }
+    logPanelEvent(
+      existing?.pid
+        ? `panel_takeover dead_pid=${existing.pid}`
+        : `panel_claim previous=none`
+    );
     fs.writeFileSync(
       panelEndpointPath(),
       JSON.stringify(
@@ -4681,6 +4702,24 @@ function isPeerDrainActive(): boolean {
   } catch {
     return false;
   }
+}
+
+// Human-readable reason for the postApproved wait gate, used only for the
+// wait_start log line — distinguishes "our own drain hasn't hit its grace
+// release yet" from "a peer MCP instance (different pid, e.g. a separate
+// Claude session/queue-worker) is mid-drain," and names the peer pid + how
+// much longer its flag has left so a log reader doesn't have to guess.
+function describePostingBlocker(): string {
+  if (postingActive) return "own_in_process_flag";
+  try {
+    const j = JSON.parse(fs.readFileSync(postingFlagPath(), "utf-8"));
+    if (typeof j?.expires_at === "number" && j.expires_at > Date.now() && typeof j?.pid === "number") {
+      return `peer_pid=${j.pid} expires_in_ms=${j.expires_at - Date.now()}`;
+    }
+  } catch {
+    /* best effort */
+  }
+  return "unknown";
 }
 
 // activity.json: a tiny "what's running right now" signal the menu bar reads to
@@ -4881,6 +4920,25 @@ function logPostEvent(msg: string): void {
       path.join(dir, "post-preempt-events.log"),
       `${new Date().toISOString()} pid=${process.pid} ${msg}\n`
     );
+  } catch {
+    /* best effort */
+  }
+}
+
+// Timestamped on-disk trail of panel-endpoint.json ownership handoffs. Mirrors
+// logPostEvent's rationale (per-process console.error is hard to even locate
+// across ephemeral, per-host-session MCP instances), for the panel-election
+// side instead of the posting side. writePanelUrl() runs on every process's
+// eager startup, so this also captures the mundane "claimed with nothing
+// registered" and "ceded to an already-alive owner" cases, not just handoffs
+// — that's what makes it possible to tell "a fresh instance took over from a
+// dead registrant" apart from "an approve click found nothing registered at
+// all" after the fact, instead of inferring it from timing alone.
+function logPanelEvent(msg: string): void {
+  try {
+    const dir = path.join(repoDir(), "skill", "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "panel-events.log"), `${new Date().toISOString()} pid=${process.pid} ${msg}\n`);
   } catch {
     /* best effort */
   }
