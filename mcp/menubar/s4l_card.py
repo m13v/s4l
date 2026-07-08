@@ -619,7 +619,7 @@ class _ReviewController(NSObject):
         # Two-draft cards (2026-07-08 redesign, no-recommendation pass same
         # day): both drafts render at once as separate editable boxes;
         # `_selected_draft` (0=a, 1=b) is "whichever box the reviewer is
-        # currently in", driven by focus (see textDidBeginEditing_ below),
+        # currently in", driven by caret movement (see textViewDidChangeSelection_ below),
         # not a button. None = not yet chosen this card, _render() defaults
         # it to slot 0 (Draft A) — the model never picks a favorite, so
         # there's no recommendation to default to instead. Reset to None on
@@ -1076,9 +1076,9 @@ class _ReviewController(NSObject):
         # day): show BOTH drafts at once, stacked, each independently
         # editable, rather than a toggle that swaps one field's content. No
         # buttons: selection is "whichever box the reviewer is currently in",
-        # shown via that box's own border (an accent outline vs a plain
-        # hairline, mirroring a standard focus ring) and updated live by
-        # textDidBeginEditing_ below. The model never picks a favorite
+        # shown via a dedicated outline view wrapping that box (an accent
+        # outline vs a plain hairline, mirroring a standard focus ring) and
+        # updated live by textViewDidChangeSelection_ below. The model never picks a favorite
         # (removed 2026-07-08 per user: no ask-the-model-to-recommend), so
         # Draft A (slot 0) is simply the fixed default until the reviewer
         # clicks into Draft B. Absent/short (reused stale draft, legacy plan)
@@ -1373,14 +1373,18 @@ class _ReviewController(NSObject):
             pass
         return True
 
-    # NSTextView/NSText delegate: fires when a text view becomes the one
-    # being edited, i.e. right when it gains focus (click or tab), before any
-    # keystroke. Two-draft cards use this as the ONLY selection mechanism:
-    # whichever draft box the reviewer is in IS the selected one. Only the
-    # two draft boxes set self as delegate for this notification (the
-    # read-only thread quote never fires it), so no candidate_id lookup is
-    # needed, just a slot match against self._draft_textviews.
-    def textDidBeginEditing_(self, notification):
+    # NSTextView delegate: fires the instant the caret/selection moves inside
+    # a text view, which includes a plain click-to-place-cursor with no
+    # keystroke (unlike NSTextDidBeginEditingNotification/textDidBeginEditing_,
+    # which only fires once an actual edit starts and does NOT fire from
+    # clicking into a box to merely place the cursor, verified empirically —
+    # that gap was the "clicking the other draft doesn't select it" bug).
+    # Two-draft cards use this as the ONLY selection mechanism: whichever
+    # draft box the reviewer is in IS the selected one. Only the two draft
+    # boxes set self as delegate for this notification (the read-only thread
+    # quote never fires it), so no candidate_id lookup is needed, just a slot
+    # match against self._draft_textviews.
+    def textViewDidChangeSelection_(self, notification):
         try:
             tv = notification.object()
         except Exception:
