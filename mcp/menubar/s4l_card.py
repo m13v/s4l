@@ -496,15 +496,25 @@ def _label(frame, text, *, size=12, bold=False, muted=False):
 
 
 def _editable_scroll(frame, text=""):
-    """Bezel-bordered scrollable text editor. The document view must be sized
-    to the scroll view's contentSize (NOT the outer frame) and track its width;
-    sized to the outer frame the text runs underneath the scroller. The
-    scroller itself auto-hides so it only appears when the text overflows.
+    """Rounded-rect scrollable text editor (hairline border, solid text
+    background over the frosted panel; falls back to the old square bezel when
+    layers are unavailable). The document view must be sized to the scroll
+    view's contentSize (NOT the outer frame) and track its width; sized to the
+    outer frame the text runs underneath the scroller. The scroller itself
+    auto-hides so it only appears when the text overflows.
     Returns (scroll, textview)."""
     scroll = NSScrollView.alloc().initWithFrame_(frame)
     scroll.setHasVerticalScroller_(True)
     scroll.setAutohidesScrollers_(True)
-    scroll.setBorderType_(NS_BEZEL_BORDER)
+    if _round_rect(scroll):
+        scroll.setBorderType_(0)  # NSNoBorder; the layer draws the outline
+        try:
+            scroll.setDrawsBackground_(True)
+            scroll.setBackgroundColor_(NSColor.textBackgroundColor())
+        except Exception:
+            pass
+    else:
+        scroll.setBorderType_(NS_BEZEL_BORDER)
     cs = scroll.contentSize()
     tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, cs.width, cs.height))
     tv.setFont_(NSFont.systemFontOfSize_(12))
@@ -518,6 +528,11 @@ def _editable_scroll(frame, text=""):
     tv.setAutoresizingMask_(NSViewWidthSizable)
     tv.textContainer().setWidthTracksTextView_(True)
     tv.textContainer().setContainerSize_(NSMakeSize(cs.width, 1e7))
+    try:
+        # Breathing room inside the rounded rect; text no longer hugs the border.
+        tv.setTextContainerInset_(NSMakeSize(4, 6))
+    except Exception:
+        pass
     if text:
         tv.setString_(text)
     scroll.setDocumentView_(tv)
@@ -756,8 +771,11 @@ class _ReviewController(NSObject):
         # row extending horizontally at the left (one click on an emoji =
         # approve at that strength), Reject at the right. Overall feedback
         # moved to the menu bar item.
+        # Section labels render quiet (semibold + secondary color): the modern
+        # macOS form look where chrome recedes and content (thread, draft)
+        # carries the full-strength label color.
         content.addSubview_(
-            _label(NSMakeRect(M, H - 38, 60, 20), "Approve", size=12, bold=True)
+            _label(NSMakeRect(M, H - 38, 60, 20), "Approve", size=12, bold=True, muted=True)
         )
         x = M + 62
         for i, (emoji, tip) in enumerate(APPROVE_EMOJIS):
@@ -783,6 +801,10 @@ class _ReviewController(NSObject):
         reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
         reject.setTitle_("Reject")
         reject.setBezelStyle_(NSBezelStyleRounded)
+        try:
+            reject.setHasDestructiveAction_(True)  # red title on macOS 12+
+        except Exception:
+            pass
         reject.setTarget_(self)
         reject.setAction_("reject:")
         content.addSubview_(reject)
@@ -798,7 +820,7 @@ class _ReviewController(NSObject):
         stats = d.get("stats") or {}
         thread_url = d.get("thread_url")
         content.addSubview_(
-            _label(NSMakeRect(M, H - 70, 78, 18), "Replying to", size=12, bold=True)
+            _label(NSMakeRect(M, H - 70, 78, 18), "Replying to", size=12, bold=True, muted=True)
         )
         right_x = W - M
         self._close_stats_popover()
@@ -833,7 +855,7 @@ class _ReviewController(NSObject):
             # after the handle instead of at a fixed column.
             text = f"@{handle}"
             measured = NSAttributedString.alloc().initWithString_attributes_(
-                text, {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12)}
+                text, {NSFontAttributeName: _font(12, True)}
             ).size().width
             link_w = min(int(measured) + 8, handle_w)
             self._add_link(
