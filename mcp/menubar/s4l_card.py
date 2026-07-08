@@ -1103,10 +1103,15 @@ class _ReviewController(NSObject):
 
         self._draft_textviews = {}
         self._draft_scrolls = {}
+        self._draft_outlines = {}
         if dual:
             avail_h = edit_top - M
             gap = 5
-            label_h = 15
+            # Reserved only for foreign-language cards, which show a muted
+            # "EN:" line above each box; English drafts (the common case)
+            # have nothing to put there, so reserving it unconditionally used
+            # to leave a dead 15px gap above every box for no reason.
+            label_h = 15 if is_foreign else 0
             unit = (avail_h - gap) / 2.0
             box_h = unit - label_h
             for slot in (0, 1):
@@ -1127,12 +1132,32 @@ class _ReviewController(NSObject):
                             truncates=True,
                         )
                     )
+                # The selection ring can't be drawn on the scroll view's own
+                # layer: NSScrollView's opaque clip/document view fully paints
+                # over its parent layer's border, so setBorderWidth/Color on
+                # scroll.layer() is accepted (no error) but never visibly
+                # renders, at any width or color (verified empirically). A
+                # separate outline view, sized to the box and holding the
+                # scroll view inset a few px inside it, keeps the ring
+                # unobstructed since nothing opaque reaches its edge.
+                outline_frame = NSMakeRect(M, box_y, W - 2 * M, box_h)
+                outline = NSView.alloc().initWithFrame_(outline_frame)
+                _round_rect(outline)
+                inset = 3
                 scroll, tv = _editable_scroll(
-                    NSMakeRect(M, box_y, W - 2 * M, box_h), _compose(draft.get("text"))
+                    NSMakeRect(
+                        inset,
+                        inset,
+                        outline_frame.size.width - 2 * inset,
+                        outline_frame.size.height - 2 * inset,
+                    ),
+                    _compose(draft.get("text")),
                 )
                 tv.setDelegate_(self)
-                content.addSubview_(scroll)
+                outline.addSubview_(scroll)
+                content.addSubview_(outline)
                 self._draft_scrolls[slot] = scroll
+                self._draft_outlines[slot] = outline
                 self._draft_textviews[slot] = tv
             tv = self._draft_textviews[sel_idx]
         else:
