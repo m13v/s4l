@@ -1144,20 +1144,20 @@ class _ReviewController(NSObject):
                 _round_rect(outline)
                 try:
                     # The inset gap between this wrapper's edge (where the ring
-                    # is drawn) and the scroll view's own opaque background sits
-                    # directly on the frosted/vibrancy panel behind it, which is
-                    # translucent and adapts dark in dark mode — a plain
-                    # hairline there read as invisible (2026-07-08 feedback:
-                    # "gray outline not obvious on a dark background"). Backing
-                    # the whole wrapper the same solid color as the text area
-                    # makes box + ring read as one opaque card regardless of
-                    # appearance, so the border has real contrast to sit on.
+                    # is drawn) and the scroll view's own opaque background
+                    # otherwise sits directly on the translucent frosted panel
+                    # behind it, so a plain hairline there read as barely
+                    # visible (2026-07-08 feedback: "outline not obvious,
+                    # background is mostly transparent"). Backing the whole
+                    # wrapper the same solid color as the text area makes box +
+                    # ring read as one opaque card, giving the border real
+                    # contrast to sit on instead of translucency.
                     outline.layer().setBackgroundColor_(
                         NSColor.textBackgroundColor().CGColor()
                     )
                 except Exception:
                     pass
-                inset = 3
+                inset = 4
                 scroll, tv = _editable_scroll(
                     NSMakeRect(
                         inset,
@@ -1426,11 +1426,26 @@ class _ReviewController(NSObject):
                 if layer is None:
                     continue
                 if slot == self._selected_draft:
-                    layer.setBorderWidth_(2.0)
+                    layer.setBorderWidth_(2.5)
                     layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
+                    # A thin ring alone read as barely-there against the
+                    # translucent panel (2026-07-08 feedback). The margin
+                    # between this wrapper's edge and the inset scroll view is
+                    # otherwise plain textBackgroundColor, so tinting it toward
+                    # the accent turns that margin into a visible accent halo,
+                    # not just a hairline — obvious at a glance, not just on
+                    # close inspection.
+                    try:
+                        tint = NSColor.textBackgroundColor().blendedColorWithFraction_ofColor_(
+                            0.18, NSColor.controlAccentColor()
+                        )
+                        layer.setBackgroundColor_((tint or NSColor.textBackgroundColor()).CGColor())
+                    except Exception:
+                        layer.setBackgroundColor_(NSColor.textBackgroundColor().CGColor())
                 else:
                     layer.setBorderWidth_(1.0)
                     layer.setBorderColor_(NSColor.separatorColor().CGColor())
+                    layer.setBackgroundColor_(NSColor.textBackgroundColor().CGColor())
             except Exception:
                 pass
 
