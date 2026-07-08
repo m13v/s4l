@@ -1713,7 +1713,7 @@ class S4LMenuBar(rumps.App):
     def _rewrite_scheduled_task_cwd(self):
         """Registry self-heal, run ONLY while Claude is DOWN (the running app
         caches the registry in memory and clobbers a live edit on the next
-        fire). Four fixes in one pass, across every scheduled-tasks.json:
+        fire). Five fixes in one pass, across every scheduled-tasks.json:
           1. Point worker tasks' cwd at ~/.s4l-worker.
           2. REMOVE the deprecated single autopilot task.
           3. CONSOLIDATE every legacy worker entry into ONE s4l-worker entry
@@ -1733,6 +1733,16 @@ class S4LMenuBar(rumps.App):
              from resurrecting a quit install.) This restores the June 27
              direct-write re-arm (45f1c45d) with the targeting problem dissolved
              by writing everywhere instead of guessing the live account.
+          5. CREATE a fresh registry for the active account when it has NONE at
+             all (2026-07-08): fix 4 only edits files the glob finds, so an
+             account that's never had a scheduled-tasks.json (just switched
+             into, never scheduled on this box) got nothing — found on a real
+             test box where the active account's session tree held zero
+             registry files. Resolves the active account via
+             scripts/schedule_state.py's config.json lookup and writes a fresh
+             worker entry into its most-recently-touched EXISTING session
+             directory (never fabricates a new directory). Same user-intent
+             and worker_skill_ok guards as fix 4.
         Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
         and queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts."""
         try:
