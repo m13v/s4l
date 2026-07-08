@@ -731,48 +731,6 @@ class S4LMenuBar(rumps.App):
             "that schedules the draft tasks for this account",
         )
 
-    def _restart_claude_fix(self, _=None):
-        """One-click fix for schedule_state == 'stalled': fully quit and relaunch
-        Claude Desktop. Fixes the warm-session scheduler wedge (finished worker
-        sessions never exit, so the host's overlap guard skips every fire — a
-        Claude Desktop platform bug; Karol, 2026-07-06). While Claude is down we
-        also run the registry self-heal, which additionally repairs the
-        account-switch orphan case, so this one click covers both known causes."""
-        _activate_front()
-        choice = _show_alert(
-            title="Restart Claude Desktop?",
-            message=(
-                "Claude’s scheduler stopped running the draft tasks (a known "
-                "Claude Desktop glitch). Restarting Claude fixes it — its window "
-                "will close and reopen in a moment. Drafting resumes within a "
-                "couple of minutes."
-            ),
-            ok="Restart Claude", cancel="Cancel",
-        )
-        if choice != 1:
-            return
-        _capture_msg(
-            "S4L restart-claude-fix clicked",
-            phase="draft_schedule",
-            reason="stalled",
-            _extra={"scheduled_tasks": _registry_summary_for_capture()},
-        )
-        self._notify("S4L", "Restarting Claude Desktop… drafts resume shortly.")
-        threading.Thread(target=self._restart_claude_fix_work, daemon=True).start()
-
-    def _restart_claude_fix_work(self):
-        try:
-            user_data_dirs = self._claude_user_data_dirs()
-            self._quit_claude_and_wait()
-            # Claude is down: safe window for registry edits. Runs the cwd fix,
-            # legacy consolidation, AND the ensure-worker heal (orphan repair).
-            self._rewrite_scheduled_task_cwd()
-            self._relaunch_claude(user_data_dirs)
-            self._sig = None
-        except Exception as e:
-            self._notify("S4L restart failed", str(e)[:140])
-            _capture(e, phase="restart_claude_fix")
-
     # ---- schedule-state detection ----------------------------------------
     def _schedule_state(self):
         """Is the draft schedule registered AND running for the live account?
@@ -2433,8 +2391,8 @@ class S4LMenuBar(rumps.App):
                 self._notify(
                     "S4L drafts stopped",
                     "Claude’s scheduler stopped running the draft tasks (a known "
-                    "Claude Desktop glitch). Open the S4L menu → “Restart Claude "
-                    "Desktop to fix”.",
+                    "Claude Desktop glitch). Open the S4L menu → “Set up draft "
+                    "schedule” to re-register it.",
                 )
             else:
                 self._notify(
