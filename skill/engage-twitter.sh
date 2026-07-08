@@ -366,7 +366,7 @@ MANDATORY reply flow for every item:
                ii.  Wait ~2s, then read the page text (snapshot or DOM query).
                iii. If the text contains "has blocked you" (case-insensitive):
                     this is a confirmed, permanent block. Do NOT retry. Skip
-                    this reply: python3 reply_db.py skipped ID "author_blocked_us"
+                    this reply: python3 $REPO_DIR/scripts/reply_db.py skipped ID "author_blocked_us"
                     Then hard-block the author so future items from them are
                     never drafted (same mechanism as the escape hatch above):
                       python3 $REPO_DIR/scripts/reply_db.py blocklist add x HANDLE \\
