@@ -154,7 +154,7 @@ def main():
         sys.exit(3)
 
     project_recents = recent_angles_by_project(ctx.get("project_angles"))
-    candidates = build_candidates(config, project_recents)
+    candidates, _ = build_candidates(config, project_recents)
     recent_project_counts = ctx.get("recent_posts_by_project") or {}
 
     if args.show_all:
