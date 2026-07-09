@@ -3001,7 +3001,6 @@ class S4LMenuBar(rumps.App):
             items.append(rumps.MenuItem("Resume S4L", callback=self._pause_toggle))
         else:
             items.append(rumps.MenuItem("Pause S4L", callback=self._pause_toggle))
-            items.append(self._label("   stop drafting/posting, keep Claude + tray running"))
         items.append(rumps.separator)
 
         # Attention = the draft schedule isn't running for THIS account (missing or
@@ -3105,19 +3104,15 @@ class S4LMenuBar(rumps.App):
         personal_on = bool(flags.get("personal_brand"))
         promo_on = bool(flags.get("promotion"))
         items.append(rumps.separator)
-        items.append(self._label("Engagement lanes"))
         pb_item = rumps.MenuItem("Personal brand", callback=self._toggle_personal)
         pb_item.state = 1 if personal_on else 0
         items.append(pb_item)
-        items.append(self._label("   organic, link-free engagement"))
         pr_item = rumps.MenuItem("Product promotion", callback=self._toggle_promotion)
         pr_item.state = 1 if promo_on else 0
         items.append(pr_item)
-        items.append(self._label("   promoting your products (link replies)"))
         if personal_on and promo_on:
             # Both lanes on: the split becomes meaningful, so offer the presets.
             share = st.read_split()
-            items.append(self._label(f"   both on · cycles split {self._split_pct(share)}"))
             split_menu = rumps.MenuItem(f"Lane split: {self._split_pct(share)}")
             for preset in self.SPLIT_PRESETS:
                 it = rumps.MenuItem(
@@ -3134,7 +3129,6 @@ class S4LMenuBar(rumps.App):
         # carries a Feedback button); named for what it does to the pipeline,
         # not the mechanism.
         items.append(rumps.MenuItem("Give overall feedback to AI…", callback=self._menu_feedback))
-        items.append(self._label("   overall guidance, steers future drafts"))
         # While the update-verify marker is pending, the pipeline copy still
         # resolves the OLD version (it only advances once the restarted server
         # re-provisions repo/package, ~2 min), so the snapshot honestly reports
