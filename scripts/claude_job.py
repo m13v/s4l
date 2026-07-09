@@ -335,6 +335,43 @@ def heartbeat_path() -> str:
     return os.path.join(queue_root(), "worker-heartbeat.json")
 
 
+def _deathwatch_marker(job_id: str) -> str:
+    return os.path.join(queue_root(), f"deathwatch-armed-{job_id}.marker")
+
+
+def _arm_deathwatch(job_id: str, qtype: str, batch: str) -> None:
+    """Best-effort dead-man's-switch (2026-07-08): spawn a detached watcher
+    (scripts/producer_deathwatch.py) that flags an UNEXPECTED death
+    (SIGKILL/OOM/hard crash) of THIS process while it's blocked in the
+    cmd_provider() poll loop below — the exact gap that made orphaned salvage
+    results ("worker drafted, no card") unexplainable. Every normal return
+    path in cmd_provider() calls _disarm_deathwatch() first, so a clean exit
+    never produces a report. start_new_session=True so the watcher survives
+    being in the same process group as the watched pid if that group is what
+    gets signaled."""
+    try:
+        marker = _deathwatch_marker(job_id)
+        os.makedirs(queue_root(), exist_ok=True)
+        with open(marker, "w") as f:
+            f.write(str(os.getpid()))
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "producer_deathwatch.py")
+        subprocess.Popen(
+            [sys.executable, script, "--watch-pid", str(os.getpid()),
+             "--job-id", job_id, "--qtype", qtype, "--batch", batch],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _disarm_deathwatch(job_id: str) -> None:
+    try:
+        os.remove(_deathwatch_marker(job_id))
+    except Exception:
+        pass
+
+
 def _stamp_heartbeat(event: str, qtype: str | None = None) -> None:
     """Best-effort: never let a heartbeat write failure break the queue."""
     try:
@@ -690,6 +727,7 @@ def cmd_provider(ns) -> int:
     running_path = os.path.join(running_dir(), fname)
     _atomic_write(pending_path, job)
     _plog(f"enqueued {qtype} job {job_id} batch={batch}; waiting for a scheduled task (timeout {ns.timeout}s)")
+    _arm_deathwatch(job_id, qtype, batch)
     # Narrate the (multi-minute) block to the menu bar. The launchd draft lane has
     # no other activity writer, so without this the box looks idle while it works.
     # Cleared by run-draft-and-publish.sh's exit trap at cycle end (and by the
@@ -732,6 +770,7 @@ def cmd_provider(ns) -> int:
             os.remove(res_path)
             if res.get("status") == "error":
                 _plog(f"job {job_id} returned error: {res.get('error', 'unknown')}")
+                _disarm_deathwatch(job_id)
                 return 1
             obj = res.get("result")
             # Emit a claude `--output-format json` shaped envelope so the
@@ -759,6 +798,7 @@ def cmd_provider(ns) -> int:
             except Exception:
                 _ncand = "?"
             _plog(f"consumed result for job {job_id} batch={batch} ({qtype}); {_ncand} candidates -> producer assembles the plan")
+            _disarm_deathwatch(job_id)
             return 0
         time.sleep(POLL_INTERVAL_S)
 
@@ -779,6 +819,7 @@ def cmd_provider(ns) -> int:
     # flicker the ⚠ off). Cleared only when a draft actually drains.
     _bump_drain_timeout()
     _plog(f"timed out after {ns.timeout}s waiting for job {job_id} batch={batch} ({qtype}); removed the job")
+    _disarm_deathwatch(job_id)
     return 79  # mirror run_claude.sh's "blocked, skip cleanly" exit code
 
 
