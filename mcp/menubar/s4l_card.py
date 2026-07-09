@@ -418,7 +418,21 @@ def _details_lines(d):
             lines.append(
                 f"Original thread ({lang.lower()}): {_truncate(d.get('thread_text'), 280)}"
             )
-        if (d.get("reply_text_en") or "").strip():
+        # Two-draft cards: reply_text_en only ever mirrors Draft A (the
+        # canonical single-draft field), so Draft B's translation would be
+        # silently dropped from the popover unless we read each slot's own
+        # text_en directly off the drafts array.
+        dual_drafts = d.get("drafts")
+        if isinstance(dual_drafts, list) and len(dual_drafts) == 2:
+            slot_labels = {"a": "Draft A", "b": "Draft B"}
+            for draft in dual_drafts:
+                text_en = (draft.get("text_en") or "").strip()
+                if text_en:
+                    label = slot_labels.get(
+                        (draft.get("variant") or "").strip().lower(), "Draft"
+                    )
+                    lines.append(f"{label} in English: {_truncate(text_en, 280)}")
+        elif (d.get("reply_text_en") or "").strip():
             lines.append(
                 f"Draft in English: {_truncate(d.get('reply_text_en'), 280)}"
             )
