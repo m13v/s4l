@@ -335,40 +335,28 @@ def heartbeat_path() -> str:
     return os.path.join(queue_root(), "worker-heartbeat.json")
 
 
-def _deathwatch_marker(job_id: str) -> str:
-    return os.path.join(queue_root(), f"deathwatch-armed-{job_id}.marker")
-
-
 def _arm_deathwatch(job_id: str, qtype: str, batch: str) -> None:
-    """Best-effort dead-man's-switch (2026-07-08): spawn a detached watcher
-    (scripts/producer_deathwatch.py) that flags an UNEXPECTED death
-    (SIGKILL/OOM/hard crash) of THIS process while it's blocked in the
-    cmd_provider() poll loop below — the exact gap that made orphaned salvage
-    results ("worker drafted, no card") unexplainable. Every normal return
-    path in cmd_provider() calls _disarm_deathwatch() first, so a clean exit
-    never produces a report. start_new_session=True so the watcher survives
-    being in the same process group as the watched pid if that group is what
-    gets signaled."""
+    """Best-effort dead-man's-switch (2026-07-08): arm scripts/producer_deathwatch.py
+    to flag an UNEXPECTED death (SIGKILL/OOM/hard crash) of THIS process while
+    it's blocked in the cmd_provider() poll loop below — the exact gap that
+    made orphaned salvage results ("worker drafted, no card") unexplainable.
+    Every normal return path in cmd_provider() calls _disarm_deathwatch()
+    first, so a clean exit never produces a report. Shared with
+    run_claude.sh's direct-exec path (every non-queue platform), which calls
+    producer_deathwatch.py's `arm`/`disarm` CLI directly instead of through
+    this Python wrapper — see that file for the single implementation both
+    callers share."""
     try:
-        marker = _deathwatch_marker(job_id)
-        os.makedirs(queue_root(), exist_ok=True)
-        with open(marker, "w") as f:
-            f.write(str(os.getpid()))
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "producer_deathwatch.py")
-        subprocess.Popen(
-            [sys.executable, script, "--watch-pid", str(os.getpid()),
-             "--job-id", job_id, "--qtype", qtype, "--batch", batch,
-             "--call-path", "queue"],
-            start_new_session=True,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        import producer_deathwatch as pdw
+        pdw.arm(os.getpid(), job_id, qtype, batch, call_path="queue")
     except Exception:
         pass
 
 
 def _disarm_deathwatch(job_id: str) -> None:
     try:
-        os.remove(_deathwatch_marker(job_id))
+        import producer_deathwatch as pdw
+        pdw.disarm(job_id)
     except Exception:
         pass
 
