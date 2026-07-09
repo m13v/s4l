@@ -1140,7 +1140,7 @@ class S4LMenuBar(rumps.App):
                 "Uninstall: keep your X login + browser layer (quick uninstall).\n"
                 "Deep wipe: also remove the shared browser profiles + toolchain."
             ),
-            ok="Uninstall & Restart Claude", cancel="Cancel", other="Deep wipe",
+            ok="Uninstall & Restart Claude", cancel="Cancel", other="Deep wipe & Restart Claude",
         )
         if choice == 0:  # cancel
             return
