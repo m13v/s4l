@@ -2930,10 +2930,15 @@ class S4LMenuBar(rumps.App):
             self._alert("Discard failed", str(e)[:200])
             return
         ns = [d.get("n") for d in drafts if d.get("n") is not None]
+        cids = [d.get("candidate_id") for d in drafts if d.get("candidate_id") is not None]
 
         def _persist_discard():
             try:
                 st.post_drafts(batch, reject=ns, timeout=60)
+            except Exception:
+                pass
+            try:
+                st.flip_discarded_candidates_skipped(cids)
             except Exception:
                 pass
 
