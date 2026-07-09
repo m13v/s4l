@@ -60,14 +60,26 @@ except Exception:  # standalone fallbacks
 
 
 def _is_prep_result(obj):
-    """True iff obj looks like a twitter-prep result (candidates with reply_text)."""
+    """True iff obj looks like a twitter-prep result (drafted candidates).
+
+    "reply_text" was the single-draft field before the 2026-07-07/08 two-draft
+    redesign (draft_a_text/draft_b_text per candidate, no single recommended
+    reply). Checking only "reply_text" made every post-redesign orphaned
+    result silently misclassified as non-prep and marked .skipped instead of
+    recovered — the exact "worker drafted but no card" bug this script exists
+    to prevent. Accept either field so both old and current schema results
+    are recognized.
+    """
     if not isinstance(obj, dict):
         return False
     cands = obj.get("candidates")
     if not isinstance(cands, list) or not cands:
         return False
     c0 = cands[0]
-    return isinstance(c0, dict) and "reply_text" in c0 and ("candidate_url" in c0 or "candidate_id" in c0)
+    if not isinstance(c0, dict):
+        return False
+    has_text = "reply_text" in c0 or "draft_a_text" in c0
+    return has_text and ("candidate_url" in c0 or "candidate_id" in c0)
 
 
 def main():
