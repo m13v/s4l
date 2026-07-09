@@ -775,6 +775,74 @@ class S4LMenuBar(rumps.App):
             "that schedules the draft tasks for this account",
         )
 
+    def _finish_schedule_setup(self, _=None):
+        """One-click fix for schedule_state == 'missing' when
+        scheduled_task_selfheal.can_create_for_active_account() confirms a
+        session directory already exists for the active account (2026-07-08):
+        quit Claude, create the registration via a direct file write (the
+        same heal() the update flow uses — see its module docstring for why
+        this is equivalent to what create_scheduled_task would produce), then
+        relaunch. Primary action for this case now instead of re-arm: no
+        clipboard paste, no chat turn required. Re-arm remains the fallback
+        for the rarer case where no session directory exists yet for the
+        active account (see _build_menu) — fix 5 never fabricates one."""
+        _activate_front()
+        choice = _show_alert(
+            title="Finish setting up drafts?",
+            message=(
+                "Claude needs to restart once to finish registering your draft "
+                "schedule for this account. Its window will close and reopen "
+                "in a moment — drafting starts within a few minutes after."
+            ),
+            ok="Restart & Finish Setup", cancel="Cancel",
+        )
+        if choice != 1:
+            return
+        _capture_msg(
+            "S4L finish-schedule-setup clicked",
+            phase="draft_schedule",
+            reason="missing",
+            _extra={"scheduled_tasks": _registry_summary_for_capture()},
+        )
+        self._notify("S4L", "Restarting Claude Desktop… setting up your draft schedule.")
+        threading.Thread(target=self._finish_schedule_setup_work, daemon=True).start()
+
+    def _finish_schedule_setup_work(self):
+        try:
+            user_data_dirs = self._claude_user_data_dirs()
+            self._quit_claude_and_wait()
+            # Claude is down: the same safe window _rewrite_scheduled_task_cwd
+            # always required. In-process is fine here (unlike the update
+            # flow's _fresh variant) — no new bundle was just downloaded, so
+            # the currently-running code IS the current code; nothing to go
+            # stale against.
+            self._rewrite_scheduled_task_cwd()
+            self._relaunch_claude(user_data_dirs)
+            self._sig = None
+            # Verify rather than claim success unconditionally — the earlier,
+            # now-deleted silent restart-fix drew a direct complaint for
+            # giving zero feedback either way (2026-07-08). CREATED_GRACE in
+            # schedule_state.py means a freshly-created, never-yet-fired task
+            # already reads "ok", so this doesn't need to wait for an actual
+            # first fire — just for Claude to be back up and the file to have
+            # landed.
+            time.sleep(12)
+            state = self._schedule_state()
+            if state == "ok":
+                self._notify(
+                    "S4L drafts set up",
+                    "Your draft schedule is registered — drafting starts within a few minutes.",
+                )
+            else:
+                self._notify(
+                    "S4L couldn't finish setup",
+                    "Restarting didn't register the schedule. Open the S4L menu → "
+                    "“Set up draft schedule” to finish it manually.",
+                )
+        except Exception as e:
+            self._notify("S4L setup restart failed", str(e)[:140])
+            _capture(e, phase="finish_schedule_setup")
+
     # ---- schedule-state detection ----------------------------------------
     def _schedule_state(self):
         """Is the draft schedule registered AND running for the live account?
@@ -2400,11 +2468,24 @@ class S4LMenuBar(rumps.App):
                     "schedule” to re-register it.",
                 )
             else:
-                self._notify(
-                    "S4L draft autopilot not scheduled",
-                    "No draft tasks are running on this Claude account (switching "
-                    "accounts clears them). Open the S4L menu → “Set up draft schedule”.",
-                )
+                can_selfheal = False
+                try:
+                    import scheduled_task_selfheal
+                    can_selfheal = scheduled_task_selfheal.can_create_for_active_account()
+                except Exception:
+                    pass
+                if can_selfheal:
+                    self._notify(
+                        "S4L draft autopilot not scheduled",
+                        "No draft tasks are running on this Claude account (switching "
+                        "accounts clears them). Open the S4L menu → “Finish setting up drafts”.",
+                    )
+                else:
+                    self._notify(
+                        "S4L draft autopilot not scheduled",
+                        "No draft tasks are running on this Claude account (switching "
+                        "accounts clears them). Open the S4L menu → “Set up draft schedule”.",
+                    )
             self._stall_notified = True
         elif not attention and self._stall_notified:
             if self._attention_clear_since is None:
@@ -2988,7 +3069,23 @@ class S4LMenuBar(rumps.App):
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
-                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+                # Prefer the automatic fix (2026-07-08): if the active account
+                # already has a session directory, _finish_schedule_setup can
+                # create the registration directly (heal() fix 5) with no
+                # clipboard paste needed. Fall back to re-arm only when fix 5
+                # has nowhere to write (no session dir yet for this account —
+                # it never fabricates one), since that's the one case where
+                # only the live create_scheduled_task host tool can help.
+                can_selfheal = False
+                try:
+                    import scheduled_task_selfheal
+                    can_selfheal = scheduled_task_selfheal.can_create_for_active_account()
+                except Exception:
+                    pass
+                if can_selfheal:
+                    items.append(rumps.MenuItem("Finish setting up drafts", callback=self._finish_schedule_setup))
+                else:
+                    items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             items.append(rumps.separator)
 
         if not runtime_ready:
