@@ -2502,6 +2502,11 @@ class S4LMenuBar(rumps.App):
             if ob
             else 0
         )
+        # Pending draft-card count, for the bulk-discard menu item (visibility +
+        # label). Cheap local JSON reads, same source _maybe_start_review uses.
+        _, pending_drafts = self._pending_review()
+        pending_count = len(pending_drafts)
+
         # _update_available / _latest_version are in the signature so a freshly
         # detected update rebuilds the menu (adding "Update now & restart Claude Desktop") even mid-run.
         sig = (
@@ -2523,10 +2528,14 @@ class S4LMenuBar(rumps.App):
             schedule_state,
             self._stall_reason_info,
             os.path.exists(PAUSE_FLAG),
+            pending_count,
         )
         if sig != self._sig:
             self._sig = sig
-            self._build_menu(runtime_ready, setup_complete, ob, blocker, snap, attention, schedule_state)
+            self._build_menu(
+                runtime_ready, setup_complete, ob, blocker, snap, attention, schedule_state,
+                pending_count=pending_count,
+            )
 
         # Draft-review pop-ups: if a draft cycle left a review request, present the
         # cards. Don't start a review mid-run (the spinner means a tool is active).
@@ -2577,6 +2586,21 @@ class S4LMenuBar(rumps.App):
     def _reset_posting_progress_locked(self):
         self._posting_batch_total = 0
         self._posting_batch_done = 0
+
+    def _pending_review(self):
+        """(batch_id, undecided draft cards) from the durable review store —
+        the same source _maybe_start_review presents from. Cheap (small local
+        JSON reads); drives the menu's bulk-discard item, both its visibility
+        and what it acts on."""
+        try:
+            req = st.read_review_request()
+            batch = (req or {}).get("batch_id")
+            if not batch:
+                return None, []
+            plan = st.read_plan(req.get("plan_path") or "")
+            return batch, st.review_drafts(plan)
+        except Exception:
+            return None, []
 
     def _maybe_start_review(self):
         req = st.read_review_request()
@@ -2979,7 +3003,7 @@ class S4LMenuBar(rumps.App):
             self.title = "S4L"
 
     # ---- menu construction ------------------------------------------------
-    def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, attention=False, schedule_state="ok"):
+    def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, attention=False, schedule_state="ok", pending_count=0):
         self.menu.clear()
         items = []
 
@@ -3094,7 +3118,7 @@ class S4LMenuBar(rumps.App):
         elif not setup_complete:
             items += self._state_b(ob, blocker)
         else:
-            items += self._state_c(snap)
+            items += self._state_c(snap, pending_count)
 
         # Engagement lanes — ALWAYS visible (every state), not just post-setup, so
         # the user can see + flip either lane any time. Two INDEPENDENT checkmarks
@@ -3242,8 +3266,15 @@ class S4LMenuBar(rumps.App):
     # The engagement-mode toggles live in _build_menu (shown in EVERY state), and
     # there is deliberately no "Run draft cycle" / "Post approved drafts" item
     # (the autopilot drafts on its own; approving a review card already posts it).
-    def _state_c(self, snap):
-        return []
+    def _state_c(self, snap, pending_count=0):
+        if pending_count <= 0:
+            return []
+        return [
+            rumps.MenuItem(
+                f"Discard {pending_count} pending draft{'s' if pending_count != 1 else ''}…",
+                callback=self._discard_all_pending,
+            )
+        ]
 
 
 if __name__ == "__main__":
