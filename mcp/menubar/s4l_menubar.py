@@ -3155,8 +3155,10 @@ class S4LMenuBar(rumps.App):
             items.append(rumps.separator)
             items.append(rumps.MenuItem("Tidy autopilot history…", callback=self._prompt_relocate_tasks))
         items.append(rumps.separator)
-        items.append(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
-        items.append(rumps.MenuItem("Quit", callback=self._quit_app))
+        quit_menu = rumps.MenuItem("Quit or Uninstall")
+        quit_menu.add(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
+        quit_menu.add(rumps.MenuItem("Quit", callback=self._quit_app))
+        items.append(quit_menu)
 
         # Collapse consecutive/edge separators so an empty section (e.g. State C
         # now renders no status labels) can't leave a doubled or dangling divider.
