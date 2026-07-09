@@ -60,7 +60,6 @@ except Exception:  # pragma: no cover - cosmetic only
 
 # script_tag -> queue type. ONLY pure text->JSON claude calls belong here.
 TAG_TO_TYPE = {
-    "run-twitter-cycle-queries": "twitter-query",
     "run-twitter-cycle-prep": "twitter-prep",
     "feedback-digest": "feedback-digest",
     # Topic-invention lane (queue-native since 2026-07-06; invent_topics.py
@@ -75,11 +74,10 @@ TAG_TO_TYPE = {
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
-# flight. Phase-1 queries drive the X search ("finding threads"); Phase-2b prep is
-# the reply drafting. Both the launchd provider (which blocks for minutes) and the
-# scheduled-task worker (which does the LLM turn) narrate from this one map.
+# flight. Phase-2b prep is the reply drafting. Both the launchd provider (which
+# blocks for minutes) and the scheduled-task worker (which does the LLM turn)
+# narrate from this one map.
 TYPE_TO_ACTIVITY = {
-    "twitter-query": ("scanning", "search"),
     "twitter-prep": ("drafting", "draft"),
     "feedback-digest": ("learning", "feedback"),
     "invent-topic": ("learning", "new topic"),
