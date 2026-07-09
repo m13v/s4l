@@ -129,16 +129,31 @@ STATS_KEYS = (
 )
 
 
-def _enrich_with_stats(cands: list) -> int:
-    """Stamp a `stats` sidecar onto plan candidates that lack one, from the
-    twitter_candidates rows the discovery pipeline already wrote. ONE listing
-    call (/api/v1/twitter-candidates?tweet_urls=...) covers the whole queue.
-    Best-effort: any failure (offline box, missing identity, API error) leaves
-    candidates unstamped and NEVER blocks card delivery. Returns count stamped."""
-    want = [c for c in cands if not c.get("stats") and not c.get("posted") and _thread_url(c)]
-    if not want:
-        return 0
-    urls = sorted({_thread_url(c) for c in want})[:500]
+def _sync_with_backend(cands: list) -> tuple[int, int]:
+    """One bulk /api/v1/twitter-candidates lookup for every still-open candidate
+    (not posted, not terminal), used for two things:
+
+      - stamp the discovery-time `stats` sidecar the card renders (candidates
+        that already have one are left alone), same as the old
+        _enrich_with_stats this replaces.
+      - notice when the backend has ALREADY retired a candidate this plan
+        still thinks is 'pending' (most commonly the Phase 0 freshness gate
+        flipping status='expired' after FRESHNESS_HOURS — see
+        skill/run-twitter-cycle.sh) and mark it terminal here too, same as a
+        human "discard all pending" would. Without this, a card can sit in
+        the review queue as an approvable draft long after the backend has
+        moved on; approving it later silently no-ops (post_drafts returns
+        posted:0, no browser ever launches, no post-*.log — see the
+        2026-07-09 "approved 3 cards, nothing posted" investigation).
+
+    Runs on EVERY merge (every cycle), not just once per candidate, so status
+    drift after the initial stamp is still caught while a card is still
+    pending. Best-effort: any API failure leaves every candidate untouched
+    (fail open, same as before). Returns (stamped_count, pruned_count)."""
+    pending = [c for c in cands if not c.get("posted") and not c.get("terminal") and _thread_url(c)]
+    if not pending:
+        return 0, 0
+    urls = sorted({_thread_url(c) for c in pending})[:500]
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from http_api import api_get
@@ -149,17 +164,24 @@ def _enrich_with_stats(cands: list) -> int:
         )
         rows = (resp.get("data") or {}).get("candidates") or []
     except BaseException as e:  # http_api raises SystemExit on terminal failure
-        print(f"[merge_review_queue] stats enrichment skipped: {e}", file=sys.stderr)
-        return 0
+        print(f"[merge_review_queue] backend sync skipped: {e}", file=sys.stderr)
+        return 0, 0
     by_url = {str(r.get("tweet_url")): r for r in rows if r.get("tweet_url")}
     stamped = 0
-    for c in want:
+    pruned = 0
+    for c in pending:
         row = by_url.get(_thread_url(c))
         if not row:
             continue
-        c["stats"] = {k: row.get(k) for k in STATS_KEYS}
-        stamped += 1
-    return stamped
+        if not c.get("stats"):
+            c["stats"] = {k: row.get(k) for k in STATS_KEYS}
+            stamped += 1
+        status = row.get("status")
+        if status and status != "pending":
+            c["terminal"] = True
+            c["discard_reason"] = f"backend_status_{status}"
+            pruned += 1
+    return stamped, pruned
 
 
 def main() -> int:
@@ -255,9 +277,15 @@ def main() -> int:
         merged.append(c)
         added += 1
 
-    stamped = _enrich_with_stats(merged)
+    stamped, pruned = _sync_with_backend(merged)
     if stamped:
         print(f"[merge_review_queue] stamped stats on {stamped} candidate(s)", file=sys.stderr)
+    if pruned:
+        print(
+            f"[merge_review_queue] pruned {pruned} candidate(s) already retired by the "
+            "backend (expired/etc.) before they were reviewed",
+            file=sys.stderr,
+        )
 
     plan_obj = {"candidates": merged}
     if plan_created_at:
