@@ -266,6 +266,32 @@ def heal() -> dict:
     return summary
 
 
+def can_create_for_active_account() -> bool:
+    """Read-only: would fix 5 (see heal()) actually be able to create a fresh
+    registration right now? True only if the active account (resolved the same
+    way heal() does, via schedule_state's config.json lookup) has at least one
+    EXISTING session directory to write into — fix 5 never fabricates one.
+    Used by callers (the menu bar) to decide whether to offer an automatic
+    "restart to finish setup" action or fall back to the manual re-arm prompt,
+    BEFORE committing to a restart that would turn out to fix nothing."""
+    try:
+        for cfg in schedule_state._config_json_paths():
+            root = os.path.dirname(cfg)
+            uuid = schedule_state._active_account_uuid(cfg)
+            if not uuid:
+                continue
+            account_dir = os.path.join(root, "claude-code-sessions", uuid)
+            session_dirs = [
+                p for p in glob.glob(os.path.join(account_dir, "*"))
+                if os.path.isdir(p)
+            ]
+            if session_dirs:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def main() -> int:
     out = heal()
     print(json.dumps(out))
