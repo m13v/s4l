@@ -87,7 +87,10 @@ function resolveLogPath(fname) {
 const SCHED_KIND = platform.scheduler();
 const UNIT_DIR = path.join(DEST, 'launchd');
 const AGENT_DIR = platform.agentsDir();
-const driver = scheduler.driverFor();
+// CLIENT_MODE runs on Cloud Run (Linux container, no launchd) and never
+// touches local job scheduling; resolving a driver there throws (systemd
+// support was removed, leaving only launchd), crashing the process on boot.
+const driver = auth.CLIENT_MODE ? null : scheduler.driverFor();
 const CONFIG_FILE = path.join(DEST, 'config.json');
 const ENV_FILE = path.join(DEST, '.env');
 const PORT = parseInt(process.env.PORT || '3141', 10);
