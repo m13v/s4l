@@ -2632,6 +2632,13 @@ class S4LMenuBar(rumps.App):
         #    live. This is the fix for the "card froze at 1 of 4 while 137 piled
         #    up" bug — drafts that arrived after the card opened used to be
         #    stranded because this method returned early on _review_active.
+        #    Also prune the other direction: any `n` this same stack used to
+        #    carry but that dropped out of the fresh `drafts` list (merge_review_
+        #    queue.py's backend sync just marked it terminal, most commonly the
+        #    freshness gate expiring it) is removed from the not-yet-reached part
+        #    of the stack, so an old card can't sit there waiting to be approved
+        #    into a silent no-op (see the 2026-07-09 "approved 3, nothing
+        #    posted" investigation).
         #  - Posting is DRAINING with no panel up (_review_active but not
         #    _panel_open): leave the signature untouched so the full pending set
         #    is presented fresh once the drain completes (don't pop a card mid-post).
@@ -2640,6 +2647,11 @@ class S4LMenuBar(rumps.App):
                 try:
                     import s4l_card
 
+                    prev_ns = {n for n, _ in (self._last_review_sig or ())}
+                    cur_ns = {d.get("n") for d in drafts}
+                    vanished = prev_ns - cur_ns
+                    if vanished:
+                        s4l_card.prune_active(vanished)
                     s4l_card.extend_active(drafts)
                 except Exception as e:
                     sys.stderr.write(f"[s4l-menubar] extend cards failed: {e}\n")
