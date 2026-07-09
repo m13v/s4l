@@ -2583,7 +2583,17 @@ tool(
         return;
       }
       c.terminal = true;
-      c.terminal_reason = "rejected";
+      // Preserve a more specific reason the menu bar already stamped locally
+      // (store_stamp_decision writes "human_rejected" for a card reject,
+      // discard_all_pending writes "human_discarded_all" for the bulk-discard
+      // button) BEFORE this loopback call ever fires, so by the time it lands
+      // here the local reason is already the more informative one. Only
+      // default to "rejected" when nothing more specific got there first
+      // (e.g. a reject driven straight from chat, with no menu-bar card
+      // involved at all).
+      if (!c.terminal_reason) {
+        c.terminal_reason = "rejected";
+      }
       c.approved = false;
       rejected.push(n);
     });
