@@ -3237,6 +3237,16 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
 const QUEUE_WORKER_PROMPT_VERSION = 8; // v8: worker polls internally (claude_job.py next --wait-seconds) instead of single-shot check-then-die. Empirically verified (2026-07-06) that a single long-running Bash call survives well past the host's ~90s between-tool-call inactivity kill — that timer only fires on MODEL silence, not on one in-flight tool call — so one Bash call can safely poll for QUEUE_WORKER_POLL_SECONDS before giving up. This cuts the every-minute spin-up-empty-then-die husk cycle down to roughly one session per poll window instead of one per cron tick. v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
+// v9 (PLANNED, NOT IMPLEMENTED): delegate the actual drafting to a fresh
+// sub-agent per claimed job (claim -> delegate -> wait -> claim next, looped
+// within one continuous worker session) instead of drafting inline. Validated
+// via throwaway probe tasks 2026-07-07/08 (10 loop iterations, ~210s of real
+// delegated work, survives); the one hard constraint proven: the delegated
+// sub-agent must never fully idle-wait (e.g. background + wait on a Monitor
+// notification) or the host kills the whole parent+child chain in 1-3 min.
+// Never live-fire tested against a real production job. Full design, what's
+// validated vs not, and the implementation steps: docs/queue-worker-delegation-plan.md
+// Bump this constant to 9 only once that plan is actually implemented.
 const QUEUE_WORKER_PROMPT_MARKER = "s4l_queue_worker_prompt_version";
 // How long ONE `next --wait-seconds` call polls before giving up and exiting.
 // 240s (4 min): comfortably inside the 900s single-Bash-call survival verified
