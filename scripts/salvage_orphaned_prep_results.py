@@ -18,10 +18,14 @@ Safe by construction:
   - Best-effort: any single failure is logged and skipped; never raises.
 
 Degradation vs a normal cycle: salvaged candidates skip the cycle's post-provider
-top-N selection (so MORE cards, which is fine) and lack the tail-link / experiments
-arm stamp that run-twitter-cycle.sh's plan writer adds after the provider returns.
-The reply text itself is complete. A salvaged card is strictly better than a lost
-draft.
+top-N selection (so MORE cards, which is fine), lack the tail-link / experiments
+arm stamp that run-twitter-cycle.sh's plan writer adds after the provider returns,
+and (two-draft schema only) lack assigned_style/assigned_mode, which live in the
+cycle's shell variables, not the model output. The reply text itself IS complete
+end-to-end (_mirror_two_draft_fields backfills reply_text/drafts from
+draft_a_text/draft_b_text for the post-2026-07-07/08 two-draft schema, since the
+model output alone has no reply_text field to check for completeness). A salvaged
+card is strictly better than a lost draft.
 
 Usage:
     python3 scripts/salvage_orphaned_prep_results.py            # automated (safe age gate)
@@ -57,6 +61,52 @@ except Exception:  # standalone fallbacks
                 f.write(f"{ts} pid={os.getpid()} {msg}\n")
         except Exception:
             pass
+
+
+def _mirror_two_draft_fields(candidates):
+    """Backfill reply_text/drafts for two-draft-schema candidates (2026-07-07/08
+    redesign) that reach salvage. The normal cycle path (run-twitter-cycle.sh)
+    mirrors draft_a_text onto reply_text/engagement_style/drafts right after the
+    model returns, but salvage bypasses that shell-side step entirely, so an
+    orphaned post-redesign result reached review cards with NEITHER field set.
+    The menubar card (s4l_card.py) reads d.get("drafts") first, then falls back
+    to d.get("reply_text") or "", so those cards rendered the thread with a
+    completely empty editable reply box despite draft_a_text/draft_b_text
+    holding real, already-drafted content (root-caused 2026-07-09 via
+    candidate 374925 and 4 siblings, all missing 'experiments' too, confirming
+    they came through this salvage path rather than a normal cycle write).
+
+    assigned_style/assigned_mode are deliberately left OUT (not set to None,
+    just absent): the picker's per-cycle style assignment lives only in
+    run-twitter-cycle.sh's shell variables, not in the model's JSON output, so
+    it can't be recovered here. twitter_post_plan.py already has a documented
+    fallback for that ("assigned_mode key absent" -> use the plan-level
+    assignment, itself None for a salvaged plan), so leaving the keys out is
+    the safe, already-supported degradation, same class as the existing
+    no-experiments-stamp degradation.
+    """
+    for c in candidates:
+        if not isinstance(c, dict) or "draft_a_text" not in c or "reply_text" in c:
+            continue
+        c["reply_text"] = c.get("draft_a_text") or ""
+        c["engagement_style"] = c.get("draft_a_style") or ""
+        c["new_style"] = c.get("draft_a_new_style")
+        if c.get("draft_a_text_en"):
+            c["reply_text_en"] = c["draft_a_text_en"]
+        draft_b_text = c.get("draft_b_text")
+        if not c.get("is_reused_draft") and draft_b_text:
+            c["drafts"] = [
+                {
+                    "variant": "a", "text": c.get("draft_a_text") or "",
+                    "style": c.get("draft_a_style") or "",
+                    "text_en": c.get("draft_a_text_en"),
+                },
+                {
+                    "variant": "b", "text": draft_b_text,
+                    "style": c.get("draft_b_style") or "",
+                    "text_en": c.get("draft_b_text_en"),
+                },
+            ]
 
 
 def _is_prep_result(obj):
@@ -142,6 +192,7 @@ def main():
                     pass
             continue
 
+        _mirror_two_draft_fields(obj["candidates"])
         n = len(obj["candidates"])
         age_min = (now - st.st_mtime) / 60.0
         _plog(f"[salvage] ORPHAN prep result job {job_id}: producer never consumed it "
