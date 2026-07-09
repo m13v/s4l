@@ -166,8 +166,8 @@ svg {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  min-height: 410px;
-  padding: clamp(26px, 4vw, 52px);
+  min-height: 330px;
+  padding: clamp(24px, 3vw, 42px);
 }
 
 .eyebrow,
@@ -194,7 +194,7 @@ h1 {
   max-width: 900px;
   margin: 14px 0 18px;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(2.6rem, 6vw, 6.7rem);
+  font-size: clamp(2.45rem, 5vw, 5.25rem);
   font-weight: 700;
   line-height: 0.94;
 }
@@ -215,7 +215,7 @@ h1 {
 }
 
 .proof-item {
-  min-height: 98px;
+  min-height: 86px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 12px;
