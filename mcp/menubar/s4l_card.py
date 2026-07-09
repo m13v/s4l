@@ -1844,6 +1844,36 @@ def active_status():
         return None
 
 
+def dismiss_active():
+    """Force-close the open review panel WITHOUT firing on_decision/on_complete,
+    for a bulk discard whose fate for every remaining card was already decided
+    elsewhere (the menu bar's store-level "Discard all pending drafts"). A
+    normal windowShouldClose_ close still fires on_complete (leftover cards are
+    just undecided); this path skips both callbacks entirely so the bulk
+    discard's own bookkeeping is the only thing that runs. Returns True if a
+    panel was actually open."""
+    global _active
+    c = _active
+    if c is None or c._panel is None:
+        return False
+    try:
+        c._close_stats_popover()
+    except Exception:
+        pass
+    try:
+        c._panel.setDelegate_(None)
+        c._panel.close()
+    except Exception:
+        pass
+    c._panel = None
+    c._on_complete = None
+    c._on_decision = None
+    _active = None
+    _log(f"closed: dismissed (bulk discard, {len(c._decisions)} decided of {len(c._drafts)})")
+    _write_review_state(last_event="dismissed")
+    return True
+
+
 def heal_active():
     """Self-heal an unattended card: move it to the top-right of the screen the
     pointer is on and raise it, WITHOUT stealing keyboard focus (the user is
