@@ -1601,6 +1601,37 @@ class _ReviewController(NSObject):
         return len(added)
 
     @objc.python_method
+    def prune_drafts(self, ns):
+        """Drop not-yet-reached drafts (plan index `n` in `ns`) from the stack,
+        e.g. a card the backend already retired (expired freshness gate, etc.)
+        while it was still waiting to be shown. Only ever removes entries AFTER
+        the current index, so the card on screen right now and everything
+        already decided are untouched -- nothing visible disappears out from
+        under the user. Refreshes the title-bar counter live. Returns the
+        count actually removed."""
+        if self._panel is None or not ns:
+            return 0
+        ns = set(ns)
+        kept = []
+        removed = 0
+        for i, d in enumerate(self._drafts):
+            if i > self._idx and d.get("n") in ns:
+                removed += 1
+                continue
+            kept.append(d)
+        if not removed:
+            return 0
+        self._drafts = kept
+        try:
+            self._panel.setTitle_(
+                f"s4l · Review draft {self._idx + 1} of {len(self._drafts)}"
+            )
+        except Exception:
+            pass
+        self._log_surface(f"pruned {removed} expired")
+        return removed
+
+    @objc.python_method
     def _fire_decision(self):
         # Fire the per-card callback the instant a decision is made, so an
         # approved draft starts posting immediately instead of waiting for the
@@ -1828,6 +1859,22 @@ def extend_active(drafts):
         return 0
     try:
         return _active.extend_drafts(drafts)
+    except Exception:
+        return 0
+
+
+def prune_active(ns):
+    """Remove not-yet-reached drafts (by plan index `n`) from the open review
+    card, if one is up -- e.g. a card that expired on the backend mid-review
+    (see merge_review_queue.py's backend sync). Never touches the card
+    currently on screen or any already-decided one, so nothing visible is
+    yanked out from under the user. Returns the count actually removed (0 if
+    no card is open or none of `ns` are still ahead in the stack). Main thread
+    only (called from the menu bar's rumps timer)."""
+    if _active is None or not ns:
+        return 0
+    try:
+        return _active.prune_drafts(ns)
     except Exception:
         return 0
 
