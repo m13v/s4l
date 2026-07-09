@@ -321,16 +321,22 @@ EOF
         # Dead-man's-switch (2026-07-09): every non-queue-routed tag (reddit,
         # linkedin, github, moltbook, instagram, dm-outreach-*, ...) blocks
         # here exactly like claude_job.py's queue provider does, with the
-        # same silent-death risk (SIGKILL/OOM/hard crash while waiting). Arm
-        # per-attempt (job id includes $CLAUDE_PG so a retry never collides
-        # with a still-unwinding prior attempt's watcher); disarm right after
-        # `wait` returns AND from _sa_cleanup's trap (that path SIGKILLs
-        # $CLAUDE_PG itself as ordinary TERM/INT/HUP handling, which must
-        # disarm too or a normal watchdog-triggered shutdown would misreport
-        # as an unexpected death). See scripts/producer_deathwatch.py.
+        # same silent-death risk (SIGKILL/OOM/hard crash while waiting).
+        # Watches THIS SCRIPT's own pid ($$), not $CLAUDE_PG: if only the
+        # claude child dies, `wait` unblocks normally and this script keeps
+        # running (RC-checked, logged, retried) — no observability gap.
+        # The gap is when the WHOLE TREE (this script included) is killed
+        # together, which is what actually happened in the salvage-orphan
+        # cases this was built for. Arm per-attempt (job id includes
+        # $CLAUDE_PG so a retry never collides with a still-unwinding prior
+        # attempt's watcher); disarm right after `wait` returns AND from
+        # _sa_cleanup's trap (that path SIGKILLs $CLAUDE_PG's group as
+        # ordinary TERM/INT/HUP handling, which must disarm too or a normal
+        # watchdog-triggered shutdown would misreport as an unexpected
+        # death). See scripts/producer_deathwatch.py.
         _SA_DW_JOB="${SESSION_ID}-${CLAUDE_PG}"
         python3 "$REPO_DIR/scripts/producer_deathwatch.py" arm \
-            --watch-pid "$CLAUDE_PG" --job-id "$_SA_DW_JOB" --qtype "$SCRIPT_TAG" \
+            --watch-pid "$$" --job-id "$_SA_DW_JOB" --qtype "$SCRIPT_TAG" \
             --batch "${BATCH_ID:-${SA_CYCLE_ID:--}}" --call-path direct \
             >/dev/null 2>&1 || true
         wait "$CLAUDE_PG"
