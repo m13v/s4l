@@ -75,3 +75,113 @@ jobs instead of accumulating history turn over turn.
 4. Ship through the normal sanctioned flow: `bash scripts/release-mcpb.sh --staging`.
 5. First real live-fire validation happens once a staging install's worker
    actually picks up the new prompt and processes a real queued job.
+
+## Appendix: verbatim validated prompts (not a paraphrase)
+
+The throwaway probe `SKILL.md`/task bodies were deleted from
+`~/.claude/scheduled-tasks/` after testing, but the literal text survives inside
+the `mcp__scheduled-tasks__create_scheduled_task` tool calls in the probe
+session's own transcript (`~/.claude/projects/-Users-matthewdi-s4l/5ea09799-1485-4728-ab2d-f25760f60726.jsonl`).
+Pulled verbatim from there, not reconstructed from the narrative summary above.
+
+This is the most mature version tested (`s4l-delegate-real-draft-probe`,
+2026-07-07T19:47:30-07:00) — realistic drafting content, no artificial delays,
+includes the duplicate-notification guard. It is the direct template a v9
+`queueWorkerBody()` should adapt (swap the throwaway test-queue paths for the
+real `claude_job.py` invocation and state dir, drop the "this is a test"
+framing):
+
+**Parent worker loop** (claim -> delegate -> wait -> claim next):
+
+```
+Run this loop for up to <N> iterations. Keep a running mental list of
+{iteration, job_id, outcome} — do NOT write it to a file.
+
+STEP A — CLAIM: Run the EXACT Bash command "<CLAIM_CMD>" and let it run to
+completion (do NOT interrupt it, do NOT make any other tool call while it
+runs). It prints exactly one line of JSON.
+
+STEP B — CHECK EMPTY: If it printed "{}" (empty), the queue is drained. Stop
+looping right now, skip to FINAL REPORT.
+
+STEP C — DELEGATE: Otherwise it printed something like
+{"job_id":"...","prompt_file":"...","schema_file":"..."}. Do NOT read the
+prompt file yourself. Do NOT execute the job yourself. Launch exactly ONE
+sub-agent using the Task tool (may be named "Agent"). Use subagent_type
+"general-purpose" and model "opus". The sub-agent's prompt must be the
+following, with <job_id>, <prompt_file>, <schema_file> replaced by this
+iteration's real values (if schema_file is null, drop that sentence):
+
+--- [sub-agent prompt template below] ---
+
+STEP D — WAIT: You (the parent) must make ZERO tool calls of your own while
+the sub-agent works — no sleep, no poll, no Monitor, no filler Bash, nothing.
+Just end your turn and wait for the sub-agent's natural completion
+notification, however long that takes.
+
+STEP E — HANDLE DUPLICATE NOTIFICATIONS: A completion notification for the
+same sub-agent may arrive more than once. If you get one for an iteration
+already recorded as done, silently ignore it — do not re-loop, do not launch
+another sub-agent for it.
+
+STEP F — RECORD: Note this iteration's outcome (iteration number, job_id,
+outcome verbatim).
+
+STEP G — LOOP: If you have not yet done <N> iterations and the previous claim
+was NOT empty, go back to STEP A for the next iteration. Otherwise proceed to
+FINAL REPORT.
+
+FINAL REPORT: print ONE compact report with:
+1. Total iterations run and total sub-agents launched.
+2. Whether each wait resolved cleanly via the natural notification, with no
+   gaps in your own continuity.
+3. A numbered list, one line per iteration, of
+   "iteration N: job <job_id> -> <outcome verbatim>".
+Then STOP.
+```
+
+**Delegated sub-agent prompt** (the actual worker per job):
+
+```
+You are executing ONE queued job for a local file-based pipeline. Read the
+file <prompt_file> with the Read tool; if the result says it is partial or
+truncated, keep reading with offsets until EOF. Also read <schema_file>; the
+JSON you produce MUST satisfy that schema. Follow the job prompt EXACTLY — it
+asks you to compose a genuine reply for each candidate and persist it
+immediately via a real Bash command before moving to the next candidate. Do
+this for real, one candidate at a time, with no sleeping or waiting of any
+kind between them. After all candidates are drafted and persisted, produce
+the SINGLE JSON object the job prompt asks for — no prose, no markdown, no
+code fences. Write that JSON object to <result_file_path> using the Write
+tool. Then submit it by running this EXACT Bash command:
+
+python3 <path-to>/claude_job.py result --job <job_id> --result-file
+<result_file_path> --state-dir <state_dir>
+
+If it reports the result was rejected, fix your JSON file and submit again,
+at most twice. Your final message must be exactly one line: "DONE <job_id>"
+on success, or "FAILED <job_id>: <short reason>" on failure.
+```
+
+**Why this exact wording matters** (don't simplify it away when adapting):
+- "Do NOT read the prompt file yourself" on the parent — keeps the parent's
+  context thin; the sub-agent is the one that reads the (potentially large)
+  job prompt and schema.
+- "make ZERO tool calls of your own while the sub-agent works" — this is the
+  proven condition. An earlier variant (`s4l-delegate-slow-loop-probe`) that
+  let the parent do nothing AND let the sub-agent idle-wait too, failed: the
+  host killed the whole chain. `s4l-delegate-paced-probe` isolated the fix —
+  the sub-agent must stay continuously busy (never idle-wait via Monitor or
+  backgrounding for its own internal pacing); as long as it does, the parent
+  survives making zero calls of its own for the whole span (proven up to ~210s).
+- STEP E's duplicate-notification guard is the only place this was ever
+  enforced, and it's a prompt instruction the model happened to follow
+  correctly in testing, not a code-level guarantee. This is the specific gap
+  called out above under "What is NOT validated yet" — a v9 implementation
+  should make this a hard rule (e.g. dedupe against an already-recorded
+  job_id at the script level), not rely on the model remembering.
+
+Full text of every probe variant tested (including the earlier, less-refined
+`s4l-delegate-loop-probe` and `s4l-delegate-paced-probe` iterations that led
+here) is recoverable the same way: grep the probe transcript above for
+`mcp__scheduled-tasks__create_scheduled_task` tool_use blocks.
