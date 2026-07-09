@@ -770,6 +770,39 @@ def store_stamp_decision(batch, decision):
     return bool(_store_update(mutate))
 
 
+def discard_all_pending(drafts):
+    """Bulk-reject an entire pending set (the menu bar's "Discard all pending
+    drafts"), durably and atomically in ONE lock acquisition. Each candidate is
+    stamped terminal with NO reason (reject_category=None), same as a card's
+    "Reject, no reason" button. Deliberately distinct from store_stamp_decision:
+    this never ships a review event, by design, so a bulk "clear the backlog"
+    click never reaches the review-events/feedback-digest rail and can't
+    pollute learned_preferences with a non-judgment. Returns how many were
+    stamped."""
+
+    def mutate(data):
+        done = 0
+        for d in drafts:
+            c = _match_candidate(data, d.get("n"), d.get("candidate_id"))
+            if c is None or c.get("posted") is True or c.get("terminal") is True:
+                continue
+            c["terminal"] = True
+            c["terminal_reason"] = "human_discarded_all"
+            c["decision"] = {
+                "approved": False,
+                "text": c.get("reply_text") or "",
+                "edited": False,
+                "drop_link": False,
+                "loved": False,
+                "reject_category": None,
+                "decided_at": time_iso(),
+            }
+            done += 1
+        return done
+
+    return _store_update(mutate) or 0
+
+
 def store_mark_post_failed(batch, n, candidate_id=None, error=None):
     """A decided post that FAILED surfaces via notification/dashboard, not by
     re-presenting the card and not by endless resume retries."""
