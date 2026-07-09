@@ -2898,6 +2898,61 @@ class S4LMenuBar(rumps.App):
         if not any(d.get("approved") for d in decisions):
             self._notify("S4L", "No drafts approved — nothing posted.")
 
+    def _discard_all_pending(self, _=None):
+        """Bulk-discard every pending draft card: rejected with NO reason,
+        instantly, and — deliberately — without shipping a review event for any
+        of them. A normal per-card reject always ships one (feeding the
+        feedback-digest -> learned_preferences rail, see _ship_review_event);
+        this bulk "clear the backlog" action carries no per-card judgment
+        signal, so it must never reach that rail (user-specified 2026-07-08)."""
+        batch, drafts = self._pending_review()
+        if not batch or not drafts:
+            return
+        n = len(drafts)
+        choice = _show_alert(
+            title="Discard all pending drafts?",
+            message=(
+                f"Discards all {n} pending draft(s) right now, with no reason "
+                "given. None of them will post or be shown for review again. "
+                "This does not feed the AI feedback loop (learned_preferences) "
+                "the way an individual reject does."
+            ),
+            ok="Discard All", cancel="Cancel",
+        )
+        if choice != 1:
+            return
+        try:
+            st.discard_all_pending(drafts)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] discard all pending failed: {e}\n")
+            sys.stderr.flush()
+            _capture(e, phase="discard_all_pending")
+            self._alert("Discard failed", str(e)[:200])
+            return
+        ns = [d.get("n") for d in drafts if d.get("n") is not None]
+
+        def _persist_discard():
+            try:
+                st.post_drafts(batch, reject=ns, timeout=60)
+            except Exception:
+                pass
+
+        threading.Thread(target=_persist_discard, daemon=True).start()
+        try:
+            import s4l_card
+
+            s4l_card.dismiss_active()
+        except Exception:
+            pass
+        with self._review_lock:
+            self._panel_open = False
+            if self._posts_outstanding <= 0:
+                self._review_active = False
+                self._reset_posting_progress_locked()
+        self._last_review_sig = None
+        st.clear_review_request()
+        self._notify("S4L", f"Discarded {n} pending draft(s).")
+
     def _ensure_post_worker(self):
         # One persistent daemon worker drains the approved-card queue. It never
         # exits (avoids an enqueue-vs-exit race) — an idle parked thread is cheap.
