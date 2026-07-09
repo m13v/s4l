@@ -2058,6 +2058,24 @@ else
 fi
 rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 
+# Release the twitter-browser lock now. Thread-media capture above was the
+# ONLY browser-touching step in Phase 2b-prep; the Claude drafting call below
+# is architecturally browser-free (--strict-mcp-config omits the
+# twitter-harness MCP, so the model can never reach the CDP Chrome even if it
+# tried) and, since the 2026-06-23 queue migration, "run-twitter-cycle-prep"
+# routes through claude_job.py to an independent worker process that can
+# block for up to S4L_CLAUDE_QUEUE_TIMEOUT (1800s default). Holding the
+# browser lock across that wait made this process a preemption target for
+# any post that needed the browser: the post-vs-scan hijack fix SIGKILLs
+# whoever holds the lock (see docs/twitter_browser_lock.md), which killed
+# this process mid-wait while the worker kept drafting in the background,
+# stranding the finished result until the salvage reconciler's 35-min window
+# (scripts/salvage_orphaned_prep_results.py) picked it up. Releasing here
+# removes this whole phase from being a SIGKILL target for the rest of the
+# drafting wait. Phase 2b-post re-acquires unconditionally below.
+log "Releasing twitter-browser lock before Claude drafting (drafting never touches the browser)..."
+release_lock "twitter-browser" 2>>"$LOG_FILE"
+
 # --- PERSONA CORPUS injection (personal_brand lane only) --------------------
 # build_persona.py apply writes a raw first-hand corpus sidecar next to
 # config.json. In the personal_brand lane we inline it so the drafter grounds
@@ -2432,30 +2450,12 @@ if [ "$PREP_PARSE_EXIT" -eq 0 ] && [ -f "$PLAN_FILE" ]; then
 fi
 log "Phase 2b-prep complete. plan_count=$PLAN_COUNT"
 
-# Determine if Phase 2b-gen will be a no-op. When TWITTER_PAGE_GEN_RATE=0
-# globally, scripts/twitter_gen_links.py rewrites the plan with plain URLs in
-# <1s. In that case the release-now + re-acquire-after-gen dance is pure waste:
-# under cycle overlap the re-acquire can sit in the FIFO ticket queue for
-# 30-90s behind the very `engage-twitter` / next `run-twitter-cycle` we just
-# handed the lock to. We keep the lock through 2b-gen instead and skip the
-# dance entirely.
-GEN_RATE_RAW="${TWITTER_PAGE_GEN_RATE:-0.0}"
-GEN_IS_NOOP=false
-case "$GEN_RATE_RAW" in
-  0|0.0|0.00|0.000|"") GEN_IS_NOOP=true ;;
-esac
-
-# Release the lock unless (a) plan is non-empty AND (b) gen is a no-op. The
-# empty-plan early-exit below still needs the release for a clean handoff, so
-# we cannot just skip when GEN_IS_NOOP=true unconditionally.
-if [ "${PLAN_COUNT:-0}" = "0" ] || ! $GEN_IS_NOOP; then
-    log "Releasing twitter-browser lock (gen step is lock-free)..."
-    release_lock "twitter-browser" 2>>"$LOG_FILE"
-    # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
-    # in twitter_browser.py now. Do NOT re-add. See Phase 1 note + docs/twitter_browser_lock.md.
-else
-    log "Keeping twitter-browser lock through Phase 2b-gen (TWITTER_PAGE_GEN_RATE=$GEN_RATE_RAW, gen is a no-op; skipping release/re-acquire dance)"
-fi
+# twitter-browser lock was already released right after thread-media capture
+# (before the Claude drafting call above), since nothing from there through
+# Phase 2b-gen touches the browser. Phase 2b-post re-acquires unconditionally
+# below. (2026-06-16) session-lock rm removed (defect b); dead holders
+# self-reclaim in twitter_browser.py now. Do NOT re-add. See Phase 1 note +
+# docs/twitter_browser_lock.md.
 
 if [ "${PLAN_COUNT:-0}" = "0" ]; then
     log "Empty plan from prep step. Exiting cycle without posting (pending rows salvaged next cycle)."
@@ -2575,12 +2575,10 @@ fi
 # 2b-gen's potentially long run, peer cycles' 20-min phase2a fallback would
 # already be tripping if we left the row at phase2a.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
-# Re-acquire only if we actually released for gen (see GEN_IS_NOOP above).
-# When the lock was kept through 2b-gen there's nothing to re-acquire.
-if ! $GEN_IS_NOOP; then
-    log "Re-acquiring twitter-browser lock for Phase 2b-post..."
-    acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
-fi
+# Always re-acquire: the lock was released right after thread-media capture
+# (before Claude drafting), well before 2b-gen, so it is never still held here.
+log "Re-acquiring twitter-browser lock for Phase 2b-post..."
+acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 2b-post"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
