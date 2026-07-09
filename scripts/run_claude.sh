@@ -200,6 +200,16 @@ _sa_cleanup() {
     rm -f "$SIDE_LOG"
     rm -f "$ACTIVE_FILE"
 
+    # Disarm the deathwatch (see the arm call in the retry loop below). This
+    # path SIGKILLs $CLAUDE_PG's process group a few lines down as ordinary
+    # TERM/INT/HUP handling (e.g. the watchdog killing a genuinely hung run),
+    # so it must disarm too — otherwise a normal forced shutdown would
+    # misreport as an unexpected death once that kill lands.
+    if [ -n "${_SA_DW_JOB:-}" ]; then
+        python3 "$REPO_DIR/scripts/producer_deathwatch.py" disarm --job-id "$_SA_DW_JOB" \
+            >/dev/null 2>&1 || true
+    fi
+
     # Sweep orphan claude descendants. Process groups survive the parent's
     # death (kids reparented to launchd keep their PGID), so killing
     # `kill -- -PGID` reaches every grandchild, including ones reparented
@@ -308,8 +318,25 @@ EOF
         { claude --session-id "$SESSION_ID" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} "$@" | tee -a "$SIDE_LOG"; exit "${PIPESTATUS[0]}"; } &
         CLAUDE_PG=$!
         set +m
+        # Dead-man's-switch (2026-07-09): every non-queue-routed tag (reddit,
+        # linkedin, github, moltbook, instagram, dm-outreach-*, ...) blocks
+        # here exactly like claude_job.py's queue provider does, with the
+        # same silent-death risk (SIGKILL/OOM/hard crash while waiting). Arm
+        # per-attempt (job id includes $CLAUDE_PG so a retry never collides
+        # with a still-unwinding prior attempt's watcher); disarm right after
+        # `wait` returns AND from _sa_cleanup's trap (that path SIGKILLs
+        # $CLAUDE_PG itself as ordinary TERM/INT/HUP handling, which must
+        # disarm too or a normal watchdog-triggered shutdown would misreport
+        # as an unexpected death). See scripts/producer_deathwatch.py.
+        _SA_DW_JOB="${SESSION_ID}-${CLAUDE_PG}"
+        python3 "$REPO_DIR/scripts/producer_deathwatch.py" arm \
+            --watch-pid "$CLAUDE_PG" --job-id "$_SA_DW_JOB" --qtype "$SCRIPT_TAG" \
+            --batch "${BATCH_ID:-${SA_CYCLE_ID:--}}" --call-path direct \
+            >/dev/null 2>&1 || true
         wait "$CLAUDE_PG"
         RC=$?
+        python3 "$REPO_DIR/scripts/producer_deathwatch.py" disarm --job-id "$_SA_DW_JOB" \
+            >/dev/null 2>&1 || true
         if [ "$RC" -ne 127 ]; then
             break
         fi
