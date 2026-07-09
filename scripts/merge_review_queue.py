@@ -302,15 +302,17 @@ def main() -> int:
         _atomic_write(dst, plan_obj)
         ensure_store_symlink()
 
-        # Refresh the review-request marker the menu bar polls (count = pending, not posted).
-        pending = len([c for c in merged if not c.get("posted")])
+        # Refresh the review-request marker the menu bar polls (count = pending,
+        # not posted, not terminal -- a just-pruned expired card must not still
+        # inflate the badge).
+        pending_count = len([c for c in merged if not c.get("posted") and not c.get("terminal")])
         project = ns.project or batch.get("project") or (new_cands[0].get("matched_project") if new_cands else None)
         _atomic_write(
             review_request_path(),
             {
                 "batch_id": REVIEW_QUEUE_ID,
                 "project": project,
-                "count": pending,
+                "count": pending_count,
                 "plan_path": dst,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },
@@ -334,7 +336,7 @@ def main() -> int:
 
     print(
         f"[merge_review_queue] merged {added} new draft(s) into {REVIEW_QUEUE_ID} "
-        f"({pending} pending total) from {os.path.basename(src)}",
+        f"({pending_count} pending total) from {os.path.basename(src)}",
         file=sys.stderr,
     )
     # Clean up the consumed batch plan so /tmp doesn't fill with orphans.
