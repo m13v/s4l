@@ -785,19 +785,12 @@ class S4LMenuBar(rumps.App):
         relaunch. Primary action for this case now instead of re-arm: no
         clipboard paste, no chat turn required. Re-arm remains the fallback
         for the rarer case where no session directory exists yet for the
-        active account (see _build_menu) — fix 5 never fabricates one."""
-        _activate_front()
-        choice = _show_alert(
-            title="Finish setting up drafts?",
-            message=(
-                "Claude needs to restart once to finish registering your draft "
-                "schedule for this account. Its window will close and reopen "
-                "in a moment — drafting starts within a few minutes after."
-            ),
-            ok="Restart & Finish Setup", cancel="Cancel",
-        )
-        if choice != 1:
-            return
+        active account (see _build_menu) — fix 5 never fabricates one.
+
+        No confirm dialog: the restart is already disclosed in the menu item
+        label itself ("...(restarts Claude)", _build_menu) — a modal repeating
+        that would just be a second click for information the user already
+        has (2026-07-09). The notify toast below still tells them it started."""
         _capture_msg(
             "S4L finish-schedule-setup clicked",
             phase="draft_schedule",
@@ -3083,7 +3076,16 @@ class S4LMenuBar(rumps.App):
                 except Exception:
                     pass
                 if can_selfheal:
-                    items.append(rumps.MenuItem("Finish setting up drafts", callback=self._finish_schedule_setup))
+                    # Say "restarts Claude" in the label itself, not just the
+                    # confirm modal — a menu item should be honest about a
+                    # disruptive action (closing/reopening the whole app)
+                    # before the user has committed to clicking it, matching
+                    # what the old "Restart Claude Desktop to fix" button made
+                    # obvious upfront (2026-07-08).
+                    items.append(rumps.MenuItem(
+                        "Finish setting up drafts (restarts Claude)",
+                        callback=self._finish_schedule_setup,
+                    ))
                 else:
                     items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             items.append(rumps.separator)
