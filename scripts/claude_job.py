@@ -357,7 +357,8 @@ def _arm_deathwatch(job_id: str, qtype: str, batch: str) -> None:
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "producer_deathwatch.py")
         subprocess.Popen(
             [sys.executable, script, "--watch-pid", str(os.getpid()),
-             "--job-id", job_id, "--qtype", qtype, "--batch", batch],
+             "--job-id", job_id, "--qtype", qtype, "--batch", batch,
+             "--call-path", "queue"],
             start_new_session=True,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
