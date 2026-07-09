@@ -803,6 +803,45 @@ def discard_all_pending(drafts):
     return _store_update(mutate) or 0
 
 
+def flip_discarded_candidates_skipped(candidate_ids):
+    """Flip each bulk-discarded candidate's twitter_candidates row to
+    status='skipped', skip_reason='human_discarded_all' — the same DB effect a
+    normal reject gets for free as a side effect of its review-events insert
+    (see review-events/route.ts). The bulk-discard path deliberately never
+    ships a review event (that's the whole point — it must not reach the
+    feedback digest), so without this direct call the row would stay
+    'pending' until the independent age-based freshness gate happens to expire
+    it, wide open to re-discovery/re-drafting of the exact draft a human just
+    discarded. One PATCH per candidate via the SAME direct-HTTP path
+    flush_review_events already uses (http_api), so this never touches
+    review_events. Best-effort: a candidate that already expired/posted by the
+    time this runs (404, no longer 'pending') is a no-op, not a failure."""
+    if not candidate_ids:
+        return
+    try:
+        from http_api import api_patch
+    except Exception as err:
+        sys.stderr.write(
+            f"[s4l-state] flip_discarded_candidates_skipped: http_api unavailable "
+            f"({type(err).__name__}: {err}); {len(candidate_ids)} candidate(s) left 'pending'\n"
+        )
+        sys.stderr.flush()
+        return
+    for cid in candidate_ids:
+        try:
+            api_patch(
+                "/api/v1/twitter-candidates/by-id",
+                {"id": cid, "action": "mark_skipped", "reason": "human_discarded_all"},
+                ok_on_404=True,
+            )
+        except Exception as err:
+            sys.stderr.write(
+                f"[s4l-state] flip_discarded_candidates_skipped: PATCH failed for "
+                f"candidate_id={cid} ({type(err).__name__}: {err})\n"
+            )
+            sys.stderr.flush()
+
+
 def store_mark_post_failed(batch, n, candidate_id=None, error=None):
     """A decided post that FAILED surfaces via notification/dashboard, not by
     re-presenting the card and not by endless resume retries."""
