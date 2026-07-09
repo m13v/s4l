@@ -734,14 +734,12 @@ ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(l
 log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
 
 
-# --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
-# JSON schema forces structured output. Eliminates the prose-drift failure mode
-# Lean Phase 1 schema (2026-05-28): the scan session no longer scrapes,
-# it only drafts queries. The Python pipeline runs each query via headless
-# Chrome and writes the tweets directly to SCAN_TWEETS_FILE for the shell.
-SCAN_SCHEMA_LEAN='{"type":"object","properties":{"queries":{"type":"array","items":{"type":"object","properties":{"project":{"type":"string"},"query":{"type":"string"},"search_topic":{"type":"string"}},"required":["project","query","search_topic"]}}},"required":["queries"]}'
+# --- Phase 1: deterministic query bank, scrapes tweets ----------------------
+# No Claude call (removed 2026-07-08; see the query-bank comment below). The
+# Python pipeline runs each banked query via headless Chrome and writes the
+# tweets directly to SCAN_TWEETS_FILE for the shell.
 
-log "Acquiring twitter-browser lock for Phase 1 Claude scan..."
+log "Acquiring twitter-browser lock for Phase 1 scan..."
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 1"
 # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
@@ -911,16 +909,15 @@ log "  Pre-flight access OK: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s 
 # cap is hit before target, proceed with whatever we have (even 1 candidate
 # is better than 0). When BATCH_COUNT is still 0 after the loop, the
 # post-loop empty_batch branch fires.
-# DEFAULT Phase 1 is the deterministic qualified-query bank (no Claude): the
-# bank replays every historically qualified query for the picked project in a
+# Phase 1 is the deterministic qualified-query bank (no Claude): the bank
+# replays every historically qualified query for the picked project in a
 # single pass, so there is nothing to "retry-draft" and one attempt is enough.
-# The legacy LLM-draft path (TWITTER_PHASE1_LLM_DRAFT=1) keeps the 5-attempt
-# retry loop, because LLM queries frequently return empty and need re-drafting.
-if [ "${TWITTER_PHASE1_LLM_DRAFT:-0}" = "1" ]; then
-    MAX_SCAN_ATTEMPTS=5
-else
-    MAX_SCAN_ATTEMPTS=1
-fi
+# (The old LLM-draft path used a 5-attempt retry loop, because LLM-drafted
+# queries frequently returned empty and needed re-drafting; removed 2026-07-08
+# — unused since the bank became the default 2026-05-28, and the queue-routed
+# claude call it made held the twitter-browser lock for no reason, the same
+# class of bug fixed in Phase 2b-prep the same day.)
+MAX_SCAN_ATTEMPTS=1
 RETRY_TARGET=5
 SCAN_ATTEMPT=0
 BATCH_COUNT=0
@@ -1073,110 +1070,8 @@ export SCAN_TWEETS_FILE
 # Output downstream is identical: $RAW_FILE + $QUERIES_FILE feed the scorer
 # and twitter_search_attempts logger the same way as before.
 #
-if [ "${TWITTER_PHASE1_LLM_DRAFT:-0}" = "1" ]; then
-# === LLM QUERY-DRAFT PATH (legacy, behind TWITTER_PHASE1_LLM_DRAFT=1) ========
-log "Lean Phase 1: drafting queries (no browser tools)..."
-
-QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
-
-## Step 1: Draft one search query per project
-
-You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's ASSIGNED search_topic.
-
-Each project entry carries TWO fields that drive your behavior: \`topic_picked_mode\` (either \`use\` or \`explore_invent\`) and \`search_topic\` (a string in \`use\` mode, NULL in \`explore_invent\` mode).
-
-USE mode (~90% of cycles, indicated by \`topic_picked_mode: \"use\"\` and a non-null \`search_topic\`):
-The Python picker has already chosen this project's search_topic by weighted-random sampling over the FULL universe in config.json. Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets. Do NOT substitute a different topic; do NOT paraphrase the topic. End-to-end attribution joins on the exact string.
-
-EXPLORE_INVENT mode (~10% of cycles, indicated by \`topic_picked_mode: \"explore_invent\"\` and \`search_topic: null\`):
-The picker is asking you to INVENT a brand-new search_topic. Look at the project's own \`reference_topics\` array and propose ONE new topic concept that does NOT appear there and is NOT a paraphrase of anything in it. Use your invented topic as the query's \`search_topic\` AND drive the keyword phrasing from it (one consistent string per project).
-
-Projects:
-$PROJECTS_JSON
-
-Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (7-day window, per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Each row carries THREE labels that tell you what to do with it as a reference:
-
-  - \`supply_bucket\`: low (<1 tweet/attempt), medium (1-5), high (>5). Raw supply X returned for this phrasing.
-  - \`conversion_bucket\`: low (<0.2 post_rate), medium (0.2-0.6), high (>=0.6). How often a found tweet survived the draft gate.
-  - \`guidance\`: one of MIMIC, KEEP_STYLE, NARROW, BROADEN — the action to take when drawing from this query.
-  - \`posts_per_attempt\`: posts produced per Phase 1 search invocation; <0.1 means most attempts produce zero survivors.
-
-How to act on \`guidance\`:
-  - MIMIC      — gold tier. Reuse the operator skeleton verbatim, swap only the topic keyword for the picker-assigned topic.
-  - KEEP_STYLE — solid. Use the operator pattern as inspiration; small phrasing tweaks OK.
-  - NARROW     — high supply, low conversion (noisy pond). If you draw from it, ADD specificity: more OR alternates, stricter min_faves, extra -term excludes.
-  - BROADEN    — low supply (query dying or topic running dry). The OPERATORS are dead weight. Shorten to 1-2 keywords, drop OR groups, step min_faves down a tier. Do NOT inherit operators from a BROADEN-tagged row.
-
-The canonical source for \`min_faves:N\` selection is the PER-PROJECT SUPPLY SIGNAL block below.
-$TOP_QUERIES_PER_PROJECT_JSON
-
-TOP-PERFORMING SEARCH TOPICS (conceptual seeds, 14d window) — context for query phrasing only; you draft a query for the picker-assigned topic, you do NOT swap topics here:
-$TOP_TOPICS_JSON
-
-DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h:
-$DUD_QUERIES_JSON
-
-DUD CONCEPT SEEDS — these search_topic seeds pulled in tweets that Phase 2b's draft gate kept skipping over the last 7d. Per entry: \`omit_rate\` = skipped_n / (posted_n + skipped_n), \`sample_skip_reasons\` are the top reject reasons. If \`omit_rate >= 0.6\` AND \`skipped_n >= 5\`, REWORD the query narrower or drop the seed and pick a different config.json seed for that project:
-$DUD_TOPICS_JSON
-
-PER-PROJECT SUPPLY SIGNAL — for each project, the historical median tweets_found at each \`min_faves:N\` tier you've drafted in the last 14d. Pick the LOWEST tier where \`median_tweets_found >= 3\`; if every tier is below 3, drop one tier lower than the lowest you've tried. Trust this table over priors:
-$SUPPLY_SIGNAL_JSON
-
-ALREADY-ENGAGED TWEET IDS (last 48h) — the Python scraper skips these regardless, but knowing them helps you avoid drafting a query that would predominantly surface dead candidates:
-$ENGAGED_TWEET_IDS
-
-THIS-CYCLE QUERIES ALREADY TRIED with per-query outcomes (attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS, target=$RETRY_TARGET candidates after filters). Do NOT repeat any of these phrasings or close variants. Read each entry's \`verdict\` field and respond directionally (do NOT default to generic "broaden"):
-- \`dead_supply\` (raw_tweets=0): the phrasing returned ZERO tweets from X. The query was too narrow for X's index. HARD RULE: attempt N+1 MUST execute at least ONE of these THREE concrete broadening moves, NOT a topic rotation. Pick exactly one and apply it visibly: (a) lower \`min_faves\` by ONE FULL TIER (e.g. 20→5, 5→1, 1→0); (b) reduce the OR alternates inside any parenthesized group to AT MOST 2 terms (e.g. \`(A OR B OR C OR D)\` → \`(A OR B)\`); (c) drop ALL \`-term\` excludes EXCEPT those listed in this project's \`excludes_for_search\` (which remain mandatory). The PER-PROJECT SUPPLY SIGNAL block is OVERRIDDEN by \`dead_supply\` THIS CYCLE — do not appeal to historical min_faves when the current attempt returned 0. Swapping the topic noun while keeping the same operator skeleton is NOT broadening and is FORBIDDEN as a response to \`dead_supply\`.
-- \`all_aged_out\` (raw>0, kept_after_age=0): topic is supply-limited at the current freshness window; every tweet was older than the cap. Pick a structurally adjacent topic; do NOT rephrase the same one (it will just hit the cap again).
-- \`all_engaged_or_skipped\` (kept_after_age>0, kept_after_skip=0): query phrasing is fine, but the surviving tweets were already engaged on prior cycles. Pick a DIFFERENT topic, not a rephrase.
-- \`found_some\` (kept_after_skip>0 but below target): query is on-target. Raise min_faves one tier OR add a semantic constraint to lift quality. Do NOT broaden.
-$TRIED_QUERIES_JSON
-
-Query guidelines:
-- MANDATORY: do NOT add any date or time-window operator to your query (no \`since:\`, \`until:\`, \`since_time:\`, \`until_time:\`). The Python scraper enforces the freshness window at the URL level after you return; any time operator you include is stripped and overwritten. Including raw bash arithmetic, format strings, or placeholder text in place of a real epoch will be sent to X as a literal keyword and produce zero results.
-- MANDATORY EVEN IF YOUR QUERY KEYWORDS DO NOT NAME THE EXCLUDED TOPIC: if a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EVERY listed term to that project's query, verbatim, no exceptions.
-- MANDATORY: pick \`min_faves:N\` per the PER-PROJECT SUPPLY SIGNAL above. If a project has no entry there (new / first cycle), start at min_faves:20.
-- Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways.
-- Pick a query likely to surface tweets RELEVANT to that project's actual domain.
-- Mix it up each run; don't always use the same query for the same project.
-- Use the project's ASSIGNED \`search_topic\` plus its \`description\` as grounding for query phrasing.
-- The \`search_topic\` you emit in the output JSON MUST be the project's assigned \`search_topic\` field pasted VERBATIM (NOT the query string, NOT a paraphrase). The scoring pipeline stamps \`twitter_candidates.search_topic\` from this for end-to-end attribution.
-
-## Output
-
-Return ONLY the structured_output JSON with this shape:
-{\"queries\": [{\"project\": \"PROJECT_NAME\", \"query\": \"X advanced search string with operators\", \"search_topic\": \"assigned or invented topic, verbatim\"}, ...]}
-
-One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>&1)
-
-
-# Dump the captured envelope to the cycle log for offline inspection.
-echo "$QUERIES_OUTPUT" >> "$LOG_FILE"
-
-# Extract the drafted queries to a temp file.
-QUERIES_TMP="/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-queries.json"
-python3 -c "
-import json, sys
-text = sys.stdin.read().strip()
-try:
-    env, _ = json.JSONDecoder().raw_decode(text)
-except Exception as e:
-    print(f'lean phase 1: envelope parse error: {e}', file=sys.stderr)
-    json.dump([], open('$QUERIES_TMP', 'w'))
-    sys.exit(0)
-so = env.get('structured_output')
-if so is None:
-    so = env.get('result')
-if isinstance(so, str):
-    try: so = json.loads(so)
-    except Exception: pass
-qs = so.get('queries', []) if isinstance(so, dict) else []
-json.dump(qs, open('$QUERIES_TMP', 'w'))
-print(f'lean phase 1: drafted {len(qs)} queries', flush=True)
-" <<< "$QUERIES_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
-
-else
-# === DETERMINISTIC QUALIFIED-QUERY-BANK PATH (default, 2026-05-28) ==========
+# === DETERMINISTIC QUALIFIED-QUERY-BANK PATH (default since 2026-05-28;
+# only path since 2026-07-08 removal of the LLM query-draft alternative) =====
 # No Claude call. Replay every historically qualified query for the picked
 # project(s): every distinct query that ever produced a posted reply with
 # >=1 like OR >=1 non-bot link click, regardless of the per-cycle
@@ -1191,7 +1086,6 @@ if [ "$SCAN_ATTEMPT" -gt 1 ]; then
 else
     log "Phase 1 (bank): building qualified query bank from PROJECTS_JSON (deterministic, no Claude)..."
     echo "$PROJECTS_JSON" | python3 "$REPO_DIR/scripts/qualified_query_bank.py" --from-projects-json > "$QUERIES_TMP" 2>>"$LOG_FILE"
-fi
 fi
 
 QUERIES_COUNT=$(python3 -c "
