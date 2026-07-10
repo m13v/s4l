@@ -732,6 +732,15 @@ class _ReviewController(NSObject):
         self._selected_draft = None
         self._draft_textviews = {}
         self._draft_scrolls = {}
+        # Per-draft hover dwell (two-draft cards, 2026-07-10): accumulated
+        # milliseconds the pointer spent over each draft box, so the feedback
+        # digest can tell an informed keep of Draft A (they read B and stayed)
+        # from a fast approve that says nothing about B. Raw ms ship on the
+        # decision; the read-vs-skim threshold lives digest-side so it can be
+        # tuned without a client release. _draft_hover_open holds the enter
+        # timestamp of any hover still in progress (flushed on decision).
+        self._draft_hover_ms = {0: 0, 1: 0}
+        self._draft_hover_open = {}
         # Attention anchors for the unattended-review watchdog: the stack counts
         # as "touched" on present, on any tracked interaction, and on any
         # decision. No touch past the watchdog threshold = the user is not
@@ -1059,6 +1068,8 @@ class _ReviewController(NSObject):
             self._interactions = []
             self._card_shown_at = time.time()
             self._selected_draft = None
+            self._draft_hover_ms = {0: 0, 1: 0}
+            self._draft_hover_open = {}
         self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
@@ -1389,6 +1400,19 @@ class _ReviewController(NSObject):
                 tv.setDelegate_(self)
                 outline.addSubview_(scroll)
                 content.addSubview_(outline)
+                # Hover dwell per draft box (same NSTrackingArea pattern as the
+                # eye buttons): enter/exit timestamps accumulate into
+                # _draft_hover_ms[slot] so the decision can say whether the
+                # reviewer actually READ the draft they didn't pick. slot rides
+                # on userInfo, mirroring the eyes' `kind` routing.
+                outline.addTrackingArea_(
+                    NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                        outline.bounds(),
+                        NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                        self,
+                        {"kind": "draft", "slot": slot},
+                    )
+                )
                 self._draft_scrolls[slot] = scroll
                 self._draft_outlines[slot] = outline
                 self._draft_textviews[slot] = tv
