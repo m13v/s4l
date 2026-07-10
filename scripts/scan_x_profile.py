@@ -484,6 +484,22 @@ def main() -> int:
             "counts": {"posts": len(posts), "comments": len(comments)},
             "grounding_instructions": GROUNDING_INSTRUCTIONS,
         }
+
+        # Persist the corpus beside config.json so the later project-save step
+        # (setup writes the project, then voice_exemplars.py auto-applies the
+        # exemplars) works without a re-scan. The scan can run BEFORE config.json
+        # exists on a fresh onboarding, hence mkdir. Best-effort: the scan is
+        # still fully usable from stdout if the write fails.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import s4l_mode
+            sidecar = s4l_mode.config_path().parent / "last_profile_scan.json"
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_text(json.dumps(result, ensure_ascii=False))
+            result["scan_file"] = str(sidecar)
+        except Exception:
+            result["scan_file"] = None
+
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except Exception as e:
