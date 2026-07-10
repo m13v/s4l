@@ -5761,13 +5761,15 @@ async function main() {
   // the connected X profile and store the top-performing replies as
   // voice.examples + the persona_corpus.txt exemplar section. Additive only
   // (regenerates just its own marked corpus section; respects hand-written
-  // examples) and self-limiting (marker file rate-limits scan attempts;
-  // BAIL-ON-BUSY on the twitter-browser lock, so it never contends with a
-  // running cycle — it just retries on a later boot). Delayed so boot-time
-  // work (runtime provision, kicker install) settles first.
+  // examples) and self-limiting (marker file rate-limits scan attempts; it
+  // WAITS politely on the twitter-browser lock, polling while holding
+  // nothing, until cycles/DM runs free the browser, up to 12h before
+  // deferring to the next boot). Delayed so boot-time work (runtime
+  // provision, kicker install) settles first.
   const backfill = setTimeout(() => {
     if (isPaused()) return;
-    void runPython("scripts/voice_exemplars.py", ["backfill"], { timeoutMs: 420_000 })
+    // timeout covers the 12h lock wait plus generous room for the scan itself
+    void runPython("scripts/voice_exemplars.py", ["backfill"], { timeoutMs: 13 * 3600_000 })
       .then((r) => {
         const last = r.stdout.trim().split("\n").slice(-1)[0] || "";
         console.error(`[social-autoposter-mcp] voice-exemplars backfill: ${last}`);
