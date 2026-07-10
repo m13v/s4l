@@ -191,12 +191,18 @@ def _upsert_corpus_section(corpus_path: Path, section: str) -> str:
 
 
 def cmd_apply(args) -> int:
-    scan = _load_scan(args.scan)
+    cfg_path = Path(args.config).expanduser() if args.config else s4l_mode.config_path()
+    scan_src = args.scan or str(cfg_path.parent / "last_profile_scan.json")
+    if not Path(scan_src).expanduser().exists():
+        print(json.dumps({"ok": False, "error": f"no scan at {scan_src}; run "
+                          "scan_x_profile.py first (it writes last_profile_scan.json) "
+                          "or pass --scan"}))
+        return 1
+    scan = _load_scan(scan_src)
     if not scan.get("ok"):
         print(json.dumps({"ok": False, "error": f"scan not ok: {scan.get('error')}"}))
         return 1
 
-    cfg_path = Path(args.config).expanduser() if args.config else s4l_mode.config_path()
     cfg = json.loads(cfg_path.read_text())
     projects = cfg.get("projects", [])
     name = args.project or s4l_mode.persona_name()
@@ -255,7 +261,9 @@ def main(argv) -> int:
     ap = argparse.ArgumentParser(description="Persist scanned top posts/replies as author-voice exemplars")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("apply", help="write voice.examples (+ persona corpus section)")
-    a.add_argument("--scan", required=True, help="scan_x_profile.py JSON (or build_persona gather blob)")
+    a.add_argument("--scan", default=None,
+                   help="scan_x_profile.py JSON or build_persona gather blob "
+                        "(default: <config dir>/last_profile_scan.json, written by the scanner)")
     a.add_argument("--project", default=None, help="config.json project name (default: the persona project)")
     a.add_argument("--config", default=None, help="config.json path override (testing)")
     a.add_argument("--top", type=int, default=5, help="max exemplars per surface")
