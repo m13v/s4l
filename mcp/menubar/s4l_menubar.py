@@ -894,11 +894,15 @@ class S4LMenuBar(rumps.App):
               does NOT stay stale after recovery.
 
         NOTE: kept in sync with scripts/autopilot_stall_watch.py (the fleet Sentry
-        backstop). The menu-bar ⚠ itself is driven by _schedule_state, NOT this
-        method — the attention/⚠ path keys off schedule_state so a firing-but-
-        momentarily-empty queue stays green (an earlier drain-latch ⚠ stayed stale
-        after recovery and was deliberately removed). This method exists for the
-        watcher-parity contract and _stall_reason.
+        backstop). Since 2026-07-09 this method IS an attention/⚠ driver: _tick
+        ORs it in (with the reason from _stall_reason) alongside the structural
+        schedule states (missing/disabled) and the activity-label draft_stuck
+        check. A firing-but-momentarily-empty queue still stays green: an idle
+        queue has no pending job, running/ is empty, and the drain latch zeroes
+        on every successful consume (claude_job._mark_drain_success), so none of
+        the three signals can hold a stale True after recovery. Tick-freshness
+        'stalled' from schedule_state no longer flips the ⚠ at all — it renders
+        as a plain diagnostic line (see _build_menu).
         """
         qroot = os.path.join(st.state_dir(), "claude-queue")
         # (1) latched producer drain-status
@@ -3325,6 +3329,29 @@ class S4LMenuBar(rumps.App):
                     ))
                 else:
                     items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+            items.append(rumps.separator)
+        elif setup_complete and schedule_state == "stalled":
+            # NON-ALARM diagnostic (2026-07-09): the task is registered + enabled
+            # for the active account but the host's per-minute tick is stale or
+            # mostly skipped (Desktop warm-session wedge). The queue checks above
+            # would have flipped ⚠ if jobs were actually stuck, so reaching here
+            # means drafts still drain; say so with numbers instead of alarming.
+            # tick_stats is cached by _tick (refreshed ≤ once/min, None outside
+            # 'stalled').
+            _ts = self._tick_stats or {}
+            _skips = _ts.get("skips_in_window")
+            _age = _ts.get("last_run_age_s")
+            _bits = []
+            if _skips is not None:
+                _bits.append(f"{_skips} of ~60 ticks skipped last hour")
+            if _age is not None:
+                _bits.append(f"last run {max(0, int(_age)) // 60}m ago")
+            items.append(self._label("Scheduler degraded (drafts still running)"))
+            if _bits:
+                items.append(self._label("   " + ", ".join(_bits)))
+            # Keep the one-click remedy reachable without dressing it as urgent:
+            # re-registering through create_scheduled_task un-wedges the host.
+            items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             items.append(rumps.separator)
 
         if not runtime_ready:
