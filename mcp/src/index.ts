@@ -2275,13 +2275,18 @@ tool(
         counts: scan.counts,
         posts: scan.posts,
         comments: scan.comments,
+        top_posts: scan.top_posts,
+        top_replies: scan.top_replies,
         grounding_instructions: scan.grounding_instructions,
         website_research_instructions: WEBSITE_RESEARCH_INSTRUCTIONS,
         onboarding: onboardingSnapshot(),
         next_step:
           "FOUR steps, in order. FIRST (VOICE, from this scan): read the bio, posts, and comments " +
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
-          "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
+          "voice & vibe (tone, phrasing, casing, tics), verbatim golden-rule example replies (the " +
+          "scan pre-ranks these by real engagement in top_replies/top_posts, with stats, parent " +
+          "tweets, and thread continuations; persist them into the project's voice.examples so " +
+          "every drafter mirrors them), " +
           "a phrase bank + things they avoid, and their icp. The scan is BACKWARD-LOOKING (only what " +
           "they already posted) so it is the source for VOICE, not the primary source for topics. " +
           "SECOND (the DICTATION interview — this is where TOPICS + grounding corpus come from, do NOT " +
