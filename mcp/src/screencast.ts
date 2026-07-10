@@ -19,6 +19,24 @@
 
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { logLine } from "./telemetry.js";
+
+// One structured relay line (context "browser-foreground", the same lane the
+// menubar's NSWorkspace observer emits on) every time THIS module raises the
+// managed Chrome. The observer records THAT the window came to the front;
+// these lines record WHY (screencast attach vs explicit front action), so the
+// two join on timestamp in Cloud Logging.
+function logBringToFront(source: string, extra: Record<string, unknown>): void {
+  try {
+    logLine(
+      "stdout",
+      JSON.stringify({ ev: "browser_bring_to_front", source, ...extra }),
+      "browser-foreground"
+    );
+  } catch {
+    /* telemetry must never break the screencast */
+  }
+}
 
 // Untyped indirection: Node ships a global WebSocket at runtime (>=21) but
 // @types/node doesn't always declare it as a value, and MessageEvent isn't typed
@@ -132,6 +150,14 @@ class Screencast {
       this.port = chosenPort as number;
       this.targetTitle = target.title || "";
       this.targetUrl = target.url || "";
+      // connect() just sent Page.bringToFront (Chrome won't stream frames for a
+      // background tab), which raises the harness window — record each raise.
+      // Reconnects happen silently on every frame poll after the attached tab
+      // dies, so this line is the ONLY attribution for reconnect-storm raises.
+      logBringToFront("screencast_attach", {
+        port: chosenPort,
+        url: (target.url || "").slice(0, 200),
+      });
       return { ok: true };
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) };
@@ -315,5 +341,10 @@ export async function bringBrowserToFront(
   if (process.platform === "darwin") {
     await raiseMacWindow(chosenPort);
   }
+  logBringToFront("front_action", {
+    port: chosenPort,
+    url: (target.url || "").slice(0, 200),
+    raised_os_window: process.platform === "darwin",
+  });
   return { ok: true, port: chosenPort };
 }
