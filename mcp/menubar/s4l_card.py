@@ -899,7 +899,7 @@ class _ReviewController(NSObject):
             except Exception:
                 pass
             content.addSubview_(btn)
-            x += 48
+            x += 42
 
         reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
         reject.setTitle_("Reject")
