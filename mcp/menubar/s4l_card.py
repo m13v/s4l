@@ -1566,21 +1566,32 @@ class _ReviewController(NSObject):
         self._show_details_popover()
 
     @objc.python_method
-    def _hover_kind(self, event):
-        """Which eye a tracking-area event belongs to ('stats' | 'details'),
-        from the userInfo stamped in _eye_button. Defaults to stats (the
-        original single-eye behavior) if the area carries no info."""
+    def _hover_info(self, event):
+        """(kind, slot) a tracking-area event belongs to, from the userInfo
+        stamped at creation: ('stats'|'details', None) for the eye icons,
+        ('draft', 0|1) for the two draft boxes. Defaults to ('stats', None),
+        the original single-eye behavior, if the area carries no info."""
         try:
             info = event.trackingArea().userInfo()
-            if info and info.get("kind") == "details":
-                return "details"
+            if info:
+                kind = info.get("kind")
+                if kind == "draft":
+                    return "draft", int(info.get("slot"))
+                if kind == "details":
+                    return "details", None
         except Exception:
             pass
-        return "stats"
+        return "stats", None
 
-    # NSTrackingArea owner callbacks (hover over either eye icon).
+    # NSTrackingArea owner callbacks (hover over either eye icon or, on
+    # two-draft cards, either draft box). Draft hovers only bank dwell time
+    # (no popover, no logging: the boxes are big and enter/exit fires on
+    # every pass of the pointer).
     def mouseEntered_(self, event):
-        kind = self._hover_kind(event)
+        kind, slot = self._hover_info(event)
+        if kind == "draft":
+            self._draft_hover_open[slot] = time.time()
+            return
         _log(f"{kind} eye hover enter")
         if kind == "details":
             self._show_details_popover()
@@ -1588,8 +1599,31 @@ class _ReviewController(NSObject):
             self._show_stats_popover()
 
     def mouseExited_(self, event):
+        kind, slot = self._hover_info(event)
+        if kind == "draft":
+            started = self._draft_hover_open.pop(slot, None)
+            if started is not None:
+                self._draft_hover_ms[slot] = self._draft_hover_ms.get(slot, 0) + int(
+                    (time.time() - started) * 1000
+                )
+            return
         _log("eye hover exit")
         self._close_stats_popover()
+
+    @objc.python_method
+    def _flush_draft_hovers(self):
+        """Bank any hover still in progress (pointer inside a draft box at
+        decision time, e.g. a keyboard approve) so _record reads final
+        totals."""
+        now = time.time()
+        for slot, started in list(self._draft_hover_open.items()):
+            self._draft_hover_ms[slot] = self._draft_hover_ms.get(slot, 0) + int(
+                (now - started) * 1000
+            )
+            # Keep the hover open (re-anchored at now) rather than deleting
+            # it: the pointer really is still inside the box, so a later
+            # mouseExited_ must not double-count the pre-flush span.
+            self._draft_hover_open[slot] = now
 
     @objc.python_method
     def _add_link(self, content, frame, text, url, *, size=12, bold=False, right=False, kind="link_click"):
@@ -1728,9 +1762,28 @@ class _ReviewController(NSObject):
             chosen_draft = drafts[sel_idx]
             orig = (chosen_draft.get("text") or "").strip()
             draft_variant = chosen_draft.get("variant") or ("a" if sel_idx == 0 else "b")
+            # Full pairwise context for the feedback digest (2026-07-10): the
+            # UNCHOSEN draft's text+style ride along so "picked B over A" (or
+            # "kept A after reading B", per the hover dwell) is a usable
+            # preference PAIR, not just a winner with no loser. Shipped as one
+            # nested dict end to end (decision -> review event -> jsonb column)
+            # so adding a field never needs another schema hop.
+            self._flush_draft_hovers()
+            other = drafts[1 - sel_idx]
+            draft_choice = {
+                "variant": draft_variant,
+                "index": sel_idx,
+                "auto_selected": bool(sel_idx == 0),
+                "style": chosen_draft.get("style") or None,
+                "unchosen_text": (other.get("text") or "").strip() or None,
+                "unchosen_style": other.get("style") or None,
+                "hover_a_ms": int(self._draft_hover_ms.get(0, 0)),
+                "hover_b_ms": int(self._draft_hover_ms.get(1, 0)),
+            }
         else:
             orig = (d.get("reply_text") or "").strip()
             draft_variant = None
+            draft_choice = None
         link = d.get("link_url") or ""
         drop_link = False
         if approved:
@@ -1786,6 +1839,11 @@ class _ReviewController(NSObject):
                 "draft_variant": draft_variant,
                 "draft_index": sel_idx,
                 "draft_auto_selected": bool(dual and sel_idx == 0),
+                # Nested pairwise record (chosen vs unchosen text/style plus
+                # per-box hover dwell); None on single-draft candidates. The
+                # flat three fields above stay for their existing consumers
+                # (edit-learning variant stamp in s4l_menubar).
+                "draft_choice": draft_choice,
             }
         )
         self._last_decision_at = time.time()
