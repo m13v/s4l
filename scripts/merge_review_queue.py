@@ -19,6 +19,15 @@ Usage:
 
 State dir (for review-request.json) honors $S4L_STATE_DIR; the review-queue plan
 lives in $S4L_TMP_DIR or /tmp (matching the MCP's planPath()).
+
+LEDGER SEMANTICS (read this before counting anything in review-queue.json):
+the queue is APPEND-FOREVER — handled candidates are never removed, they are
+flag-stamped in place (posted / terminal+terminal_reason / post_failed /
+approved). "Not posted" is therefore NOT "awaiting review"; in an old queue
+most rows are retired. The canonical classifier is
+mcp/menubar/s4l_state.py::candidate_state(); the honest pending-cards count is
+its awaiting_review bucket, mirrored into review-request.json's .count here at
+merge time.
 """
 
 from __future__ import annotations
@@ -318,10 +327,21 @@ def main() -> int:
         _atomic_write(dst, plan_obj)
         ensure_store_symlink()
 
-        # Refresh the review-request marker the menu bar polls (count = pending,
-        # not posted, not terminal -- a just-pruned expired card must not still
-        # inflate the badge).
-        pending_count = len([c for c in merged if not c.get("posted") and not c.get("terminal")])
+        # Refresh the review-request marker the menu bar polls. count = cards
+        # actually awaiting review (mirrors s4l_state.candidate_state()'s
+        # awaiting_review bucket): approved-unposted and post_failed rows are
+        # settled decisions, counting them inflated the badge and misled every
+        # human/agent reading the marker.
+        pending_count = len(
+            [
+                c
+                for c in merged
+                if not c.get("posted")
+                and not c.get("terminal")
+                and not c.get("post_failed")
+                and not c.get("approved")
+            ]
+        )
         project = ns.project or batch.get("project") or (new_cands[0].get("matched_project") if new_cands else None)
         _atomic_write(
             review_request_path(),
