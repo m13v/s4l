@@ -311,6 +311,33 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
     return items[:want]
 
 
+def _own_posted_ids() -> set:
+    """Status ids of everything S4L itself has posted from this install, via
+    /api/v1/posts (install-scoped by the X-Installation header). Used to keep
+    the bot's own output OUT of the author-voice exemplar pool: on accounts
+    where S4L has been active, a recency scan is dominated by S4L drafts, and
+    feeding those back as 'the author's voice' is a feedback loop. Best-effort:
+    any failure (offline, fresh install, no API) returns an empty set and the
+    scan proceeds unfiltered."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get  # noqa: PLC0415
+        import re
+        ids: set = set()
+        rows = api_get("/posts", {"platform": "twitter", "has_our_url": "true",
+                                  "limit": 2000}) or []
+        if isinstance(rows, dict):
+            rows = rows.get("posts") or rows.get("rows") or []
+        for r in rows:
+            m = re.search(r"/status/(\d+)", str(r.get("our_url") or ""))
+            if m:
+                ids.add(m.group(1))
+        return ids
+    except Exception as e:
+        print(f"[scan_x_profile] own-posts exclusion unavailable: {e}", file=sys.stderr)
+        return set()
+
+
 # --------------------------------------------------------------------------- #
 # Engagement ranking + thread expansion for exemplar extraction.
 # --------------------------------------------------------------------------- #
@@ -409,8 +436,8 @@ GROUNDING_INSTRUCTIONS = (
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--handle", default=None, help="@handle to scan (default: live logged-in handle)")
-    ap.add_argument("--posts", type=int, default=20, help="max original posts to collect")
-    ap.add_argument("--comments", type=int, default=50, help="max replies/comments to collect")
+    ap.add_argument("--posts", type=int, default=60, help="max original posts to collect")
+    ap.add_argument("--comments", type=int, default=150, help="max replies/comments to collect")
     ap.add_argument("--top", type=int, default=5, help="how many top posts/replies to rank")
     ap.add_argument("--expand-threads", type=int, default=3,
                     help="visit this many top posts' permalinks to capture thread "
@@ -446,21 +473,37 @@ def main() -> int:
                                expect=f"/{handle}")
         profile = scrape_profile(send) if on_profile else {}
 
-        # 2. Original posts (current page = posts tab).
-        posts = scrape_timeline(send, handle, args.posts) if on_profile else []
+        # 2. Everything S4L itself posted from this install gets excluded from
+        #    BOTH surfaces (posts and replies): the exemplars must be the
+        #    human's writing, not the bot's own output echoed back.
+        s4l_ids = _own_posted_ids()
+        if s4l_ids:
+            print(f"[scan_x_profile] excluding {len(s4l_ids)} s4l-posted statuses "
+                  "from the exemplar pool", file=sys.stderr)
+
+        # 3. Original posts (current page = posts tab). max_scrolls tracks the
+        #    requested depth: the scan is programmatic, so scrolling deeper
+        #    costs only time, and end-of-feed stall detection stops it early
+        #    on small accounts.
+        posts = (scrape_timeline(send, handle, args.posts,
+                                 max_scrolls=max(30, args.posts),
+                                 exclude_ids=s4l_ids)
+                 if on_profile else [])
         post_ids = {p.get("id") for p in posts if p.get("id")}
 
-        # 3. Replies / comments = the user's own articles on /with_replies that
+        # 4. Replies / comments = the user's own articles on /with_replies that
         #    are NOT among the original posts (set subtraction, not DOM text).
         on_replies = _navigate(send, f"https://x.com/{handle}/with_replies",
                                settle=4.0, expect=f"/{handle}/with_replies")
         comments = (
-            scrape_timeline(send, handle, args.comments, exclude_ids=post_ids,
+            scrape_timeline(send, handle, args.comments,
+                            max_scrolls=max(30, args.comments),
+                            exclude_ids=post_ids | s4l_ids,
                             capture_parents=True)
             if on_replies else []
         )
 
-        # 4. Rank both surfaces by real engagement, then expand the top posts'
+        # 5. Rank both surfaces by real engagement, then expand the top posts'
         #    permalinks to capture thread continuations (and untruncated text).
         top_posts = rank_top(posts, args.top)
         top_replies = rank_top(comments, args.top)
@@ -481,7 +524,8 @@ def main() -> int:
             "comments": comments,
             "top_posts": top_posts,
             "top_replies": top_replies,
-            "counts": {"posts": len(posts), "comments": len(comments)},
+            "counts": {"posts": len(posts), "comments": len(comments),
+                       "s4l_posted_excluded": len(s4l_ids)},
             "grounding_instructions": GROUNDING_INSTRUCTIONS,
         }
 
