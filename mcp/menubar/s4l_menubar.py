@@ -2427,14 +2427,19 @@ class S4LMenuBar(rumps.App):
         # re-arm helps) vs 'failing' (routines run but drafts die, Diagnose).
         if (
             setup_complete
-            and not attention
             and schedule_state in ("ok", "stalled")
             and self._stall_reason_info[0] not in ("rate_limited", "draft_stuck")
-            and self._autopilot_stalled()
         ):
-            _qreason, _qmsg = self._stall_reason()
-            attention = True
-            self._stall_reason_info = (_qreason, _qmsg)
+            if self._autopilot_stalled():
+                _qreason, _qmsg = self._stall_reason()
+                attention = True
+                self._stall_reason_info = (_qreason, _qmsg)
+            elif self._stall_reason_info[0] in ("orphaned", "failing"):
+                # Queue recovered since the last tick: clear the stale reason
+                # now instead of waiting for the 30s rate-limit rescan to
+                # overwrite it (a lingering reason skews the diagnose prompt
+                # and churns the menu signature for nothing).
+                self._stall_reason_info = ("", "")
         # Tick-freshness diagnostics for the non-alarm "scheduler degraded" menu
         # line. Only computed while 'stalled' (it reads + parses the registry
         # JSON, which can be hundreds of KB) and throttled to once a minute.
