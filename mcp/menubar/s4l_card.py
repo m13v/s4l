@@ -149,14 +149,14 @@ REJECT_REASONS = (
 # Client-side cap on tracked interactions per card (server clips at 50 too).
 MAX_INTERACTIONS = 50
 
-# Inline approve row: emoji + tooltip per approval level (button tag =
-# level). Level 1 = plain approve; 2+ = loved=True on the decision, with the
+# Inline approve row: glyph + tooltip per approval level (button tag =
+# level). Level 1 = plain approve; 2 = loved=True on the decision, with the
 # exact level shipped as an approve_level_N interaction for the feedback
-# digest.
+# digest. Monochrome text-presentation glyphs (U+FE0E) so the buttons stay
+# black-and-white in both appearances instead of rendering as color emoji.
 APPROVE_EMOJIS = (
-    ("👍", "Approve"),
-    ("😄", "Approve, really good pick"),
-    ("❤️‍🔥", "Approve, best of the best"),
+    ("✓︎", "Approve"),
+    ("♥︎", "Approve, best of the best"),
 )
 
 # Review-surface state mirrored to the state dir for out-of-process observers
