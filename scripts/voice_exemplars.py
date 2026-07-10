@@ -92,6 +92,25 @@ def _pick(items: list, top: int, min_chars: int) -> list:
     return picked
 
 
+def _reply_pool(scan: dict) -> list:
+    """Select from the FULL scanned reply list, not the scanner's pre-truncated
+    top_replies (length-filtering a 5-item list can leave one survivor when the
+    account's best-engaging replies are one-liners). top_replies is the
+    fallback for older scans / gather blobs that dropped the full list."""
+    return scan.get("comments") or scan.get("top_replies") or []
+
+
+def _post_pool(scan: dict) -> list:
+    """Full post list, but prefer the enriched top_posts entry where one exists
+    (it carries the thread continuation and untruncated permalink text)."""
+    top = scan.get("top_posts") or []
+    rest = scan.get("posts") or []
+    by_key = {(p.get("id") or p.get("url") or p.get("text", "")[:80]): p for p in rest}
+    for p in top:
+        by_key[(p.get("id") or p.get("url") or p.get("text", "")[:80])] = p
+    return list(by_key.values())
+
+
 def _stats_note(item: dict, total: int, kind: str) -> str:
     bits = []
     for key, label in (("likes", "likes"), ("retweets", "reposts"), ("replies", "replies")):
@@ -106,7 +125,7 @@ def format_examples(scan: dict, top: int, min_chars: int) -> list[str]:
     """voice.examples strings: verbatim reply first (the voice signal), then a
     parenthesized context annotation (real stats + what it replied to). Plain
     strings because every consumer joins/inlines them as-is."""
-    replies = scan.get("top_replies") or scan.get("comments") or []
+    replies = _reply_pool(scan)
     total = int((scan.get("counts") or {}).get("comments") or len(replies))
     out = []
     for r in _pick(replies, top, min_chars):
@@ -132,7 +151,7 @@ def format_corpus_section(scan: dict, top: int, min_chars: int) -> str:
              f"engagement across {counts.get('posts', '?')} posts and "
              f"{counts.get('comments', '?')} replies scanned. Verbatim. This is "
              "the voice and the bar: ground drafts in this register.", ""]
-    posts = _pick(scan.get("top_posts") or scan.get("posts") or [], top, min_chars)
+    posts = _pick(_post_pool(scan), top, min_chars)
     if posts:
         lines.append("TOP POSTS:")
         for p in posts:
@@ -140,7 +159,7 @@ def format_corpus_section(scan: dict, top: int, min_chars: int) -> str:
             for cont in (p.get("thread") or [])[1:]:
                 lines.append(f"  [thread continuation] {cont.strip()}")
         lines.append("")
-    replies = _pick(scan.get("top_replies") or scan.get("comments") or [], top, min_chars)
+    replies = _pick(_reply_pool(scan), top, min_chars)
     if replies:
         lines.append("TOP REPLIES (with what they replied to):")
         for r in replies:
