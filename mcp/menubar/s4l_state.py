@@ -736,6 +736,37 @@ def _match_candidate(data, n, candidate_id):
     return None
 
 
+def candidate_state(c):
+    """Canonical lifecycle state of ONE review-queue candidate. Use this instead
+    of ad hoc flag checks — "not posted" is NOT "awaiting review".
+
+    The review queue (review-queue.json) is an APPEND-FOREVER LEDGER: handled
+    candidates are never removed, they are flag-stamped in place, so most rows
+    in an old queue are retired. States, in precedence order:
+
+      posted          — approved and successfully posted (our_url set).
+      terminal        — retired without a post; terminal_reason says why
+                        (rejected, human_rejected, human_discarded_all,
+                        duplicate_thread_pre_post, ...; None on older rows).
+      post_failed     — approved but the post attempt errored (post_error says
+                        why). Settled from the cards' point of view; the resume
+                        path retries only after a fresh approval clears it.
+      approved        — human approved, post not yet attempted/confirmed.
+      awaiting_review — none of the above. The ONLY state cards present, and
+                        the only honest "pending" count (review-request.json's
+                        .count mirrors it at merge time).
+    """
+    if c.get("posted") is True:
+        return "posted"
+    if c.get("terminal") is True:
+        return "terminal"
+    if c.get("post_failed"):
+        return "post_failed"
+    if c.get("approved") is True:
+        return "approved"
+    return "awaiting_review"
+
+
 def store_stamp_decision(batch, decision):
     """Write a card decision INTO the store the instant the user clicks. This is
     the durable record (the old approved-queue.json ledger is no longer
@@ -784,7 +815,7 @@ def discard_all_pending(drafts):
         done = 0
         for d in drafts:
             c = _match_candidate(data, d.get("n"), d.get("candidate_id"))
-            if c is None or c.get("posted") is True or c.get("terminal") is True:
+            if c is None or candidate_state(c) in ("posted", "terminal"):
                 continue
             c["terminal"] = True
             c["terminal_reason"] = "human_discarded_all"
@@ -865,7 +896,7 @@ def store_pending_posts(batch="review-queue"):
     plan = read_plan(store_path())
     out = []
     for i, c in enumerate((plan or {}).get("candidates") or []):
-        if not c.get("approved") or c.get("posted") or c.get("terminal") or c.get("post_failed"):
+        if candidate_state(c) != "approved":
             continue
         d = c.get("decision") or {}
         out.append(
@@ -932,7 +963,7 @@ def review_queue_posted_count():
     cands = (plan or {}).get("candidates")
     if not cands:
         return None
-    return sum(1 for c in cands if c.get("posted") is True)
+    return sum(1 for c in cands if candidate_state(c) == "posted")
 
 
 def _plan_generation(batch):
@@ -1008,7 +1039,9 @@ def review_drafts(plan, batch="review-queue"):
     settled_ns = {it.get("n") for it in items if it.get("candidate_id") is None}
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
-        if c.get("posted") is True or c.get("terminal") is True or c.get("approved") is True:
+        # Only awaiting_review rows become cards. This also skips post_failed
+        # rows (decided-but-failed is settled per the docstring above).
+        if candidate_state(c) != "awaiting_review":
             continue
         cid = c.get("candidate_id")
         if cid is not None and cid in settled_ids:
