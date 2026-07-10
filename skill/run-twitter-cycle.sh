@@ -1840,6 +1840,14 @@ else
     TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
 fi
 
+# --- Cross-cycle self-memory (anti-repetition) ------------------------------
+# 2026-07-10: the prep session never used to see this account's own recent
+# replies across threads (author_history_block is per-author only), so it
+# recycled the same openers and sentence skeletons cycle after cycle. This
+# block is NEGATIVE context, rendered with explicit do-not-imitate rules by
+# recent_self_posts.py. Empty string on any failure; never blocks the cycle.
+RECENT_SELF_BLOCK=$(python3 "$REPO_DIR/scripts/recent_self_posts.py" --platform twitter --limit 20 2>/dev/null || echo "")
+
 # --- Generation trace -------------------------------------------------------
 # Snapshot the few-shot context this cycle will feed to Claude — top_performers
 # report, top_queries from Phase 1, supply signal, dud queries — and write to a
@@ -2041,6 +2049,8 @@ All project configs: $ALL_PROJECTS_JSON
 The feedback reports below carry a per-style exemplar only; project winners are no longer bulk-injected. AFTER you have decided which project a candidate's draft is for, you MAY pull that project's own recent winners (last 30 days, ranked by real click rate) when you are unsure how this product converts in replies:
    python3 $REPO_DIR/scripts/top_performers.py --platform twitter --project 'PROJECT_NAME' --top 3 --brief
 (PROJECT_NAME exactly as it appears in the candidate's 'Project match' / config.json.) Treat the results as evidence of which CLAIMS and ANGLES landed for that product, never as structural templates: do not copy their sentence shape, opener, or pivot wording. One call per project at most; skip the call entirely for projects you already queried this session.
+
+$RECENT_SELF_BLOCK
 
 ## DRAFT A: assigned style + feedback from past performance
 $TOP_REPORT
