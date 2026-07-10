@@ -385,9 +385,15 @@ GROUNDING_INSTRUCTIONS = (
     "capitalization habits, emoji/punctuation usage, and recurring phrases or tics. "
     "Write the `voice` field so a reply drafted with it would be indistinguishable "
     "from something they'd actually type.\n"
-    "3. GOLDEN-RULE EXAMPLES: pick 2-4 of their strongest real replies/posts "
-    "verbatim and keep them as exemplars (these become few-shot anchors). Choose "
-    "ones that show the target reply behavior: helpful, specific, in-voice.\n"
+    "3. GOLDEN-RULE EXAMPLES: `top_replies` and `top_posts` are already ranked by "
+    "REAL engagement (each entry carries likes/retweets/replies, engagement_score, "
+    "the parent tweet it replied to, and thread continuations). From them keep up "
+    "to 5 replies verbatim as exemplars, skipping throwaway one-liners that show "
+    "no voice; on small accounts engagement is sparse, so judge voice quality too. "
+    "STORE them in the project's `voice.examples` (every drafter on every platform "
+    "mirrors that field), or run "
+    "`voice_exemplars.py apply --scan <scan.json> --project <name>` to write "
+    "voice.examples + the persona_corpus.txt exemplar section deterministically.\n"
     "4. PHRASE BANK: list the kinds of phrases / openers / sign-offs they reuse, "
     "and any words/claims they clearly AVOID (for `content_guardrails`).\n"
     "5. ICP: infer who they engage with (who they reply to, what communities) to "
@@ -405,6 +411,10 @@ def main() -> int:
     ap.add_argument("--handle", default=None, help="@handle to scan (default: live logged-in handle)")
     ap.add_argument("--posts", type=int, default=20, help="max original posts to collect")
     ap.add_argument("--comments", type=int, default=50, help="max replies/comments to collect")
+    ap.add_argument("--top", type=int, default=5, help="how many top posts/replies to rank")
+    ap.add_argument("--expand-threads", type=int, default=3,
+                    help="visit this many top posts' permalinks to capture thread "
+                         "continuations + full text (0 = off)")
     args = ap.parse_args()
 
     if create_connection is None:
@@ -445,9 +455,22 @@ def main() -> int:
         on_replies = _navigate(send, f"https://x.com/{handle}/with_replies",
                                settle=4.0, expect=f"/{handle}/with_replies")
         comments = (
-            scrape_timeline(send, handle, args.comments, exclude_ids=post_ids)
+            scrape_timeline(send, handle, args.comments, exclude_ids=post_ids,
+                            capture_parents=True)
             if on_replies else []
         )
+
+        # 4. Rank both surfaces by real engagement, then expand the top posts'
+        #    permalinks to capture thread continuations (and untruncated text).
+        top_posts = rank_top(posts, args.top)
+        top_replies = rank_top(comments, args.top)
+        for tp in top_posts[:max(args.expand_threads, 0)]:
+            parts = expand_thread(send, handle, tp.get("url") or "")
+            if parts:
+                if len(parts[0]) > len(tp.get("text") or ""):
+                    tp["text"] = parts[0]  # permalink text is never truncated
+                if len(parts) > 1:
+                    tp["thread"] = parts
 
         result = {
             "ok": True,
@@ -456,6 +479,8 @@ def main() -> int:
             "profile": profile,
             "posts": posts,
             "comments": comments,
+            "top_posts": top_posts,
+            "top_replies": top_replies,
             "counts": {"posts": len(posts), "comments": len(comments)},
             "grounding_instructions": GROUNDING_INSTRUCTIONS,
         }
