@@ -569,9 +569,15 @@ export interface ProjectStatus {
 }
 
 export function projectStatus(name: string): ProjectStatus {
-  const missing = missingForProject(name);
+  // The persona lane (persona:true) has no website/icp by design — validate it
+  // against PERSONA_REQUIRED_FIELDS like every other status surface, or an
+  // explicit request for it (e.g. get_stats project:'PersonalBrand') gets the
+  // misleading "still needs: website, icp" refusal.
+  const persona = findPersonaProject()?.name === name;
+  const required = persona ? PERSONA_REQUIRED_FIELDS : REQUIRED_FIELDS;
+  const missing = missingForProject(name, required);
   if (missing === null) {
-    return { name, in_config: false, ready: false, missing_required: [...REQUIRED_FIELDS] };
+    return { name, in_config: false, ready: false, missing_required: [...required] };
   }
   return { name, in_config: true, ready: missing.length === 0, missing_required: missing };
 }
