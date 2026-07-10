@@ -143,10 +143,15 @@ except Exception:
 # button is just absent) because the traffic lights are only hidden when the
 # accessory actually mounted.
 try:
-    from AppKit import NSTitlebarAccessoryViewController, NSLayoutAttributeLeft
+    from AppKit import (
+        NSTitlebarAccessoryViewController,
+        NSLayoutAttributeLeft,
+        NSLayoutAttributeRight,
+    )
 except Exception:
     NSTitlebarAccessoryViewController = None
     NSLayoutAttributeLeft = None
+    NSLayoutAttributeRight = None
 try:
     from AppKit import (
         NSWindowCloseButton,
