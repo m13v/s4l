@@ -661,13 +661,21 @@ def _editable_scroll(frame, text=""):
 
 
 class _ReviewController(NSObject):
-    def initWithDrafts_onDecision_onComplete_(self, drafts, on_decision, on_complete):
+    def initWithDrafts_onDecision_onComplete_focus_(
+        self, drafts, on_decision, on_complete, focus
+    ):
         self = objc.super(_ReviewController, self).init()
         if self is None:
             return None
         self._drafts = list(drafts)
         self._on_decision = on_decision
         self._on_complete = on_complete
+        # focus=True only for a USER-initiated open (the menu bar's "Review N
+        # pending drafts"): activate the app and seat the caret in the reply
+        # field. Auto-presented cards (the timer tick) must appear without
+        # taking keyboard focus from whatever the user is doing.
+        self._focus = bool(focus)
+        self._close_reason = None  # "snooze" when the title-bar button closed us
         self._idx = 0
         self._decisions = []
         self._panel = None
@@ -811,26 +819,35 @@ class _ReviewController(NSObject):
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
             | NSWindowStyleMaskUtilityWindow
+            | NSWindowStyleMaskNonactivatingPanel
         )
         panel = _ReviewPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, NSBackingStoreBuffered, False
         )
         panel.setLevel_(NSFloatingWindowLevel)
         panel.setFloatingPanel_(True)
-        panel.setBecomesKeyOnlyIfNeeded_(False)  # let the reply field be edited
+        # Key only when a text field is clicked: buttons (Approve/Reject) work
+        # without ever taking keyboard focus, and clicking into the reply field
+        # makes this nonactivating panel key without activating the app, so
+        # the user's frontmost app keeps its state. The old False + activate-
+        # on-present combination stole the keyboard mid-typing (2026-07-09
+        # customer complaint).
+        panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setHidesOnDeactivate_(False)
         panel.setReleasedWhenClosed_(False)
         panel.setDelegate_(self)
+        self._add_snooze_accessory(panel)
         self._panel = panel
         self._render()
-        panel.makeKeyAndOrderFront_(None)
         panel.orderFrontRegardless()
         self._log_surface("presented")
-        self.focusReply_(None)
-        # App activation/key-window promotion lands on the run loop; do one
-        # deferred pass so the first card is editable even when opened from the
-        # status-bar timer while another app is frontmost.
-        self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
+        if self._focus:
+            # User asked for the cards (menu item): behave like a normal open,
+            # activate and put the caret in the reply field. Deferred second
+            # pass because activation/key promotion lands on the run loop.
+            panel.makeKeyAndOrderFront_(None)
+            self.focusReply_(None)
+            self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
 
     def focusReply_(self, sender):
         panel = self._panel
@@ -860,6 +877,52 @@ class _ReviewController(NSObject):
             panel.makeFirstResponder_(tv)
         except Exception:
             pass
+
+    @objc.python_method
+    def _add_snooze_accessory(self, panel):
+        """"Snooze 1h" in the title bar, opposite the close cross: the explicit
+        "not now" affordance. It just closes the panel; the menu bar treats any
+        close with undecided drafts as a snooze, so the cross and this button
+        are the same action, this one merely says so out loud."""
+        if NSTitlebarAccessoryViewController is None or NSLayoutAttributeRight is None:
+            return
+        try:
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 17))
+            btn.setTitle_(_snooze_title())
+            if NSBezelStyleInline is not None:
+                btn.setBezelStyle_(NSBezelStyleInline)
+            else:
+                btn.setBezelStyle_(NSBezelStyleRounded)
+            btn.setFont_(NSFont.systemFontOfSize_(10.0))
+            btn.setToolTip_(
+                "Put these drafts away for now. They stay pending and the "
+                "card comes back later (or sooner from the S4L menu)."
+            )
+            btn.setTarget_(self)
+            btn.setAction_("snoozeClicked:")
+            btn.sizeToFit()
+            bf = btn.frame()
+            holder = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, bf.size.width + 8, max(19, bf.size.height + 2))
+            )
+            btn.setFrameOrigin_(
+                (4, max(0, (holder.frame().size.height - bf.size.height) / 2.0))
+            )
+            holder.addSubview_(btn)
+            acc = NSTitlebarAccessoryViewController.alloc().init()
+            acc.setView_(holder)
+            acc.setLayoutAttribute_(NSLayoutAttributeRight)
+            panel.addTitlebarAccessoryViewController_(acc)
+        except Exception as e:
+            _log(f"snooze accessory unavailable: {e}")
+
+    def snoozeClicked_(self, sender):
+        self._track("snooze")
+        self._close_reason = "snooze"
+        try:
+            self._panel.performClose_(None)
+        except Exception:
+            self._finish()
 
     @objc.python_method
     def _eye_button(self, frame, kind):
