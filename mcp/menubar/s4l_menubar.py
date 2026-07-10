@@ -2941,6 +2941,13 @@ class S4LMenuBar(rumps.App):
                     # posts); English translations on the card are display-only
                     # and never shipped here.
                     "language": decision.get("language"),
+                    # Two-draft pairwise context (None on single-draft cards):
+                    # {variant, index, auto_selected, style, unchosen_text,
+                    # unchosen_style, hover_a_ms, hover_b_ms}. Lets the
+                    # feedback digest learn "picked B over A" / "kept A after
+                    # actually reading B" as preference pairs. Older servers
+                    # simply ignore the key.
+                    "draft_choice": decision.get("draft_choice"),
                 }
             )
         except Exception:
