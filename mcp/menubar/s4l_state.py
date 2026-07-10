@@ -786,6 +786,10 @@ def store_stamp_decision(batch, decision):
             "drop_link": bool(decision.get("drop_link")),
             "loved": bool(decision.get("loved")),
             "reject_category": decision.get("reject_category"),
+            # Two-draft pairwise record (chosen vs unchosen + hover dwell),
+            # None on single-draft cards. Durable locally so the choice
+            # survives even if the review-events flush never lands.
+            "draft_choice": decision.get("draft_choice"),
             "decided_at": time_iso(),
         }
         if decision.get("approved"):
