@@ -74,10 +74,17 @@ def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
 
 
 def _eligible_pool(config, platform=None, exclude=None):
-    """Projects eligible for selection: enabled, weight>0, platform-compatible."""
+    """Projects eligible for selection: enabled, weight>0, non-persona,
+    platform-compatible.
+
+    Persona entries (`persona: true`) are structurally excluded: they run ONLY
+    via the personal_brand lane's force-inject (s4l_mode.persona_name), never
+    via this promotion lottery, regardless of their `enabled` flag.
+    """
     pool = [
         p for p in config.get("projects", [])
         if p.get("enabled", True) and p.get("weight", 0) > 0
+        and p.get("persona") is not True
     ]
     if exclude:
         excluded = {n.lower() for n in exclude}
@@ -122,8 +129,10 @@ def pick_project(config, platform=None, exclude=None):
         return picks[0]
     if exclude:
         return None
-    # No eligible project at all: legacy fallback to any project in config.
-    projects = config.get("projects", [])
+    # No eligible project at all: legacy fallback to any non-persona project.
+    projects = [
+        p for p in config.get("projects", []) if p.get("persona") is not True
+    ]
     return random.choice(projects) if projects else None
 
 
