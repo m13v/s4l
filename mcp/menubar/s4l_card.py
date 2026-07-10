@@ -884,12 +884,13 @@ class _ReviewController(NSObject):
             # Bezeled, not borderless: bare emoji read as decoration and
             # users doubted the click registered (2026-07-03/04 feedback,
             # twice now — the outline is what says "button").
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, H - 42, 44, 30))
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, H - 42, 38, 30))
             btn.setTitle_(emoji)
             btn.setBezelStyle_(NSBezelStyleRounded)
-            # 13pt = the size Reject's title renders at; anything bigger
-            # overflows the rounded bezel's ~22px content lane (16pt did).
-            btn.setFont_(NSFont.systemFontOfSize_(13))
+            # 16pt fits the rounded bezel's ~22px content lane for these
+            # text-presentation glyphs (the old color emoji clipped at 16pt,
+            # which is why this used to be 13pt).
+            btn.setFont_(NSFont.systemFontOfSize_(16))
             btn.setTag_(i + 1)  # tag = approval level
             btn.setTarget_(self)
             btn.setAction_("approve:")
