@@ -1223,7 +1223,12 @@ async function postApproved(batchId: string, plan: Plan) {
         "scripts/twitter_post_plan.py",
         ["--plan", planPath(approvedBatch)],
         {
-          timeoutMs: 900_000,
+          // Scale with batch size: a mass-approval drain runs ~15-20s per card,
+          // so a fixed 15min ceiling SIGTERMed any batch over ~50 cards mid-post
+          // (Karol 2026-07-09: 0/131 posted, exit=-1). 60s/card headroom covers
+          // slow candidates; the 2h cap bounds a hung poster (the browser-lock
+          // expiry and per-reply subprocess timeouts still fire underneath).
+          timeoutMs: Math.min(7_200_000, Math.max(900_000, approved.length * 60_000)),
           env: ({
             S4L_SKIP_CAMPAIGN_SUFFIX: "1",
             // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
