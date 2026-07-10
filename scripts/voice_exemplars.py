@@ -341,13 +341,16 @@ def cmd_backfill(args) -> int:
     if time.time() - last < args.min_hours_between * 3600:
         print(json.dumps({"ok": True, "did": "nothing", "reason": "attempted_recently"}))
         return 0
-    marker.write_text(json.dumps({"last_attempt": int(time.time())}) + "\n")
 
     if not args.no_scan:
         lock = _try_browser_lock()
         if lock is None:
+            # No marker on a busy bail: it cost nothing, and on active installs
+            # the kicker often has a cycle holding the browser right at boot,
+            # so consuming the cooldown here would starve the backfill forever.
             print(json.dumps({"ok": True, "did": "nothing", "reason": "browser_busy"}))
             return 0
+        marker.write_text(json.dumps({"last_attempt": int(time.time())}) + "\n")
         try:
             py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
             r = subprocess.run([py, str(HERE / "scan_x_profile.py")],
