@@ -1891,7 +1891,10 @@ class _ReviewController(NSObject):
 
     def windowShouldClose_(self, sender):
         # Closing the window stops review; remaining cards are left undecided
-        # (not posted). Finish with whatever was decided so far.
+        # (not posted). Finish with whatever was decided so far. The menu bar
+        # treats a close with undecided drafts as SNOOZE (they re-present after
+        # REVIEW_SNOOZE_SECONDS, or sooner via the menu), whether it came from
+        # the cross or the title-bar Snooze button.
         self._finish()
         return True
 
@@ -1913,11 +1916,12 @@ class _ReviewController(NSObject):
             except Exception:
                 pass
         _active = None
-        _log(f"closed: {len(self._decisions)} decided of {len(self._drafts)}")
-        _write_review_state(last_event="closed")
+        reason = self._close_reason or "closed"
+        _log(f"closed: {len(self._decisions)} decided of {len(self._drafts)} ({reason})")
+        _write_review_state(last_event="snoozed" if reason == "snooze" else "closed")
 
 
-def present_review(drafts, on_decision=None, on_complete=None):
+def present_review(drafts, on_decision=None, on_complete=None, focus=False):
     """Show the review cards (main thread only). drafts: list of
     {n, thread_author, thread_text, reply_text, link_url, thread_url?, stats?}
     where stats is the discovery-time candidate snapshot
@@ -1939,14 +1943,17 @@ def present_review(drafts, on_decision=None, on_complete=None):
     active experiment/scenario arm.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
-    finishes the last card or closes the window. Both run on the main thread."""
+    finishes the last card or closes the window. Both run on the main thread.
+    focus=True (user-initiated open, e.g. the menu bar's "Review N pending
+    drafts") activates the app and seats the caret in the reply field; the
+    default False shows the card without taking keyboard focus."""
     global _active
     if not drafts:
         if on_complete is not None:
             on_complete([])
         return
-    _active = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_(
-        drafts, on_decision, on_complete
+    _active = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_focus_(
+        drafts, on_decision, on_complete, focus
     )
 
 
@@ -2054,6 +2061,20 @@ def heal_active():
         )
         panel.orderFrontRegardless()
         c._log_surface("healed")
+        return True
+    except Exception:
+        return False
+
+
+def focus_active():
+    """Bring the open card to the user deliberately (menu 'Review pending
+    drafts' while a card is already up): activate + caret in the reply field.
+    Main thread only. Returns True if a card was focused."""
+    c = _active
+    if c is None or c._panel is None:
+        return False
+    try:
+        c.focusReply_(None)
         return True
     except Exception:
         return False
