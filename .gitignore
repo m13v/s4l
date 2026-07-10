@@ -191,3 +191,4 @@ scripts/*.csv
 # Operator-only PII denylist consumed by the pre-commit scanner (see scripts/git-hooks/)
 pii_denylist.local.txt
 config.json.lock
+.voice_exemplars_backfill.json
