@@ -388,15 +388,17 @@ def format_report(summary, top, bottom, project=None, platform=None,
     # Projects with zero total_clicks across many posts are the canaries
     # for "this product/voice combination isn't landing" (the 'General'
     # bucket in the 7d audit on 2026-05-12: 56 posts, 0 clicks).
-    lines.append("### Posts per Project per Platform")
-    for row in summary:
-        lines.append(
-            f"  {row[0]:<20} {row[1]:<12} {row[2]:>5} posts  "
-            f"avg_clicks={row[5]}  avg_cm={row[4]}  avg_up={row[3]}  "
-            f"best_clicks={row[8]}  best_cm={row[7]}  best_up={row[6]}  "
-            f"total_clicks={row[9]}"
-        )
-    lines.append("")
+    # Empty summary (--no-project-sections) skips the section entirely.
+    if summary:
+        lines.append("### Posts per Project per Platform")
+        for row in summary:
+            lines.append(
+                f"  {row[0]:<20} {row[1]:<12} {row[2]:>5} posts  "
+                f"avg_clicks={row[5]}  avg_cm={row[4]}  avg_up={row[3]}  "
+                f"best_clicks={row[8]}  best_cm={row[7]}  best_up={row[6]}  "
+                f"total_clicks={row[9]}"
+            )
+        lines.append("")
 
     # Per-project top performers (when no project filter)
     if top_by_group:
@@ -540,6 +542,15 @@ def main():
                               "the few-shot exemplar section shows only the matching "
                               "high-scoring posts instead of every style. Summary, "
                               "fallback_top, and top_by_group are not affected."))
+    parser.add_argument("--no-project-sections", action="store_true",
+                        help=("Omit the per-project summary table and the Top "
+                              "Posts by Project section from the report. Added "
+                              "2026-07-10 for the cycle orchestrators: the full "
+                              "multi-project winner corpus is no longer bulk-"
+                              "injected into every draft prompt (it homogenized "
+                              "drafts). Instead the drafting session queries "
+                              "`--project <name> --top 3` on demand AFTER it "
+                              "has routed a candidate to a project."))
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
@@ -556,6 +567,16 @@ def main():
             row for row in top_by_style
             if row and len(row) > 12 and row[12] in wanted
         ]
+
+    if args.no_project_sections:
+        summary = []
+        top_by_group = None
+        # Also drop the flat top-posts list: with top_by_group gone,
+        # format_report's `elif top:` branch would otherwise render a
+        # platform-wide "Top N Posts" block, which is the same shared
+        # winner corpus under a different header.
+        top = []
+        fallback_top = None
 
     if args.json:
         output = {
