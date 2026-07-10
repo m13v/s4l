@@ -1824,15 +1824,20 @@ if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
     DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The persona's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 
+# 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
+# winner corpus (~400 lines of "Top Posts by Project" + summary table) that
+# used to ride along in EVERY draft prompt and homogenize drafts. The prep
+# session now queries per-project winners on demand AFTER routing a
+# candidate (see PROJECT TOP PERFORMERS section in PREP_PROMPT below).
 if [ -n "$PICKED_STYLE" ]; then
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
+    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
 else
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
 fi
 if [ -n "$PICKED_STYLE_B" ]; then
-    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE_B" 2>/dev/null || echo "(top performers report unavailable)")
+    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE_B" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
 else
-    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
 fi
 
 # --- Generation trace -------------------------------------------------------
@@ -2031,6 +2036,11 @@ $CORPUS_BLOCK
 ## PROJECT ROUTING (per-candidate)
 Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
 All project configs: $ALL_PROJECTS_JSON
+
+## PROJECT TOP PERFORMERS (query on demand, do NOT skip routing first)
+The feedback reports below carry a per-style exemplar only; project winners are no longer bulk-injected. AFTER you have decided which project a candidate's draft is for, you MAY pull that project's own recent winners (last 30 days, ranked by real click rate) when you are unsure how this product converts in replies:
+   python3 $REPO_DIR/scripts/top_performers.py --platform twitter --project 'PROJECT_NAME' --top 3 --brief
+(PROJECT_NAME exactly as it appears in the candidate's 'Project match' / config.json.) Treat the results as evidence of which CLAIMS and ANGLES landed for that product, never as structural templates: do not copy their sentence shape, opener, or pivot wording. One call per project at most; skip the call entirely for projects you already queried this session.
 
 ## DRAFT A: assigned style + feedback from past performance
 $TOP_REPORT
