@@ -165,6 +165,38 @@ def _loop():
             pass
 
 
+def emit(line, context="menubar"):
+    """Buffer ONE structured line for the relay under a caller-chosen context
+    (e.g. "browser-foreground"), and mirror it to the real stderr so the local
+    menubar.err.log keeps a copy. Bypasses the _Tee so the line is not ALSO
+    buffered under the default "menubar" context. Best-effort; never raises."""
+    try:
+        t = str(line).strip()
+        if not t or _BASE64_BLOB_RE.match(t):
+            return
+        real = sys.stderr._real if isinstance(sys.stderr, _Tee) else sys.stderr
+        try:
+            real.write(t + "\n")
+            real.flush()
+        except Exception:
+            pass
+        if not ENABLED:
+            return
+        with _lock:
+            _buf.append(
+                {
+                    "ts": _now_iso(),
+                    "stream": "stdout",
+                    "line": t[:MAX_LINE_LEN],
+                    "context": str(context or "menubar")[:200],
+                }
+            )
+            if len(_buf) > MAX_BUFFER:
+                del _buf[: len(_buf) - MAX_BUFFER]
+    except Exception:
+        pass
+
+
 def install():
     """Wrap sys.stderr with the relay tee and start the background flusher.
     Call once at menubar boot, after the S4L_REPO_DIR sys.path insertion."""
