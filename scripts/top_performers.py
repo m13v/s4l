@@ -427,6 +427,16 @@ def format_report(summary, top, bottom, project=None, platform=None,
         for p in fallback_top:
             lines.append(format_post(p, suffix_strip_list=suffix_strip_list))
             lines.append("")
+    elif project:
+        # Project filter given, nothing qualified, and no fallback rows
+        # either (or the caller suppressed them). Say so explicitly so the
+        # on-demand --brief caller sees a definitive answer, not a bare
+        # header it might re-query.
+        lines.append(
+            f"### No {project} posts meeting {threshold_label} in the recency window. "
+            "Draft from the thread and the project's config voice; there is no winner to ground on."
+        )
+        lines.append("")
 
     # Bottom posts with failure annotations
     if bottom:
