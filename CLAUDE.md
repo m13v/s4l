@@ -293,30 +293,6 @@ therefore KEEPS `draft_prompt` for `lane=personal_brand` (it used to drop it, ba
 when the persona directive overrode both arms wholesale), so the arm stamps onto
 persona review cards and the per-arm readout covers both lanes.
 
-## Review queue = append-forever ledger; get_stats scope (2026-07-10)
-
-Two misread-prone surfaces, both burned a debugging session on 2026-07-10:
-
-**review-queue.json is an APPEND-FOREVER LEDGER, not a work queue.** Handled
-candidates are never removed; they are flag-stamped in place. "Not posted" is
-NOT "awaiting review"; in an old queue most rows are retired (terminal +
-terminal_reason, post_failed, approved). NEVER compute pending as
-`len([c for c in candidates if not c.get("posted")])`; on a healthy install
-that reads as a huge fake backlog. The canonical classifier is
-`mcp/menubar/s4l_state.py::candidate_state()` (posted > terminal > post_failed
-> approved > awaiting_review); the honest card count is its `awaiting_review`
-bucket, which review-request.json's `.count` mirrors at merge time.
-
-**get_stats covers ALL lanes by default (since 2026-07-10).** It reports every
-configured lane including the personal-brand persona when no `project` is
-passed; `projectStatus()` in mcp/src/setup.ts is persona-aware (validates the
-persona against PERSONA_REQUIRED_FIELDS, never website/icp). Before this,
-no-arg get_stats silently resolved to the single ready product and the persona
-lane (often ~90% of activity, `personal_brand_share`) was structurally
-invisible: "zero posts in stats" while the box posted fine. If stats ever look
-empty, check WHICH lane the numbers are scoped to before concluding posting is
-broken.
-
 ## Debugging a customer install (READ THIS FIRST when a customer reports "S4L not working")
 
 Everything below is queryable from this machine, no SSH to the customer. Canonical playbook; the project memories reference this section instead of duplicating it.
