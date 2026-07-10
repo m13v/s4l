@@ -1338,9 +1338,15 @@ class _ReviewController(NSObject):
         )
         # setContentView_ rebuilds the view tree, so the caret would otherwise
         # default to the Approve button. Re-seat it in the reply field for every
-        # card (not just the first) so each one is immediately editable.
-        self._panel.makeFirstResponder_(tv)
-        self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
+        # card the user is ACTIVELY reviewing (they opened the stack from the
+        # menu, or already decided/touched something), so each one is
+        # immediately editable. NOT on the initial auto-presented render:
+        # focusReply_ activates the app, and yanking the caret out of whatever
+        # the user was typing was the 2026-07-09 "too distracting" complaint.
+        # An untouched card's field becomes editable on first click instead.
+        if self._focus or self._decisions or self._last_interaction_at is not None:
+            self._panel.makeFirstResponder_(tv)
+            self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
 
     @objc.python_method
     def _close_stats_popover(self):
