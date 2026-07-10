@@ -2335,34 +2335,38 @@ class S4LMenuBar(rumps.App):
         blocker = (ob or {}).get("current_blocker")
         blocker_code = (blocker or {}).get("code")
         # --- Autopilot health (only meaningful once setup is complete) --------
-        # SINGLE signal: is the draft schedule registered AND firing for the live
-        # account (schedule_state)? 'ok' = the host is running the tasks -> healthy,
-        # NO warning (even if no draft has drained yet — that's just an empty queue
-        # between cycles, not a setup problem). 'missing'/'disabled' = not running
-        # for this account -> show re-arm. We deliberately do NOT drive the menu off
-        # the drain-status latch anymore: it stayed stale after recovery and made a
-        # firing, healthy autopilot look "not set up".
+        # TWO layers (2026-07-09 redesign):
+        #   STRUCTURAL (schedule_state): 'missing'/'disabled' = the schedule is
+        #     genuinely not registered/enabled for this account -> ⚠ + re-arm.
+        #   JOB LATENCY (_autopilot_stalled + the draft_stuck label check below):
+        #     a draft job sat unclaimed, wedged mid-run, or the producer's drain
+        #     latch tripped -> ⚠, because THAT is user-visible harm.
+        # Tick freshness ('stalled': task present + enabled but lastRunAt stale,
+        # the Desktop warm-session wedge) is DIAGNOSTIC ONLY, never the ⚠: under
+        # the wedge the per-minute tick can skip 70-90% of fires while the queue
+        # still drains every job (jobs arrive ~every 8 min vs 60 fires/hr), so
+        # lastRunAt staleness flip-flopped the icon against a healthy pipeline
+        # (observed on the operator box 2026-07-09: 83% ticks skipped, ~14
+        # posts/hr flowing, icon oscillating). _build_menu renders 'stalled' as
+        # a plain "scheduler degraded" detail line with tick_stats() numbers.
+        # The drain latch IS safe to alarm on now: claude_job._mark_drain_success
+        # zeroes it on every successful consume, so it self-clears (the old
+        # stayed-stale-after-recovery latch this comment used to warn about
+        # predates that reset).
         # Always read the REAL schedule state (no setup-gated "ok" fallback that
         # lied). The re-arm WARNING still only fires once setup is complete, so we
         # never nag the user mid-onboarding — only the value is now always honest.
         schedule_state = self._schedule_state()
         self._schedule_state_cache = schedule_state
-        # 'stalled' (task present + enabled FOR THE ACTIVE ACCOUNT, host
-        # scheduler stopped launching it: the Desktop warm-session wedge,
-        # Karol 2026-07-06) needs attention just like missing/disabled.
-        # schedule_state.py is account-scoped (2026-07-08): an account switch
-        # now correctly resolves to 'missing' (the active account genuinely
-        # has no registration), not 'stalled' — a stale OTHER account's
-        # registry is never consulted for the active account's health, so
-        # 'stalled' can no longer be misdiagnosed here.
-        attention = setup_complete and schedule_state in ("missing", "disabled", "stalled")
+        attention = setup_complete and schedule_state in ("missing", "disabled")
         # Routines-lane rate limit (429): the draft tasks ARE registered and firing
         # for this account, but every run dies on a Claude rate limit, so nothing
         # drafts. Re-arm can't fix that — surface it as its own ⚠ attention state
-        # with a "rate-limited" reason. Only meaningful when the schedule is firing
-        # ('ok'); the missing/disabled case already owns the ⚠. Throttled (~30s):
-        # scanning the worker-transcript bucket is glob-heavy and changes slowly.
-        if setup_complete and schedule_state == "ok":
+        # with a "rate-limited" reason. Meaningful whenever the schedule exists
+        # ('ok' or the degraded-but-firing 'stalled'); the missing/disabled case
+        # already owns the ⚠. Throttled (~30s): scanning the worker-transcript
+        # bucket is glob-heavy and changes slowly.
+        if setup_complete and schedule_state in ("ok", "stalled"):
             now_rl = time.time()
             if now_rl - getattr(self, "_rl_checked_at", 0.0) >= 30:
                 self._rl_checked_at = now_rl
@@ -2386,12 +2390,10 @@ class S4LMenuBar(rumps.App):
         # draft_stuck shadowed the missing/disabled branch in _build_menu — the user
         # saw "worker keeps getting killed" with NO Re-arm button instead of "Draft
         # tasks aren't scheduled on this account" + the one-click fix (Karol,
-        # 2026-07-06). "stalled" is deliberately included (2026-07-08): that
-        # branch's fix (Set up draft schedule / re-arm) works for it too, but a
-        # job that has sat this long — claimed-and-hung, OR never claimed at all
-        # (see the ⧖ prefix check below) — is more specific, direct evidence
-        # from the queue itself than the host's lastRunAt staleness, so it's
-        # worth surfacing as its own reason even under "stalled".
+        # 2026-07-06). "stalled" is deliberately included (2026-07-08): a job that
+        # has sat this long — claimed-and-hung, OR never claimed at all (see the ⧖
+        # prefix check below) — is direct evidence from the queue itself, exactly
+        # the layer the ⚠ keys off now that tick staleness alone is diagnostic.
         if (
             setup_complete
             and schedule_state in ("ok", "stalled")
@@ -2405,6 +2407,39 @@ class S4LMenuBar(rumps.App):
             ):
                 attention = True
                 self._stall_reason_info = ("draft_stuck", _act.get("label") or "")
+        # Queue-latency stall (the layer that measures actual user harm): a draft
+        # job sat unclaimed past AUTOPILOT_STALL_SECONDS, wedged in running/ past
+        # AUTOPILOT_RUNNING_STALL_SECONDS, or the producer's drain latch tripped
+        # (consecutive timeouts, zeroed on every successful consume). The activity-
+        # label draft_stuck check above needs a live producer narrating "drafting";
+        # this one works between cycles too (the latch persists the episode), so
+        # together they cover producer-alive and producer-gone stalls. Reason
+        # refines the one-click fix: 'orphaned' (no routine executed recently,
+        # re-arm helps) vs 'failing' (routines run but drafts die, Diagnose).
+        if (
+            setup_complete
+            and not attention
+            and schedule_state in ("ok", "stalled")
+            and self._stall_reason_info[0] not in ("rate_limited", "draft_stuck")
+            and self._autopilot_stalled()
+        ):
+            _qreason, _qmsg = self._stall_reason()
+            attention = True
+            self._stall_reason_info = (_qreason, _qmsg)
+        # Tick-freshness diagnostics for the non-alarm "scheduler degraded" menu
+        # line. Only computed while 'stalled' (it reads + parses the registry
+        # JSON, which can be hundreds of KB) and throttled to once a minute.
+        if schedule_state == "stalled":
+            _now_ts = time.time()
+            if _now_ts - getattr(self, "_tick_stats_at", 0.0) >= 60:
+                self._tick_stats_at = _now_ts
+                try:
+                    import schedule_state as _ss
+                    self._tick_stats = _ss.tick_stats()
+                except Exception:
+                    self._tick_stats = None
+        else:
+            self._tick_stats = None
         # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
         self._stalled = attention
 
