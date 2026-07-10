@@ -43,11 +43,58 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _neuter_stream(stream) -> None:
+    """Point a dead pipe's fd at /dev/null so later writes (including the
+    interpreter-shutdown flush) can't raise BrokenPipeError again."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stream.fileno())
+        os.close(devnull)
+    except Exception:
+        pass
+
+
+_builtin_print = print
+
+
+def print(*args, **kwargs):  # noqa: A001 -- deliberate builtins.print shadow
+    # When the parent (cycle shell tree or MCP server) is killed mid-batch, our
+    # stdout/stderr pipes close and the next print raises BrokenPipeError. The
+    # old behavior unwound through excepthook (Sentry S4L-8), killing the batch
+    # BETWEEN posting a reply and recording it — which is how live tweets ended
+    # up unlogged and candidates re-feedable. Output to a dead parent is
+    # worthless; the bookkeeping (log_post, update_candidate, audit JSONL) is
+    # not. Swallow the error, neuter the fds, keep going.
+    try:
+        _builtin_print(*args, **kwargs)
+    except BrokenPipeError:
+        _neuter_stream(sys.stdout)
+        _neuter_stream(sys.stderr)
+
+
+# Graceful SIGTERM: the MCP post_drafts timeout (and anything else that asks
+# nicely before SIGKILL) sends SIGTERM. Dying instantly reopens the same
+# posted-but-unrecorded window as the broken pipe, so instead flag the loop to
+# stop at the next candidate boundary: current candidate finishes its
+# bookkeeping, the summary and audit line still get written, exit stays 0.
+_terminate_requested = False
+
+
+def _on_sigterm(signum, frame):
+    global _terminate_requested
+    _terminate_requested = True
+    print("[post] SIGTERM received; stopping after current candidate", flush=True)
+
+
+signal.signal(signal.SIGTERM, _on_sigterm)
 
 # This pipeline ONLY posts (never scans), so mark every twitter_browser.py reply
 # subprocess it spawns as the high-priority "post" lock role. run_subprocess
@@ -1150,6 +1197,10 @@ def main() -> int:
 
     try:
         for _idx, c in enumerate(candidates, start=1):
+            if _terminate_requested:
+                print(f"[post] stopping early on SIGTERM: {_idx - 1}/{_total} "
+                      f"candidates processed, posted={posted}", flush=True)
+                break
             # Live per-post status for the S4L menu bar. LEAD with `posted` (the
             # REAL count of replies that actually landed), not `_idx` (the loop
             # position). _idx races through already-posted / deleted cards as instant
@@ -1224,6 +1275,22 @@ def main() -> int:
                 "reason": reason or "",
                 "our_url": c.get("our_url") or "",
             })
+            # Per-candidate durable record: the run-level audit at the bottom of
+            # main() is lost if this process is SIGKILLed mid-batch (browser-lock
+            # hijack), leaving no local trace of what already posted. Separate
+            # file from post-results.jsonl on purpose: that one is run-level and
+            # the menu bar/dashboard parse it; don't mix schemas.
+            try:
+                _prog_path = os.path.join(
+                    REPO_DIR, "skill", "logs", "post-candidates.jsonl")
+                with open(_prog_path, "a", encoding="utf-8") as _pf:
+                    _pf.write(json.dumps({
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "plan": plan_path.name,
+                        **candidate_results[-1],
+                    }) + "\n")
+            except Exception:
+                pass
     finally:
         _clear_activity()
         # Release the batch hold so the next scan/post can take the browser
