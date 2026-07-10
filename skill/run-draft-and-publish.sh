@@ -11,9 +11,10 @@
 #     review-queue cards the menu bar shows. Without this merge the cycle's
 #     plan would sit in a /tmp batch file nobody reads.
 #   - draft-only OFF (operator opt-out via `s4l_mode.py draft-only off`,
-#     promotion-lane cycles only): DRAFT_ONLY=0 — the cycle posts its top-1
-#     pick autonomously, gated by the rolling virality bar. Persona cycles
-#     keep making cards either way.
+#     single global switch across EVERY lane as of 2026-07-08): DRAFT_ONLY=0
+#     — the cycle posts its top-1 pick autonomously; promotion additionally
+#     gated by the rolling virality bar. Persona cycles also post
+#     autonomously when the flag is off; they no longer stay draft-only.
 set -uo pipefail
 
 # SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
