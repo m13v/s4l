@@ -117,6 +117,19 @@ try:
 except Exception:
     pass
 
+# Ground-truth browser-foreground telemetry: whenever a MANAGED harness Chrome
+# becomes the frontmost app (fresh-launch activation, screencast bringToFront,
+# macOS clamping the off-screen window back on-screen, anything), ship one
+# structured line with context "browser-foreground" through the relay above.
+# Cause-agnostic OS-level observation; the causing sites (screencast.ts) log
+# their own attribution lines under the same context. Best-effort.
+try:
+    import s4l_browser_foreground  # noqa: E402
+
+    s4l_browser_foreground.install()
+except Exception:
+    pass
+
 
 def _capture(err, **tags):
     """Report a handled menu-bar error to Sentry (component=menubar) without ever
