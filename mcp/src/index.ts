@@ -1635,6 +1635,31 @@ async function seedSearchQueriesForProject(
   }
 }
 
+// After a project save, persist the profile scan's engagement-ranked top
+// replies into that project's voice.examples (and the persona_corpus.txt
+// exemplar section when the project is the persona). Every drafting prompt on
+// every platform already mirrors voice.examples, so this ONE write feeds them
+// all. scripts/voice_exemplars.py reads the last_profile_scan.json sidecar
+// scan_x_profile.py wrote and only quotes the user's own public replies
+// verbatim (mechanical ranking, no synthesis). Best-effort by design: no scan
+// yet, no usable replies, or hand-written voice.examples (exit 3, respected)
+// all return null and never block the save.
+async function applyScannedVoiceExamples(project: string): Promise<string | null> {
+  try {
+    const res = await runPython("scripts/voice_exemplars.py", ["apply", "--project", project], {
+      timeoutMs: 30_000,
+    });
+    const last = res.stdout.trim().split("\n").slice(-1)[0] || "";
+    const parsed = JSON.parse(last) as { ok?: boolean; voice_examples_written?: number };
+    if (parsed.ok && parsed.voice_examples_written) {
+      return `Stored ${parsed.voice_examples_written} of their top-performing real replies (ranked by engagement, with the threads they answered) as voice.examples — every drafter now mirrors them.`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- engagement_mode: choose personal-brand vs product (setup-time) --------
 // Part of onboarding: AFTER X connect + profile_scan, BEFORE product config, the
 // agent asks the user which mode they want and calls this. It persists the mode
@@ -1869,6 +1894,11 @@ tool(
           `Retry engagement_mode action:'set'.`
       );
     }
+
+    // Persist the profile scan's top-performing real replies as the persona's
+    // voice.examples + the persona_corpus.txt exemplar section (best-effort;
+    // see applyScannedVoiceExamples).
+    const personaExemplarNote = await applyScannedVoiceExamples(personaName);
 
     // Seed the persona's topics into the DB universe the cycle reads (best-effort;
     // the cycle's own fail-loud path still reports if topics are missing).
@@ -2403,6 +2433,13 @@ tool(
         });
       }
       const result = applySetup(args as ProjectInput);
+      // Persist the profile scan's engagement-ranked exemplars into this
+      // project's voice.examples (+ the persona corpus section when the target
+      // is the persona). Reads the last_profile_scan.json sidecar the scanner
+      // wrote; verbatim quotes of the user's own public replies, so no
+      // synthesis happens here. Best-effort: no scan yet or hand-written
+      // examples present (exit 3) are both fine, and never block the save.
+      const exemplarNote = await applyScannedVoiceExamples(result.project);
       if (result.persona) {
         // no-op on the onboarding ledger; readiness is reported below as usual.
       } else if (result.ready) {
@@ -2513,6 +2550,7 @@ tool(
         kicker_detail: kickerInstall ? kickerInstall.detail : null,
         fields_set: result.fields_set,
         fields_removed: result.fields_removed,
+        voice_examples: exemplarNote,
         config_path: configPath(),
         onboarding: onboardingSnapshot(),
         note: (result.persona
@@ -2529,7 +2567,8 @@ tool(
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
             `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
-          advancedNote,
+          advancedNote +
+          (exemplarNote ? ` ${exemplarNote}` : ""),
       });
     } catch (e) {
       return textContent(`Setup failed: ${(e as Error).message}`);
