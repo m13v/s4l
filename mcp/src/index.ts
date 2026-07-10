@@ -2683,9 +2683,17 @@ tool(
 
     // Cross-surface de-dup: chat and the menu-bar pop-ups can both approve, so
     // never re-post a candidate the other surface already posted OR ruled out.
+    // Exception: an overridable backend-expiry stamp yields to this explicit
+    // approval (see expiredStampOverridable) — clear it and post.
     const alreadyDone: number[] = [];
     for (const n of Array.from(approve)) {
-      if (candidates[n - 1]?.posted === true || candidates[n - 1]?.terminal === true) {
+      const c = candidates[n - 1];
+      if (c && expiredStampOverridable(c)) {
+        c.terminal = false;
+        delete c.discard_reason;
+        continue;
+      }
+      if (c?.posted === true || c?.terminal === true) {
         approve.delete(n);
         alreadyDone.push(n);
       }
@@ -5430,7 +5438,10 @@ async function drainApprovedBacklog(): Promise<void> {
     const plan = readPlan(REVIEW_QUEUE_ID);
     const cands = (plan?.candidates as PlanCandidate[]) || [];
     const backlog = cands.filter(
-      (c) => c.approved === true && c.posted !== true && c.terminal !== true
+      (c) =>
+        c.approved === true &&
+        c.posted !== true &&
+        (c.terminal !== true || expiredStampOverridable(c))
     );
     if (!backlog.length) return;
     console.error(
