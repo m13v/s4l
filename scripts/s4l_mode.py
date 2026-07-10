@@ -58,14 +58,15 @@ Usage:
     s4l_mode.py split               # print the personal-brand share (0.0-1.0)
     s4l_mode.py split <value>       # set it; accepts 70, 70%, or 0.7
 
-Draft-only (2026-07-06): a third, independent flag in mode.json, DEFAULT ON.
-While ON (the normal state), every cycle stops before posting and its drafts
-become review cards. When an OPERATOR turns it off, run-draft-and-publish.sh
-runs promotion-lane cycles with DRAFT_ONLY=0 so they POST autonomously (the
-rolling virality bar is the quality gate). Persona-lane cycles ALWAYS stay
-draft-only (review cards) regardless. Deliberately NOT exposed on any user
-surface (no MCP tool param, no menubar toggle): this CLI and mode.json are the
-only way to flip it.
+Draft-only (2026-07-06, single global switch as of 2026-07-08): a third,
+independent flag in mode.json, DEFAULT ON. While ON (the normal state), every
+cycle stops before posting and its drafts become review cards. When an
+OPERATOR turns it off, run-draft-and-publish.sh runs EVERY lane (promotion AND
+personal_brand) with DRAFT_ONLY=0 so they POST autonomously (promotion
+additionally runs behind the rolling virality bar). This applies uniformly
+across lanes; persona-lane cycles do NOT stay draft-only when the flag is off.
+Deliberately NOT exposed on any user surface (no MCP tool param, no menubar
+toggle): this CLI and mode.json are the only way to flip it.
 `env` additionally exports S4L_CYCLE_LANE=<lane> for both lanes so the wrapper
 knows which lane this cycle is without re-deriving it.
 
