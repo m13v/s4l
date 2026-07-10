@@ -5761,7 +5761,8 @@ async function main() {
   // the connected X profile and store the top-performing replies as
   // voice.examples + the persona_corpus.txt exemplar section. Additive only
   // (regenerates just its own marked corpus section; respects hand-written
-  // examples) and self-limiting (marker file rate-limits scan attempts; it
+  // examples) and self-limiting (no cooldown by design: success stamps
+  // examples_scanned_at which makes later boots a no-op, and until then it
   // WAITS politely on the twitter-browser lock, polling while holding
   // nothing, until cycles/DM runs free the browser, up to 12h before
   // deferring to the next boot). Delayed so boot-time work (runtime
