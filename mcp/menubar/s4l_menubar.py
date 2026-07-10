@@ -660,6 +660,11 @@ class S4LMenuBar(rumps.App):
         # Cached schedule state for the current account: 'missing'/'disabled'/'ok'/
         # 'unknown'. PRIMARY driver of the menu's attention section.
         self._schedule_state_cache = "ok"
+        # Tick-freshness diagnostics (schedule_state.tick_stats()) shown as the
+        # non-alarm "scheduler degraded" menu line while state == 'stalled'.
+        # None outside that state; refreshed at most once a minute (_tick).
+        self._tick_stats = None
+        self._tick_stats_at = 0.0
         self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
         self._reloc_timer.start()
         self._tick(None)
@@ -2465,7 +2470,7 @@ class S4LMenuBar(rumps.App):
             # Once per episode (gated by _stall_notified), so it never spams.
             _reason = (
                 self._stall_reason_info[0]
-                or (schedule_state if schedule_state in ("disabled", "stalled") else "missing")
+                or ("disabled" if schedule_state == "disabled" else "missing")
             )
             _capture_msg(
                 f"S4L draft autopilot needs attention: {_reason}",
@@ -2497,18 +2502,25 @@ class S4LMenuBar(rumps.App):
                      "A worker claimed a draft job and never finished it. ")
                     + "Open the S4L menu → “Diagnose & fix in Claude…”.",
                 )
+            elif self._stall_reason_info[0] == "orphaned":
+                self._notify(
+                    "S4L drafts not draining",
+                    "Draft jobs are stuck in the queue and no routine has picked "
+                    "them up. Open the S4L menu, then click "
+                    "“Set up draft schedule”.",
+                )
+            elif self._stall_reason_info[0] == "failing":
+                self._notify(
+                    "S4L drafts not draining",
+                    "Draft jobs are stuck in the queue; runs start but never "
+                    "finish. Open the S4L menu, then click "
+                    "“Diagnose & fix in Claude…”.",
+                )
             elif schedule_state == "disabled":
                 self._notify(
                     "S4L draft tasks disabled",
                     "The draft tasks are scheduled but disabled. Open the S4L menu → "
                     "“Set up draft schedule” to re-enable.",
-                )
-            elif schedule_state == "stalled":
-                self._notify(
-                    "S4L drafts stopped",
-                    "Claude’s scheduler stopped running the draft tasks (a known "
-                    "Claude Desktop glitch). Open the S4L menu → “Set up draft "
-                    "schedule” to re-register it.",
                 )
             else:
                 can_selfheal = False
@@ -2577,6 +2589,12 @@ class S4LMenuBar(rumps.App):
             attention,
             schedule_state,
             self._stall_reason_info,
+            # Degraded-scheduler skip count, bucketed by 5 so the diagnostic
+            # line refreshes every few minutes at most (not every poll — an
+            # open menu shouldn't be torn down under the cursor for a +1).
+            ((self._tick_stats or {}).get("skips_in_window", 0) // 5)
+            if self._tick_stats
+            else None,
             os.path.exists(PAUSE_FLAG),
             pending_count,
             # Snooze end (0 = not snoozed): rebuilds the menu when a snooze is
@@ -3264,25 +3282,20 @@ class S4LMenuBar(rumps.App):
                     "   " + (self._stall_reason_info[1] or "drafting") + " — no result yet"
                 ))
                 items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
+            elif self._stall_reason_info[0] == "orphaned":
+                # Queue-latency stall, no routine executing (no recent worker
+                # transcript): draft jobs sit unclaimed. Re-arm re-registers the
+                # schedule through the real create_scheduled_task path, the one
+                # mechanical fix that addresses "nothing is picking jobs up".
+                items.append(self._label("⚠ Draft jobs stuck, no routine picking them up"))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+            elif self._stall_reason_info[0] == "failing":
+                # Queue-latency stall but routines DO execute: runs start and
+                # die before draining. Re-arm can't fix that; Diagnose can.
+                items.append(self._label("⚠ Draft jobs stuck, runs start but don't finish"))
+                items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
             elif schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
-                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
-            elif schedule_state == "stalled":
-                # Task registered + enabled FOR THE ACTIVE ACCOUNT (schedule_state.py
-                # is account-scoped, 2026-07-08 — see its module docstring) but the
-                # host stopped launching it: the Claude Desktop warm-session wedge
-                # (finished worker sessions never exit; the overlap guard skips
-                # every fire). Re-arm goes through the same real create_scheduled_task
-                # path as onboarding — a verified fix the user has seen work —
-                # rather than a silent Claude Desktop quit/relaunch with no visible
-                # feedback, which field evidence (2026-07-08) showed doesn't
-                # reliably clear the underlying stall (that field incident turned
-                # out to be a DIFFERENT bug: schedule_state.py was reading a stale,
-                # no-longer-active account's registry — now fixed, so "stalled"
-                # here means what it says: same account, task present, just not
-                # firing). Distinct label from the "aren't scheduled" case below
-                # since the task DOES exist here; same one-click remedy either way.
-                items.append(self._label("⚠ Drafts stopped — Claude’s scheduler is stuck"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
