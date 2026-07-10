@@ -1059,6 +1059,21 @@ async function ensureTwitterBrowserForPost() {
   );
 }
 
+// A terminal stamp written by merge_review_queue.py's backend sync for a row the
+// freshness gate merely EXPIRED (not posted, not skipped) records "nobody decided
+// this in time" — an explicit human approval outranks it. The poster's own
+// at-post-time tweet_unavailable check remains the real gate on whether the
+// thread still exists. Without this override, a card approved while (or just
+// before) the sync stamped it is refused as already-decided and the approval
+// silently no-ops (2 of 3 approvals lost on 2026-07-10).
+function expiredStampOverridable(c: PlanCandidate): boolean {
+  return (
+    c.terminal === true &&
+    c.posted !== true &&
+    c.discard_reason === "backend_status_expired"
+  );
+}
+
 async function postApproved(batchId: string, plan: Plan) {
   // Drain serialization (2026-07-06 incident). Every call drains the WHOLE
   // approved backlog, so overlapping drains are pure waste and actively harmful:
@@ -1113,9 +1128,21 @@ async function postApproved(batchId: string, plan: Plan) {
   // drains the not-yet-posted approved backlog (e.g. a card a restart interrupted),
   // never re-posts a done one. This is what lets the startup backlog-drain and the
   // per-card menu-bar calls share one code path safely.
+  // An approved card whose only blocker is an overridable backend-expiry stamp is
+  // included: approval outranks the freshness gate (see expiredStampOverridable),
+  // and the stamp is cleared so every downstream terminal check agrees it's live.
   const approved = (plan.candidates || []).filter(
-    (c: PlanCandidate) => c.approved === true && c.posted !== true && c.terminal !== true
+    (c: PlanCandidate) =>
+      c.approved === true &&
+      c.posted !== true &&
+      (c.terminal !== true || expiredStampOverridable(c))
   );
+  for (const c of approved) {
+    if (c.terminal === true) {
+      c.terminal = false;
+      delete c.discard_reason;
+    }
+  }
   if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
   // PREFLIGHT: posting needs a configured @handle, or twitter_browser.py refuses
   // EVERY reply with no_account_configured and the whole batch skips — invisibly.
