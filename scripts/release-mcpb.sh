@@ -460,7 +460,21 @@ if [[ "$DO_NPM" == "1" ]]; then
          fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
          console.log('  temp copy renamed to $S4L_ALIAS_PKG@'+j.version+' (repo package.json untouched)');
        " \
-       && ( cd "$S4L_PUB_DIR/package" && npm publish --access=public ${NPM_TAG_ARGS[@]+"${NPM_TAG_ARGS[@]}"} ); then
+       && (
+            # The registry's large-upload path flakes (TLS bad record mac / EPIPE)
+            # often enough that one attempt let the alias lane silently drift for
+            # three rc's (rc.16/21/22, caught 2026-07-10). Retry, and between
+            # attempts check whether the upload actually landed despite the
+            # client-side error (EPIPE can be a false negative).
+            cd "$S4L_PUB_DIR/package" || exit 1
+            for _try in 1 2 3; do
+              npm publish --access=public ${NPM_TAG_ARGS[@]+"${NPM_TAG_ARGS[@]}"} && exit 0
+              sleep 3
+              [[ "$(curl -s -o /dev/null -w '%{http_code}' "$S4L_ALIAS_URL")" == "200" ]] && exit 0
+              echo "  dual-publish attempt $_try/3 failed" >&2
+            done
+            exit 1
+          ); then
       for _ in 1 2 3 4 5; do
         sleep 2
         [[ "$(curl -s -o /dev/null -w '%{http_code}' "$S4L_ALIAS_URL")" == "200" ]] && break
