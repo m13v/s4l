@@ -1993,6 +1993,7 @@ tool(
       persona_topic_count: personaTopicCount,
       persona_query_count: personaQueryCount,
       persona_query_note: personaQueryNote || null,
+      persona_voice_examples: personaExemplarNote,
       kicker_installed: kickerInstall ? kickerInstall.ok : null,
       kicker_detail: kickerInstall ? kickerInstall.detail : null,
       onboarding: onboardingSnapshot(),
