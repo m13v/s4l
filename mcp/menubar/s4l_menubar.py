@@ -439,6 +439,17 @@ REVIEW_HEAL_EVERY_SECONDS = float(
 )
 REVIEW_UNATTENDED_SENTRY_SECONDS = 3600.0
 
+# Review snooze (2026-07-09 customer feedback: cards interrupt focused work
+# with no way to defer them). Closing the card with undecided drafts, via the
+# cross or the title-bar "Snooze 1h" button, parks the WHOLE pending backlog
+# for REVIEW_SNOOZE_SECONDS: no auto-present, no watchdog heal (nothing is on
+# screen). Drafts stay in the store untouched; the menu's "Review N pending
+# drafts" clears the snooze early. Persisted so a menubar restart mid-snooze
+# doesn't re-pop the card. s4l_card._snooze_secs reads the same env var for
+# the button label; keep them in sync.
+REVIEW_SNOOZE_SECONDS = float(os.environ.get("S4L_REVIEW_SNOOZE_S", "3600"))
+SNOOZE_FILE = os.path.join(st.state_dir(), "review-snooze.json")
+
 
 def _label_elapsed_secs(label):
     """Parse the trailing duration the producer encodes in a drafting activity
@@ -519,6 +530,10 @@ class S4LMenuBar(rumps.App):
         self._post_worker = None
         self._review_lock = threading.Lock()
         self._panel_open = False
+        # Review snooze: epoch until which draft cards must not auto-present
+        # (0 = not snoozed). Loaded from disk so a menubar restart mid-snooze
+        # doesn't re-pop the card the user just put away.
+        self._review_snooze_until = self._read_snooze_until()
         # Unattended-review watchdog state (_maybe_heal_review).
         self._review_heal_at = 0.0
         self._review_unattended_notified = False
@@ -2529,6 +2544,12 @@ class S4LMenuBar(rumps.App):
             self._stall_reason_info,
             os.path.exists(PAUSE_FLAG),
             pending_count,
+            # Snooze end (0 = not snoozed): rebuilds the menu when a snooze is
+            # set, cleared, or lapses, so the "Snoozed until HH:MM" label and
+            # the review item stay honest.
+            int(self._review_snooze_until)
+            if time.time() < self._review_snooze_until
+            else 0,
         )
         if sig != self._sig:
             self._sig = sig
@@ -2602,7 +2623,51 @@ class S4LMenuBar(rumps.App):
         except Exception:
             return None, []
 
-    def _maybe_start_review(self):
+    def _read_snooze_until(self):
+        try:
+            with open(SNOOZE_FILE) as f:
+                return float((json.load(f) or {}).get("until") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _set_snooze(self, until, pending=0):
+        """Set (or clear, until<=now) the review snooze, mirrored to disk."""
+        self._review_snooze_until = until
+        try:
+            if until <= time.time():
+                try:
+                    os.remove(SNOOZE_FILE)
+                except FileNotFoundError:
+                    pass
+            else:
+                with open(SNOOZE_FILE, "w") as f:
+                    json.dump(
+                        {"until": until, "set_at": time.time(), "pending": pending},
+                        f,
+                    )
+        except Exception:
+            pass
+
+    def _review_now(self, _=None):
+        """Menu: bring the pending draft cards up right now. Clears any snooze;
+        this is the one presentation path that may take keyboard focus (the
+        user explicitly asked for the cards)."""
+        self._set_snooze(0.0)
+        try:
+            import s4l_card
+
+            if s4l_card.active_status():
+                # A card is already on screen (user clicked while one is up,
+                # perhaps parked on another display): bring it to them instead.
+                s4l_card.heal_active()
+                s4l_card.focus_active()
+                return
+        except Exception:
+            pass
+        self._last_review_sig = None
+        self._maybe_start_review(focus=True)
+
+    def _maybe_start_review(self, focus=False):
         req = st.read_review_request()
         if not req:
             return
@@ -2617,6 +2682,12 @@ class S4LMenuBar(rumps.App):
         if not drafts:
             self._last_review_sig = None
             st.clear_review_request()
+            return
+        # Snoozed (the user closed the card with drafts still undecided): leave
+        # the backlog in the store untouched and present nothing until the
+        # snooze lapses. New drafts keep accumulating silently; the menu's
+        # "Review N pending drafts" clears this early.
+        if time.time() < self._review_snooze_until:
             return
         # De-dup on the CONTENT of the pending set (each draft's plan index + reply
         # text), not the constant batch_id. This means: re-present whenever NEW
@@ -2673,6 +2744,7 @@ class S4LMenuBar(rumps.App):
                 drafts,
                 on_decision=lambda d: self._on_card_decision(batch, d),
                 on_complete=lambda decisions: self._on_review_closed(batch, decisions),
+                focus=focus,
             )
             # Record as shown only AFTER the cards are actually up, so a transient
             # card-UI failure never permanently suppresses this pending set.
@@ -2898,6 +2970,20 @@ class S4LMenuBar(rumps.App):
             remaining = 0
         if remaining <= 0:
             st.clear_review_request()
+        else:
+            # Undecided drafts left = the user closed the card early (cross or
+            # the title-bar Snooze button): park the backlog instead of
+            # re-popping it on the next tick, which made the card impossible
+            # to put away (2026-07-09 customer feedback). The signature drop
+            # below still runs, so after the snooze lapses the leftover
+            # presents fresh rather than being suppressed as "already shown".
+            until = time.time() + REVIEW_SNOOZE_SECONDS
+            self._set_snooze(until, remaining)
+            sys.stderr.write(
+                f"[s4l-menubar] review snoozed: {remaining} pending until "
+                f"{time.strftime('%H:%M', time.localtime(until))}\n"
+            )
+            sys.stderr.flush()
         # Drop the dedup signature so whatever is left is presented fresh (not
         # suppressed as "already shown") once posting finishes draining.
         self._last_review_sig = None
@@ -2907,7 +2993,15 @@ class S4LMenuBar(rumps.App):
             st.flush_review_events_async()
         except Exception:
             pass
-        if not any(d.get("approved") for d in decisions):
+        if remaining > 0:
+            plural = "s" if remaining != 1 else ""
+            self._notify(
+                "S4L",
+                f"Snoozed {remaining} pending draft{plural} until "
+                f"{time.strftime('%H:%M', time.localtime(self._review_snooze_until))}. "
+                "Review sooner from the S4L menu.",
+            )
+        elif not any(d.get("approved") for d in decisions):
             self._notify("S4L", "No drafts approved — nothing posted.")
 
     def _discard_all_pending(self, _=None):
@@ -3341,12 +3435,29 @@ class S4LMenuBar(rumps.App):
     def _state_c(self, snap, pending_count=0):
         if pending_count <= 0:
             return []
-        return [
+        plural = "s" if pending_count != 1 else ""
+        items = [
             rumps.MenuItem(
-                f"Discard {pending_count} pending draft{'s' if pending_count != 1 else ''}…",
-                callback=self._discard_all_pending,
+                f"Review {pending_count} pending draft{plural}",
+                callback=self._review_now,
             )
         ]
+        if time.time() < self._review_snooze_until:
+            items.append(
+                self._label(
+                    "Snoozed until "
+                    + time.strftime(
+                        "%H:%M", time.localtime(self._review_snooze_until)
+                    )
+                )
+            )
+        items.append(
+            rumps.MenuItem(
+                f"Discard {pending_count} pending draft{plural}…",
+                callback=self._discard_all_pending,
+            )
+        )
+        return items
 
 
 if __name__ == "__main__":
