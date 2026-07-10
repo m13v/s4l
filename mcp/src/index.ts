@@ -2777,19 +2777,34 @@ tool(
     description:
       "Read-only post + engagement stats for the X/Twitter rail over the last N days. " +
       "Wraps project_stats_json.py. Use to show the user how their posts are performing. " +
+      "With no `project` it reports EVERY configured lane, including the personal-brand " +
+      "persona (which usually carries most of the volume) — prefer that default. " +
       "After returning the numbers, call the `dashboard` tool so the user sees them rendered.",
     inputSchema: {
       days: z.number().int().min(1).max(90).default(7),
       project: z
         .string()
         .optional()
-        .describe("Which configured project to report on. Optional when only one project is set up; required when several are."),
+        .describe(
+          "Scope to one configured project (the persona lane's name works too). " +
+            "Omit to report all lanes — products AND the personal-brand persona."
+        ),
     },
   },
   async ({ days, project }) => {
-    const r = resolveProject(project);
-    if (!r.ok) return textContent(r.message!);
-    const proj = r.project!;
+    // Explicit project: validate it (projectStatus is persona-aware, so the
+    // persona lane resolves). No project: report EVERY lane rather than
+    // resolving to a single product — the old single-project resolution made
+    // the persona lane (often 90% of activity) invisible in stats.
+    let proj: string | undefined;
+    if (project) {
+      const r = resolveProject(project);
+      if (!r.ok) return textContent(r.message!);
+      proj = r.project!;
+    } else if (!hasReadyProject() && !personaReady()) {
+      const r = resolveProject();
+      return textContent(r.message!);
+    }
     const args = ["--posts-only", "--platform", "twitter", "--days", String(days)];
     if (proj) args.push("--project", proj);
     const res = await runPython("scripts/project_stats_json.py", args, { timeoutMs: 120_000 });
