@@ -82,6 +82,13 @@ MAX_EVENTS_PER_RUN = 200
 # degraded (a bad search topic, a draft-quality regression), not that any
 # single draft was wrong in a way the digest model could articulate.
 BULK_NO_REASON_THRESHOLD = int(os.environ.get("S4L_BULK_NO_REASON_THRESHOLD", "3"))
+# Two-draft cards ship raw per-box pointer-dwell ms in draft_choice; this is
+# the read-vs-skim floor for the draft the reviewer did NOT pick. At or above
+# it, keeping the preselected Draft A counts as an informed keep (they read B
+# and stayed); below it the approval says nothing about B. Threshold lives
+# HERE, not in the menubar client, so it can be tuned without a client
+# release.
+DRAFT_READ_MS = int(os.environ.get("S4L_DRAFT_READ_MS", "1000"))
 
 DISALLOWED_TOOLS = (
     "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,"
@@ -106,10 +113,47 @@ def load_config():
         return {"projects": []}
 
 
+def _draft_choice(e: dict) -> dict | None:
+    """Parsed draft_choice payload (two-draft cards only). The API returns
+    jsonb as a dict; a locally-buffered event may still carry it as a JSON
+    string. None when absent, unparseable, or missing the unchosen draft
+    (nothing pairwise to say without the loser)."""
+    dc = e.get("draft_choice")
+    if isinstance(dc, str):
+        try:
+            dc = json.loads(dc)
+        except Exception:
+            return None
+    if not isinstance(dc, dict) or not (dc.get("unchosen_text") or "").strip():
+        return None
+    return dc
+
+
 def _event_line(e: dict) -> str:
     """One compact evidence line per event for the prompt."""
     parts = [f"[{e.get('decision')}{'+loved' if e.get('loved') else ''}]"]
     note = (e.get("reject_note") or "").strip()
+    # Two-draft pairwise flags (approvals only: on a reject BOTH drafts died,
+    # so which box the caret sat in carries no preference). Weighting ladder,
+    # explained to the model in build_prompt: an active switch to Draft B is
+    # strong (they necessarily read both); keeping the preselected A counts
+    # only when hover dwell shows they actually read B; a fast approve with B
+    # unread is flagged as exactly that so no preference gets fabricated.
+    dc = _draft_choice(e) if e.get("decision") == "approved" else None
+    show_unchosen = False
+    if dc:
+        if not dc.get("auto_selected"):
+            parts.append("picked_draft_b_over_default_a")
+            show_unchosen = True
+        else:
+            other_ms = dc.get("hover_b_ms") or 0
+            if other_ms >= DRAFT_READ_MS:
+                parts.append(
+                    f"kept_default_a_after_reading_b={round(other_ms / 1000, 1)}s"
+                )
+                show_unchosen = True
+            else:
+                parts.append("second_draft_not_read")
     if e.get("reject_category"):
         parts.append(f"category={e['reject_category']}")
     elif e.get("decision") == "rejected" and not note:
@@ -147,6 +191,13 @@ def _event_line(e: dict) -> str:
         line += f"\n  user REWROTE it to: {draft[:300]}"
     elif draft:
         line += f"\n  our draft was: {draft[:200]}"
+    if dc and show_unchosen:
+        line += f"\n  the draft they did NOT pick was: {(dc.get('unchosen_text') or '')[:300]}"
+        if dc.get("style") or dc.get("unchosen_style"):
+            line += (
+                f"\n  styles: picked={dc.get('style') or '?'}"
+                f" not_picked={dc.get('unchosen_style') or '?'}"
+            )
     url = (e.get("thread_url") or "").strip()
     if url:
         line += f"\n  thread: {url}"
@@ -204,6 +255,8 @@ NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(no_reaso
 {ev_lines}{overall_block}
 
 Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "no_reason_given" means the user rejected without picking a category or typing a note: the rejection itself is real, but WHY is your inference from the author/thread/draft context alone, so treat it as weak evidence. It can corroborate a pattern that reasoned events already show, but a no_reason_given reject never justifies a new entry or an author block on its own, and 2+ of them agreeing still only justify an entry when the shared pattern in their context is unmistakable. "edited_before_approving" with an ORIGINAL/REWROTE pair means the user hand-corrected our draft before posting: the rewrite is a direct statement of the voice they want. Diff the pair; when 2+ edits show the same correction (a phrase type removed, a structure replaced, tone shifted, length cut), distill that recurring pattern into draft_style_notes. Ignore edit content that is lead-specific or cosmetic (typo fixes, one-off facts); learn only what generalizes. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user picked the heart in the approve row ("this was a really good one"; approve_level_N in interactions carries the strength, 2 = best of the best): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
+
+Two-draft cards show a "did NOT pick" pair. "picked_draft_b_over_default_a" means the card offered two drafts with A preselected and the user deliberately clicked into B and approved it: a direct head-to-head preference for the picked draft over the shown alternative, evidence on par with a hand rewrite. "kept_default_a_after_reading_b=Xs" means they kept the preselected A but spent Xs with the pointer over B first: an informed keep, weaker than a switch (reading B does not prove they weighed it; treat like no_reason_given, corroborating a pattern that stronger events already show rather than founding one). "second_draft_not_read" means they approved the default without reading the alternative: NO pairwise signal, never infer anything against the unread draft. When 2+ pairwise events agree, diff the picked texts against the not-picked ones and distill WHAT recurs (tone, structure, length, opener type, directness) into draft_style_notes; the "styles:" line names each side's engagement style, useful when the same style keeps winning or losing.
 
 You can also block SPECIFIC authors via the plan's block_authors list. A block is a permanent hard exclusion of that one handle from all future thread selection, so it is YOUR judgment call, never automatic. Block when the evidence is strong: a wrong_author reject IS a direct human statement about that author (especially with profile_click), and the author context (author_followers, their post, found_via_topic) or the user's note confirms the account itself was the problem rather than the topic. Do NOT block when the reject looks topic-driven (off_topic/bad_draft on a reasonable account) or when you are unsure; the generalizable TYPE entry in audience_avoid is the softer tool for that.
 
