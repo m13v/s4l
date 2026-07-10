@@ -149,8 +149,24 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
     Runs on EVERY merge (every cycle), not just once per candidate, so status
     drift after the initial stamp is still caught while a card is still
     pending. Best-effort: any API failure leaves every candidate untouched
-    (fail open, same as before). Returns (stamped_count, pruned_count)."""
-    pending = [c for c in cands if not c.get("posted") and not c.get("terminal") and _thread_url(c)]
+    (fail open, same as before). Returns (stamped_count, pruned_count).
+
+    APPROVED cards are exempt from the prune: an approval is a settled human
+    decision awaiting its serialized post, and stamping terminal on it makes
+    post_drafts refuse it as already-decided (posted:0). That exact race ate
+    2 of 3 approvals on 2026-07-10 (approved 04:30:02Z, merge stamped
+    backend_status_expired 04:32:33Z, poster refused both). The freshness
+    gate exists to stop stale UNDECIDED drafts from burning review attention;
+    once a human has said "post it", the only honest gate left is the
+    poster's own at-post-time tweet_unavailable check."""
+    pending = [
+        c
+        for c in cands
+        if not c.get("posted")
+        and not c.get("terminal")
+        and not c.get("approved")
+        and _thread_url(c)
+    ]
     if not pending:
         return 0, 0
     urls = sorted({_thread_url(c) for c in pending})[:500]
