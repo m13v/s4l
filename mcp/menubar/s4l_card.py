@@ -49,6 +49,7 @@ run loop, so that holds).
 
 import datetime
 import json
+import os
 import re
 import time
 
@@ -116,6 +117,26 @@ try:
     from AppKit import NSVisualEffectView
 except Exception:
     NSVisualEffectView = None
+# Nonactivating panel: an auto-presented card must never yank keyboard focus
+# from whatever the user is typing into (customer complaint 2026-07-09); the
+# panel becomes key only when the user clicks into one of its text fields.
+# Bit value 1 << 7 per AppKit; 0 degrades to the old always-activating panel.
+try:
+    from AppKit import NSWindowStyleMaskNonactivatingPanel
+except Exception:
+    NSWindowStyleMaskNonactivatingPanel = 0
+# Title-bar "Snooze 1h" button (sits opposite the close cross). Missing on
+# very old AppKit; the card then degrades to cross-only (closing still
+# snoozes, the label is just absent).
+try:
+    from AppKit import NSTitlebarAccessoryViewController, NSLayoutAttributeRight
+except Exception:
+    NSTitlebarAccessoryViewController = None
+    NSLayoutAttributeRight = None
+try:
+    from AppKit import NSBezelStyleInline
+except Exception:
+    NSBezelStyleInline = None
 try:
     # Registers the CGColor bridge type; without it every NSColor.CGColor()
     # call in _round_rect logs an ObjCPointerWarning to menubar.err.log.
@@ -148,6 +169,20 @@ REJECT_REASONS = (
 
 # Client-side cap on tracked interactions per card (server clips at 50 too).
 MAX_INTERACTIONS = 50
+
+
+def _snooze_secs():
+    """Snooze duration, for the title-bar button LABEL only. The menu bar owns
+    the actual timer (its REVIEW_SNOOZE_SECONDS reads the same env var)."""
+    try:
+        return max(60, int(float(os.environ.get("S4L_REVIEW_SNOOZE_S", "3600"))))
+    except Exception:
+        return 3600
+
+
+def _snooze_title():
+    s = _snooze_secs()
+    return f"Snooze {s // 3600}h" if s % 3600 == 0 else f"Snooze {s // 60}m"
 
 # Inline approve row: glyph + tooltip per approval level (button tag =
 # level). Level 1 = plain approve; 2 = loved=True on the decision, with the
