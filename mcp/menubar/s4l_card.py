@@ -907,46 +907,74 @@ class _ReviewController(NSObject):
 
     @objc.python_method
     def _add_snooze_accessory(self, panel):
-        """"Snooze 1h" at the top-left of the title bar, replacing the traffic
-        lights: minimize/zoom were disabled no-op dots on this panel, and the
-        close cross meant snooze anyway, so one labeled button says what the
-        only dismissal actually does. It just closes the panel; the menu bar
-        treats any close with undecided drafts as a snooze. The traffic lights
-        are hidden ONLY once the accessory mounts, so a failure on old AppKit
-        leaves the stock cross as the fallback dismissal. Cmd-W keeps working
-        either way (the Closable mask stays on)."""
+        """Title-bar controls, replacing the traffic lights: "Snooze 1h" at
+        the top-left (minimize/zoom were disabled no-op dots on this panel,
+        and the close cross meant snooze anyway, so one labeled button says
+        what the only dismissal actually does) and "Discard all…" at the
+        top-right (moved here from the menu bar dropdown 2026-07-10; the
+        ellipsis is honest, the handler opens a confirmation alert first).
+        Snooze just closes the panel; the menu bar treats any close with
+        undecided drafts as a snooze. The traffic lights are hidden ONLY once
+        the snooze accessory mounts, so a failure on old AppKit leaves the
+        stock cross as the fallback dismissal. Cmd-W keeps working either way
+        (the Closable mask stays on)."""
         if NSTitlebarAccessoryViewController is None or NSLayoutAttributeLeft is None:
             return
         try:
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 17))
-            btn.setTitle_(_snooze_title())
-            if NSBezelStyleInline is not None:
-                btn.setBezelStyle_(NSBezelStyleInline)
-            else:
-                btn.setBezelStyle_(NSBezelStyleRounded)
-            btn.setFont_(NSFont.systemFontOfSize_(10.0))
-            btn.setToolTip_(
-                "Put these drafts away for now. They stay pending and the "
-                "card comes back later (or sooner from the S4L menu)."
+            self._add_titlebar_button(
+                panel,
+                title=_snooze_title(),
+                action="snoozeClicked:",
+                tooltip=(
+                    "Put these drafts away for now. They stay pending and the "
+                    "card comes back later (or sooner from the S4L menu)."
+                ),
+                layout=NSLayoutAttributeLeft,
             )
-            btn.setTarget_(self)
-            btn.setAction_("snoozeClicked:")
-            btn.sizeToFit()
-            bf = btn.frame()
-            holder = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, bf.size.width + 8, max(19, bf.size.height + 2))
-            )
-            btn.setFrameOrigin_(
-                (4, max(0, (holder.frame().size.height - bf.size.height) / 2.0))
-            )
-            holder.addSubview_(btn)
-            acc = NSTitlebarAccessoryViewController.alloc().init()
-            acc.setView_(holder)
-            acc.setLayoutAttribute_(NSLayoutAttributeLeft)
-            panel.addTitlebarAccessoryViewController_(acc)
             self._hide_traffic_lights(panel)
         except Exception as e:
             _log(f"snooze accessory unavailable: {e}")
+        if _discard_all_handler is not None and NSLayoutAttributeRight is not None:
+            try:
+                self._add_titlebar_button(
+                    panel,
+                    title="Discard all…",
+                    action="discardAllClicked:",
+                    tooltip=(
+                        "Throw away every pending draft (asks first). Nothing "
+                        "posts, and unlike a per-card reject this sends no "
+                        "feedback signal to the AI."
+                    ),
+                    layout=NSLayoutAttributeRight,
+                )
+            except Exception as e:
+                _log(f"discard-all accessory unavailable: {e}")
+
+    @objc.python_method
+    def _add_titlebar_button(self, panel, title, action, tooltip, layout):
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 17))
+        btn.setTitle_(title)
+        if NSBezelStyleInline is not None:
+            btn.setBezelStyle_(NSBezelStyleInline)
+        else:
+            btn.setBezelStyle_(NSBezelStyleRounded)
+        btn.setFont_(NSFont.systemFontOfSize_(10.0))
+        btn.setToolTip_(tooltip)
+        btn.setTarget_(self)
+        btn.setAction_(action)
+        btn.sizeToFit()
+        bf = btn.frame()
+        holder = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, bf.size.width + 8, max(19, bf.size.height + 2))
+        )
+        btn.setFrameOrigin_(
+            (4, max(0, (holder.frame().size.height - bf.size.height) / 2.0))
+        )
+        holder.addSubview_(btn)
+        acc = NSTitlebarAccessoryViewController.alloc().init()
+        acc.setView_(holder)
+        acc.setLayoutAttribute_(layout)
+        panel.addTitlebarAccessoryViewController_(acc)
 
     @objc.python_method
     def _hide_traffic_lights(self, panel):
@@ -976,6 +1004,20 @@ class _ReviewController(NSObject):
             self._panel.performClose_(None)
         except Exception:
             self._finish()
+
+    def discardAllClicked_(self, sender):
+        """Hand off to the menu bar's bulk-discard handler (registered via
+        set_discard_all_handler); it confirms with the user, flips the store,
+        and dismisses this panel via dismiss_active(), so nothing more happens
+        here. On cancel the card simply stays up."""
+        self._track("discard_all")
+        cb = _discard_all_handler
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            _log(f"discard-all handler failed: {e}")
 
     @objc.python_method
     def _eye_button(self, frame, kind):
@@ -2164,6 +2206,21 @@ def set_feedback_handler(cb):
     calls this once at boot with its review-event shipper."""
     global _feedback_handler
     _feedback_handler = cb
+
+
+# Bulk-discard hook for the title bar's "Discard all…" button, same
+# registration pattern as _feedback_handler above. The menu bar registers
+# _discard_all_pending here (it owns the confirmation alert, the store flip,
+# and dismissing the panel). Cards built while this is None simply don't get
+# the button.
+_discard_all_handler = None
+
+
+def set_discard_all_handler(cb):
+    """Register the title-bar "Discard all…" action. The menu bar calls this
+    before presenting cards with its bulk-discard handler."""
+    global _discard_all_handler
+    _discard_all_handler = cb
 
 
 def _feedback_frame():
