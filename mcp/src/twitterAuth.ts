@@ -98,7 +98,40 @@ export interface XProfileScan {
     pinned?: string;
   };
   posts?: Array<{ text: string; url?: string; id?: string; likes?: number }>;
-  comments?: Array<{ text: string; url?: string; id?: string; reply_to?: string }>;
+  comments?: Array<{
+    text: string;
+    url?: string;
+    id?: string;
+    reply_to?: string;
+    likes?: number;
+    retweets?: number;
+    replies?: number;
+    // The tweet this reply answered (best-effort DOM pairing on /with_replies).
+    parent?: { author?: string; text?: string; url?: string } | null;
+  }>;
+  // Ranked by real engagement (likes*3 + retweets*5 + replies*2), rank 1 first.
+  // top_posts entries may carry `thread` (the user's own thread continuation,
+  // expanded from the permalink) and untruncated text.
+  top_posts?: Array<{
+    text: string;
+    url?: string;
+    rank?: number;
+    engagement_score?: number;
+    likes?: number;
+    retweets?: number;
+    replies?: number;
+    thread?: string[];
+  }>;
+  top_replies?: Array<{
+    text: string;
+    url?: string;
+    rank?: number;
+    engagement_score?: number;
+    likes?: number;
+    retweets?: number;
+    replies?: number;
+    parent?: { author?: string; text?: string; url?: string } | null;
+  }>;
   counts?: { posts: number; comments: number };
   grounding_instructions?: string;
   error?: string;
@@ -113,8 +146,9 @@ export async function xScanProfile(opts?: {
   if (opts?.handle) args.push("--handle", opts.handle);
   args.push("--posts", String(opts?.posts ?? 20));
   args.push("--comments", String(opts?.comments ?? 50));
-  // The scan scrolls two timelines; give it room but keep it bounded.
-  const res = await runPython("scripts/scan_x_profile.py", args, { timeoutMs: 180_000 });
+  // The scan scrolls two timelines plus visits the top posts' permalinks for
+  // thread expansion; give it room but keep it bounded.
+  const res = await runPython("scripts/scan_x_profile.py", args, { timeoutMs: 240_000 });
   try {
     return JSON.parse(res.stdout.trim().split("\n").slice(-1).join("\n")) as XProfileScan;
   } catch (e) {
