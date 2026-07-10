@@ -551,6 +551,12 @@ def main():
                               "drafts). Instead the drafting session queries "
                               "`--project <name> --top 3` on demand AFTER it "
                               "has routed a candidate to a project."))
+    parser.add_argument("--brief", action="store_true",
+                        help=("Render ONLY the top-posts list for the given "
+                              "--project (no style table, no exemplars, no "
+                              "summary, no bottom posts). This is the lean "
+                              "on-demand shape the drafting session calls "
+                              "after routing a candidate to a project."))
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
@@ -577,6 +583,15 @@ def main():
         # winner corpus under a different header.
         top = []
         fallback_top = None
+
+    if args.brief:
+        # Lean per-project view: keep `top` (and its fallback message),
+        # strip everything else.
+        style_perf = []
+        top_by_style = []
+        summary = []
+        top_by_group = None
+        bottom = []
 
     if args.json:
         output = {
