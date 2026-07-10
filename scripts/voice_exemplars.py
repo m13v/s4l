@@ -287,9 +287,8 @@ _BROWSER_LOCK = Path("/tmp/social-autoposter-twitter-browser.lock")
 
 
 def _try_browser_lock() -> "Path | None":
-    """BAIL-ON-BUSY acquire of the pipelines' twitter-browser lock (same mkdir
-    protocol as skill/lock.sh, without its queue: the backfill is opportunistic
-    and simply retries on a later boot rather than waiting behind a cycle)."""
+    """One mkdir attempt on the pipelines' twitter-browser lock (same protocol
+    as skill/lock.sh, without its queue)."""
     try:
         _BROWSER_LOCK.mkdir()
     except OSError:
@@ -300,6 +299,34 @@ def _try_browser_lock() -> "Path | None":
     except Exception:
         pass
     return _BROWSER_LOCK
+
+
+def _wait_browser_lock(max_wait_s: float, poll_s: float = 20.0) -> "Path | None":
+    """Wait for the twitter-browser lock however long it takes (up to
+    max_wait_s). Holds no other lock while waiting, so this cannot deadlock;
+    it just queues politely behind cycles / DM runs. Reclaims a stale lock
+    (holder pid dead + lease expired), mirroring skill/lock.sh."""
+    deadline = time.time() + max_wait_s
+    while True:
+        lock = _try_browser_lock()
+        if lock is not None:
+            return lock
+        try:
+            pid = int((_BROWSER_LOCK / "pid").read_text().strip())
+            expires = int((_BROWSER_LOCK / "expires_at").read_text().strip())
+            pid_alive = True
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                pid_alive = False
+            if not pid_alive and time.time() > expires:
+                shutil.rmtree(_BROWSER_LOCK, ignore_errors=True)
+                continue  # retry mkdir immediately
+        except Exception:
+            pass  # lock mid-transition; just poll again
+        if time.time() >= deadline:
+            return None
+        time.sleep(poll_s)
 
 
 def _release_browser_lock() -> None:
@@ -343,12 +370,22 @@ def cmd_backfill(args) -> int:
         return 0
 
     if not args.no_scan:
-        lock = _try_browser_lock()
+        lock = _wait_browser_lock(args.max_wait_minutes * 60)
         if lock is None:
-            # No marker on a busy bail: it cost nothing, and on active installs
-            # the kicker often has a cycle holding the browser right at boot,
-            # so consuming the cooldown here would starve the backfill forever.
-            print(json.dumps({"ok": True, "did": "nothing", "reason": "browser_busy"}))
+            # Waited the whole window and never got the browser. No marker:
+            # the wait cost nothing but time, so the next boot tries again.
+            print(json.dumps({"ok": True, "did": "nothing", "reason": "browser_busy_timeout"}))
+            return 0
+        # The wait can be hours; another boot's backfill may have finished
+        # meanwhile. Re-read config and re-check before burning a scan.
+        cfg = json.loads(cfg_path.read_text())
+        personas = [p for p in cfg.get("projects", []) if p.get("persona") is True]
+        eligible = [p for p in personas
+                    if not (isinstance(p.get("voice"), dict) and p["voice"].get("examples_scanned_at"))
+                    and not _is_hand_written(p)]
+        if not eligible:
+            _release_browser_lock()
+            print(json.dumps({"ok": True, "did": "nothing", "reason": "done_while_waiting"}))
             return 0
         marker.write_text(json.dumps({"last_attempt": int(time.time())}) + "\n")
         try:
@@ -415,6 +452,9 @@ def main(argv) -> int:
     b.add_argument("--min-chars", type=int, default=40)
     b.add_argument("--min-hours-between", type=float, default=24.0,
                    help="rate limit between scan attempts")
+    b.add_argument("--max-wait-minutes", type=float, default=12 * 60,
+                   help="how long to wait for the twitter-browser lock before "
+                        "giving up until the next boot")
     b.add_argument("--no-scan", action="store_true",
                    help="skip the live scan and use the existing last_profile_scan.json")
     b.set_defaults(func=cmd_backfill)
