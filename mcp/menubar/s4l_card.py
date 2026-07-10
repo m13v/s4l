@@ -13,9 +13,11 @@ The panel is NONACTIVATING and auto-presented cards never take keyboard focus
 field becomes editable on first click, and only a user-initiated open
 (present_review(focus=True), the menu bar's "Review N pending drafts")
 activates the app and seats the caret immediately. A title-bar "Snooze 1h"
-button sits opposite the close cross; it and the cross both just close the
-panel, and the menu bar interprets any close with undecided drafts as a
-snooze (drafts stay pending, re-present after REVIEW_SNOOZE_SECONDS).
+button sits top-left where the traffic lights would be (they're hidden: the
+panel can't minimize or zoom, and the cross duplicated Snooze); it just
+closes the panel, and the menu bar interprets any close with undecided
+drafts (including Cmd-W) as a snooze (drafts stay pending, re-present after
+REVIEW_SNOOZE_SECONDS).
 
 Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
 "edited": bool, "drop_link": bool, "reject_category": str|None,
@@ -935,10 +937,32 @@ class _ReviewController(NSObject):
             holder.addSubview_(btn)
             acc = NSTitlebarAccessoryViewController.alloc().init()
             acc.setView_(holder)
-            acc.setLayoutAttribute_(NSLayoutAttributeRight)
+            acc.setLayoutAttribute_(NSLayoutAttributeLeft)
             panel.addTitlebarAccessoryViewController_(acc)
+            self._hide_traffic_lights(panel)
         except Exception as e:
             _log(f"snooze accessory unavailable: {e}")
+
+    @objc.python_method
+    def _hide_traffic_lights(self, panel):
+        """Hide close/minimize/zoom once the Snooze accessory is up: minimize
+        and zoom are disabled dots (no Miniaturizable/Resizable in the mask)
+        and the cross duplicated Snooze. Hiding, not removing: performClose_
+        (Cmd-W and snoozeClicked_) still routes through the hidden close
+        button's machinery, and windowShouldClose_ still fires."""
+        if NSWindowCloseButton is None:
+            return
+        for which in (
+            NSWindowCloseButton,
+            NSWindowMiniaturizeButton,
+            NSWindowZoomButton,
+        ):
+            try:
+                b = panel.standardWindowButton_(which)
+                if b is not None:
+                    b.setHidden_(True)
+            except Exception:
+                pass
 
     def snoozeClicked_(self, sender):
         self._track("snooze")
