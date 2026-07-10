@@ -194,6 +194,36 @@ def _upsert_corpus_section(corpus_path: Path, section: str) -> str:
     return "created"
 
 
+def _is_hand_written(proj: dict) -> bool:
+    """examples present but never stamped by us = a human typed them."""
+    voice = proj.get("voice")
+    return (isinstance(voice, dict) and bool(voice.get("examples"))
+            and not voice.get("examples_scanned_at"))
+
+
+def _set_examples(proj: dict, scan: dict, top: int, min_chars: int,
+                  force: bool) -> "tuple[bool, str, list]":
+    """Write voice.examples onto proj IN PLACE. Returns (ok, reason, examples)."""
+    examples = format_examples(scan, top, min_chars)
+    if not examples:
+        return False, "no_usable_replies", []
+    if _is_hand_written(proj) and not force:
+        return False, "hand_written_examples", []
+    voice = proj.get("voice")
+    if not isinstance(voice, dict):
+        voice = {"tone": voice} if voice else {}
+        proj["voice"] = voice
+    voice["examples"] = examples
+    voice["examples_scanned_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return True, "ok", examples
+
+
+def _write_config(cfg_path: Path, cfg: dict) -> None:
+    tmp = cfg_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+    tmp.replace(cfg_path)
+
+
 def cmd_apply(args) -> int:
     cfg_path = Path(args.config).expanduser() if args.config else s4l_mode.config_path()
     scan_src = args.scan or str(cfg_path.parent / "last_profile_scan.json")
@@ -216,25 +246,16 @@ def cmd_apply(args) -> int:
                           "(pass --project, or configure a persona project)"}))
         return 2
 
-    examples = format_examples(scan, args.top, args.min_chars)
-    if not examples:
+    ok, reason, examples = _set_examples(proj, scan, args.top, args.min_chars, args.force)
+    if not ok and reason == "no_usable_replies":
         print(json.dumps({"ok": False, "error": "scan has no usable replies to build examples from"}))
         return 1
-
-    voice = proj.get("voice")
-    if not isinstance(voice, dict):
-        voice = {"tone": voice} if voice else {}
-        proj["voice"] = voice
-    hand_written = bool(voice.get("examples")) and not voice.get("examples_scanned_at")
-    if hand_written and not args.force:
+    if not ok:
         print(json.dumps({"ok": False, "error":
                           f"{name}.voice.examples already has hand-written entries; "
                           "rerun with --force to replace them",
-                          "existing": voice.get("examples")}))
+                          "existing": (proj.get("voice") or {}).get("examples")}))
         return 3
-
-    voice["examples"] = examples
-    voice["examples_scanned_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     is_persona = proj.get("persona") is True
     corpus_path = cfg_path.parent / "persona_corpus.txt"
@@ -246,9 +267,7 @@ def cmd_apply(args) -> int:
                           "corpus_section": section}, ensure_ascii=False, indent=2))
         return 0
 
-    tmp = cfg_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
-    tmp.replace(cfg_path)
+    _write_config(cfg_path, cfg)
 
     corpus_action = None
     if section:
@@ -258,6 +277,114 @@ def cmd_apply(args) -> int:
                       "voice_examples_written": len(examples),
                       "corpus_sidecar": str(corpus_path) if corpus_action else None,
                       "corpus_action": corpus_action}, ensure_ascii=False))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# backfill: one-shot catch-up for installs onboarded BEFORE this feature.
+# --------------------------------------------------------------------------- #
+_BROWSER_LOCK = Path("/tmp/social-autoposter-twitter-browser.lock")
+
+
+def _try_browser_lock() -> "Path | None":
+    """BAIL-ON-BUSY acquire of the pipelines' twitter-browser lock (same mkdir
+    protocol as skill/lock.sh, without its queue: the backfill is opportunistic
+    and simply retries on a later boot rather than waiting behind a cycle)."""
+    try:
+        _BROWSER_LOCK.mkdir()
+    except OSError:
+        return None
+    try:
+        (_BROWSER_LOCK / "pid").write_text(f"{os.getpid()}\n")
+        (_BROWSER_LOCK / "expires_at").write_text(f"{int(time.time()) + 600}\n")
+    except Exception:
+        pass
+    return _BROWSER_LOCK
+
+
+def _release_browser_lock() -> None:
+    try:
+        pid = (_BROWSER_LOCK / "pid").read_text().strip()
+        if pid == str(os.getpid()):
+            shutil.rmtree(_BROWSER_LOCK)
+    except Exception:
+        pass
+
+
+def cmd_backfill(args) -> int:
+    """Called best-effort on MCP boot. If the persona project predates the
+    exemplar feature (no voice.examples_scanned_at), run a fresh profile scan
+    and apply. Scoped to the PERSONA project only: every install provisions one
+    at onboarding, and it is where the author's own voice lives; product
+    projects pick exemplars up on their next project_config save instead. The
+    corpus write is additive (the marked section is the only thing replaced;
+    dictation and hand-added material stay). Rate-limited by a marker file so a
+    down browser doesn't retrigger a scan on every boot."""
+    cfg_path = Path(args.config).expanduser() if args.config else s4l_mode.config_path()
+    if not cfg_path.exists():
+        print(json.dumps({"ok": True, "did": "nothing", "reason": "no_config"}))
+        return 0
+    cfg = json.loads(cfg_path.read_text())
+    personas = [p for p in cfg.get("projects", []) if p.get("persona") is True]
+    eligible = [p for p in personas
+                if not (isinstance(p.get("voice"), dict) and p["voice"].get("examples_scanned_at"))
+                and not _is_hand_written(p)]
+    if not eligible:
+        print(json.dumps({"ok": True, "did": "nothing", "reason": "already_done_or_hand_written"}))
+        return 0
+
+    marker = cfg_path.parent / ".voice_exemplars_backfill.json"
+    try:
+        last = json.loads(marker.read_text()).get("last_attempt", 0)
+    except Exception:
+        last = 0
+    if time.time() - last < args.min_hours_between * 3600:
+        print(json.dumps({"ok": True, "did": "nothing", "reason": "attempted_recently"}))
+        return 0
+    marker.write_text(json.dumps({"last_attempt": int(time.time())}) + "\n")
+
+    if not args.no_scan:
+        lock = _try_browser_lock()
+        if lock is None:
+            print(json.dumps({"ok": True, "did": "nothing", "reason": "browser_busy"}))
+            return 0
+        try:
+            py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
+            r = subprocess.run([py, str(HERE / "scan_x_profile.py")],
+                               capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            print(json.dumps({"ok": False, "did": "nothing", "reason": f"scan_failed: {e}"}))
+            return 0
+        finally:
+            _release_browser_lock()
+        last_line = (r.stdout or "").strip().splitlines()[-1:] or ["{}"]
+        try:
+            scan_res = json.loads(last_line[0])
+        except Exception:
+            scan_res = {}
+        if not scan_res.get("ok"):
+            print(json.dumps({"ok": False, "did": "nothing",
+                              "reason": f"scan_not_ok: {scan_res.get('state') or 'no_json'}"}))
+            return 0
+
+    scan_path = cfg_path.parent / "last_profile_scan.json"
+    if not scan_path.exists():
+        print(json.dumps({"ok": False, "did": "nothing", "reason": "no_scan_sidecar"}))
+        return 0
+    scan = _load_scan(str(scan_path))
+
+    applied = []
+    for proj in eligible:
+        ok, reason, examples = _set_examples(proj, scan, args.top, args.min_chars, False)
+        if ok:
+            applied.append(proj["name"])
+            if proj.get("persona") is True:
+                section = format_corpus_section(scan, args.top, args.min_chars)
+                _upsert_corpus_section(cfg_path.parent / "persona_corpus.txt", section)
+    if applied:
+        _write_config(cfg_path, cfg)
+    print(json.dumps({"ok": True, "did": "backfilled" if applied else "nothing",
+                      "projects": applied}, ensure_ascii=False))
     return 0
 
 
@@ -276,6 +403,19 @@ def main(argv) -> int:
     a.add_argument("--force", action="store_true", help="replace hand-written voice.examples")
     a.add_argument("--dry-run", action="store_true", help="print what would be written")
     a.set_defaults(func=cmd_apply)
+
+    b = sub.add_parser("backfill",
+                       help="one-shot catch-up on boot: scan + apply for a persona "
+                            "that predates the exemplar feature")
+    b.add_argument("--config", default=None, help="config.json path override (testing)")
+    b.add_argument("--top", type=int, default=5)
+    b.add_argument("--min-chars", type=int, default=40)
+    b.add_argument("--min-hours-between", type=float, default=24.0,
+                   help="rate limit between scan attempts")
+    b.add_argument("--no-scan", action="store_true",
+                   help="skip the live scan and use the existing last_profile_scan.json")
+    b.set_defaults(func=cmd_backfill)
+
     args = ap.parse_args(argv)
     return args.func(args)
 
