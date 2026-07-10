@@ -5755,6 +5755,28 @@ async function main() {
   void sendStateSnapshot("startup");
   const ss = setInterval(() => void sendStateSnapshot("interval"), 15 * 60_000);
   ss.unref();
+
+  // One-shot voice-exemplar catch-up for installs onboarded BEFORE the
+  // exemplar feature: if the persona has no voice.examples_scanned_at, rescan
+  // the connected X profile and store the top-performing replies as
+  // voice.examples + the persona_corpus.txt exemplar section. Additive only
+  // (regenerates just its own marked corpus section; respects hand-written
+  // examples) and self-limiting (marker file rate-limits scan attempts;
+  // BAIL-ON-BUSY on the twitter-browser lock, so it never contends with a
+  // running cycle — it just retries on a later boot). Delayed so boot-time
+  // work (runtime provision, kicker install) settles first.
+  const backfill = setTimeout(() => {
+    if (isPaused()) return;
+    void runPython("scripts/voice_exemplars.py", ["backfill"], { timeoutMs: 420_000 })
+      .then((r) => {
+        const last = r.stdout.trim().split("\n").slice(-1)[0] || "";
+        console.error(`[social-autoposter-mcp] voice-exemplars backfill: ${last}`);
+      })
+      .catch((e) => {
+        console.error("[social-autoposter-mcp] voice-exemplars backfill failed:", e?.message || e);
+      });
+  }, 3 * 60_000);
+  backfill.unref();
 }
 
 main().catch(async (err) => {
