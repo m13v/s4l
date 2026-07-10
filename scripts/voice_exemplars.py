@@ -345,8 +345,12 @@ def cmd_backfill(args) -> int:
     at onboarding, and it is where the author's own voice lives; product
     projects pick exemplars up on their next project_config save instead. The
     corpus write is additive (the marked section is the only thing replaced;
-    dictation and hand-added material stay). Rate-limited by a marker file so a
-    down browser doesn't retrigger a scan on every boot."""
+    dictation and hand-added material stay). No cooldown by design (user rule
+    2026-07-10): every boot retries until the scan succeeds; success stamps
+    examples_scanned_at, which makes all later boots a cheap no-op. Boots are
+    user-triggered (Desktop launch), so the worst case is one scan attempt per
+    launch, and concurrent waiters from overlapping boots dedupe via the
+    post-lock eligibility re-check."""
     cfg_path = Path(args.config).expanduser() if args.config else s4l_mode.config_path()
     if not cfg_path.exists():
         print(json.dumps({"ok": True, "did": "nothing", "reason": "no_config"}))
@@ -360,20 +364,11 @@ def cmd_backfill(args) -> int:
         print(json.dumps({"ok": True, "did": "nothing", "reason": "already_done_or_hand_written"}))
         return 0
 
-    marker = cfg_path.parent / ".voice_exemplars_backfill.json"
-    try:
-        last = json.loads(marker.read_text()).get("last_attempt", 0)
-    except Exception:
-        last = 0
-    if time.time() - last < args.min_hours_between * 3600:
-        print(json.dumps({"ok": True, "did": "nothing", "reason": "attempted_recently"}))
-        return 0
-
     if not args.no_scan:
         lock = _wait_browser_lock(args.max_wait_minutes * 60)
         if lock is None:
-            # Waited the whole window and never got the browser. No marker:
-            # the wait cost nothing but time, so the next boot tries again.
+            # Waited the whole window and never got the browser; the next
+            # boot simply tries again.
             print(json.dumps({"ok": True, "did": "nothing", "reason": "browser_busy_timeout"}))
             return 0
         # The wait can be hours; another boot's backfill may have finished
@@ -387,11 +382,12 @@ def cmd_backfill(args) -> int:
             _release_browser_lock()
             print(json.dumps({"ok": True, "did": "nothing", "reason": "done_while_waiting"}))
             return 0
-        marker.write_text(json.dumps({"last_attempt": int(time.time())}) + "\n")
         try:
             py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
+            # generous: the default depth (60 posts / 150 replies) can scroll
+            # for several minutes on prolific accounts
             r = subprocess.run([py, str(HERE / "scan_x_profile.py")],
-                               capture_output=True, text=True, timeout=300)
+                               capture_output=True, text=True, timeout=1200)
         except Exception as e:
             print(json.dumps({"ok": False, "did": "nothing", "reason": f"scan_failed: {e}"}))
             return 0
@@ -450,8 +446,6 @@ def main(argv) -> int:
     b.add_argument("--config", default=None, help="config.json path override (testing)")
     b.add_argument("--top", type=int, default=5)
     b.add_argument("--min-chars", type=int, default=40)
-    b.add_argument("--min-hours-between", type=float, default=24.0,
-                   help="rate limit between scan attempts")
     b.add_argument("--max-wait-minutes", type=float, default=12 * 60,
                    help="how long to wait for the twitter-browser lock before "
                         "giving up until the next boot")
