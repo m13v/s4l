@@ -134,14 +134,25 @@ try:
     from AppKit import NSWindowStyleMaskNonactivatingPanel
 except Exception:
     NSWindowStyleMaskNonactivatingPanel = 0
-# Title-bar "Snooze 1h" button (sits opposite the close cross). Missing on
-# very old AppKit; the card then degrades to cross-only (closing still
-# snoozes, the label is just absent).
+# Title-bar "Snooze 1h" button (top-left, where the traffic lights would be;
+# those are hidden because minimize/zoom are disabled no-ops on this panel and
+# the close cross just duplicated Snooze). Missing on very old AppKit; the
+# card then degrades to the stock cross (closing still snoozes, the labeled
+# button is just absent) because the traffic lights are only hidden when the
+# accessory actually mounted.
 try:
-    from AppKit import NSTitlebarAccessoryViewController, NSLayoutAttributeRight
+    from AppKit import NSTitlebarAccessoryViewController, NSLayoutAttributeLeft
 except Exception:
     NSTitlebarAccessoryViewController = None
-    NSLayoutAttributeRight = None
+    NSLayoutAttributeLeft = None
+try:
+    from AppKit import (
+        NSWindowCloseButton,
+        NSWindowMiniaturizeButton,
+        NSWindowZoomButton,
+    )
+except Exception:
+    NSWindowCloseButton = NSWindowMiniaturizeButton = NSWindowZoomButton = None
 try:
     from AppKit import NSBezelStyleInline
 except Exception:
@@ -889,11 +900,15 @@ class _ReviewController(NSObject):
 
     @objc.python_method
     def _add_snooze_accessory(self, panel):
-        """"Snooze 1h" in the title bar, opposite the close cross: the explicit
-        "not now" affordance. It just closes the panel; the menu bar treats any
-        close with undecided drafts as a snooze, so the cross and this button
-        are the same action, this one merely says so out loud."""
-        if NSTitlebarAccessoryViewController is None or NSLayoutAttributeRight is None:
+        """"Snooze 1h" at the top-left of the title bar, replacing the traffic
+        lights: minimize/zoom were disabled no-op dots on this panel, and the
+        close cross meant snooze anyway, so one labeled button says what the
+        only dismissal actually does. It just closes the panel; the menu bar
+        treats any close with undecided drafts as a snooze. The traffic lights
+        are hidden ONLY once the accessory mounts, so a failure on old AppKit
+        leaves the stock cross as the fallback dismissal. Cmd-W keeps working
+        either way (the Closable mask stays on)."""
+        if NSTitlebarAccessoryViewController is None or NSLayoutAttributeLeft is None:
             return
         try:
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 80, 17))
