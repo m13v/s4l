@@ -38,6 +38,12 @@ States:
                now correctly resolves to 'missing' (below), since the account
                scoping means an orphaned OTHER account's registry is never
                consulted for the active account's health.
+               DIAGNOSTIC-ONLY for the menu bar ⚠ since 2026-07-09: under the
+               wedge the tick can skip 70-90% of fires while the queue still
+               drains every job (jobs arrive ~every 8 min vs 60 fires/hr), so
+               a point-in-time lastRunAt check flip-flops against a healthy
+               pipeline. The menu bar alarms on queue latency instead and
+               renders 'stalled' as a plain detail line via tick_stats().
   'missing'  — the ACTIVE account has no registry with a complete worker set
                (deleted / never scheduled / orphaned by an account switch)
                -> the dashboard offers "Set up draft schedule". Consumers
@@ -268,6 +274,53 @@ def _detail(glob_pattern: str | None = None) -> dict:
                 entry["error"] = str(exc)
             regs.append(entry)
     return {"glob": patterns, "registries": regs}
+
+
+def tick_stats(window_s: int = 3600, glob_pattern: str | None = None) -> dict:
+    """Diagnostic tick-level stats for the active account's worker set: how many
+    per-minute fires the host SKIPPED inside the last window_s (the registry's
+    recordedSkips ledger — under the Desktop warm-session wedge these carry
+    reason per_task_limit) plus the age of the newest successful run. Powers the
+    menu bar's non-alarm "scheduler degraded" detail line when compute() returns
+    'stalled'. NEVER a health verdict on its own: a box skipping 80% of ticks
+    can still drain every job (jobs arrive ~every 8 min vs 60 fires/hr), which
+    is exactly why tick staleness stopped driving the attention ⚠ (2026-07-09).
+    Same account scoping as compute(); pass glob_pattern only for tests."""
+    patterns = [glob_pattern] if glob_pattern is not None else _active_registry_glob_patterns()
+    now = time.time()
+    skips = 0
+    last_skip_epoch = None
+    newest_epoch = None
+    for pattern in patterns:
+        for f in glob.glob(pattern):
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+            except Exception:
+                continue
+            by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+            recs = _registry_worker_recs(by_id)
+            if recs is None:
+                continue
+            epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
+            e = max([x for x in epochs if x is not None], default=None)
+            if e is not None and (newest_epoch is None or e > newest_epoch):
+                newest_epoch = e
+            recorded = d.get("recordedSkips") or {}
+            for tid in WORKER_TASK_IDS:
+                for s in recorded.get(tid) or []:
+                    at = _ms_to_epoch((s or {}).get("at"))
+                    if at is None or (now - at) > window_s:
+                        continue
+                    skips += 1
+                    if last_skip_epoch is None or at > last_skip_epoch:
+                        last_skip_epoch = at
+    return {
+        "skips_in_window": skips,
+        "window_s": window_s,
+        "last_run_age_s": int(now - newest_epoch) if newest_epoch is not None else None,
+        "last_skip_age_s": int(now - last_skip_epoch) if last_skip_epoch is not None else None,
+    }
 
 
 def main() -> int:
