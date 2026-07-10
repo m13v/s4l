@@ -2813,8 +2813,11 @@ class S4LMenuBar(rumps.App):
 
             # present_feedback (the menu bar's feedback item) falls back to
             # the module-level default handler; register ours before any
-            # card shows.
+            # card shows. Same pattern for the title bar's "Discard all…"
+            # button (moved out of the dropdown 2026-07-10), which reuses the
+            # bulk-discard handler wholesale, confirmation alert included.
             s4l_card.set_feedback_handler(self._on_feedback_text)
+            s4l_card.set_discard_all_handler(self._discard_all_pending)
             s4l_card.present_review(
                 drafts,
                 on_decision=lambda d: self._on_card_decision(batch, d),
@@ -3544,12 +3547,9 @@ class S4LMenuBar(rumps.App):
                     )
                 )
             )
-        items.append(
-            rumps.MenuItem(
-                f"Discard {pending_count} pending draft{plural}…",
-                callback=self._discard_all_pending,
-            )
-        )
+        # No bulk-discard item here anymore: "Discard all…" lives in the
+        # review card's title bar (2026-07-10). Reaching it with no card open
+        # is "Review N pending drafts" -> Discard all, two clicks.
         return items
 
 
