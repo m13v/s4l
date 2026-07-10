@@ -1034,7 +1034,18 @@ def compute_target_distribution(platform, context="posting"):
 # mode="invent" and the prompt hands the model the top N as reference
 # material to derive a new style from.
 
-INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
+# 2026-07-10: inline invention retired (rate 0). It ran inside the drafting
+# prep session with the top-performers leaderboard + winner exemplars in
+# context, so every "new" style was a renamed clone of the winning
+# agree-then-relocate move; combined with name-only dedup the registry hit
+# ~938 styles that were mostly one structure. Invention now lives in the
+# standalone scripts/invent_styles.py job (operator-only launchd
+# com.m13v.s4l-invent-styles: the registry is global across installs, so a
+# central daily run replaces per-post rolls). The invent-mode plumbing in
+# pickers/posters is kept intact: register_style() is what the standalone
+# job calls, and a nonzero rate here re-enables the inline path if ever
+# wanted.
+INVENT_RATE = 0.0  # retired inline roll (was 0.05, ~1 in 20 posts)
 CURATED_TOP_N = 5   # size of the invent-mode reference list (top 5 by score)
 
 # Fallback target comment length (chars) for any style that lacks an explicit
