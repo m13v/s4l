@@ -29,7 +29,16 @@ Usage:
 
 Output (stdout, last line is JSON):
   {"ok": true, "handle": "...", "profile": {...}, "posts": [...],
-   "comments": [...], "counts": {...}, "grounding_instructions": "..."}
+   "comments": [...], "top_posts": [...], "top_replies": [...],
+   "counts": {...}, "grounding_instructions": "..."}
+
+top_posts / top_replies are the same items ranked by real engagement
+(likes*3 + retweets*5 + replies*2), each stamped with rank + engagement_score.
+On /with_replies each reply also carries `parent` = {author, text, url} (the
+tweet it replied to, best-effort DOM-adjacent pairing), and the top posts get
+their thread continuation expanded (`thread`: [tweet texts]) by visiting the
+permalink. scripts/voice_exemplars.py turns these into voice.examples +
+persona_corpus.txt exemplars.
 """
 
 from __future__ import annotations
@@ -182,7 +191,11 @@ def scrape_profile(send) -> dict:
 # --------------------------------------------------------------------------- #
 _TIMELINE_JS_TMPL = r"""(function(){
   var ME=%s; // lowercase handle without @
+  var WITH_PARENTS=%s; // true only on /with_replies: pair each reply with the
+                       // other-author article directly above it (same
+                       // conversation cell renders parent then our reply)
   var out=[];
+  var lastOther=null;
   var arts=document.querySelectorAll('article');
   for(var i=0;i<arts.length;i++){
     var art=arts[i];
@@ -194,10 +207,8 @@ _TIMELINE_JS_TMPL = r"""(function(){
       var mm=hh.match(/^\/([A-Za-z0-9_]{1,15})$/);
       if(mm){authorHandle=mm[1].toLowerCase();break;}
     }
-    if(authorHandle && authorHandle!==ME) continue; // skip others' posts (reposts/quotes/threads)
     var tEl=art.querySelector('[data-testid="tweetText"]');
     var text=tEl?(tEl.innerText||'').trim():'';
-    if(!text) continue;
     // permalink + id
     var url='';var id='';
     var statusLinks=art.querySelectorAll('a[href*="/status/"]');
@@ -206,6 +217,16 @@ _TIMELINE_JS_TMPL = r"""(function(){
       var sm=sh.match(/\/status\/(\d+)/);
       if(sm){id=sm[1];url='https://x.com'+sh.split('?')[0];break;}
     }
+    if(authorHandle && authorHandle!==ME){
+      // Someone else's article. On /with_replies it is the parent of our next
+      // reply in the same conversation cell; remember it. On the posts tab it
+      // is a repost/quote we simply skip (WITH_PARENTS=false there).
+      if(WITH_PARENTS && text){
+        lastOther={author:'@'+authorHandle,text:text.slice(0,500),url:url};
+      }
+      continue;
+    }
+    if(!text) continue;
     // reply? presence of a "Replying to" header in the cell
     var isReply=false, replyTo='';
     var spans=art.querySelectorAll('span,div');
@@ -226,15 +247,21 @@ _TIMELINE_JS_TMPL = r"""(function(){
       var m=al.match(/([\d,]+)/);
       return m?parseInt(m[1].replace(/,/g,''),10):0;
     }
-    out.push({text:text,url:url,id:id,is_reply:isReply,reply_to:replyTo,
-              likes:metric('like'),replies:metric('reply'),retweets:metric('retweet')});
+    var item={text:text,url:url,id:id,is_reply:isReply,reply_to:replyTo,
+              likes:metric('like'),replies:metric('reply'),retweets:metric('retweet')};
+    if(WITH_PARENTS){
+      item.parent=lastOther; // may be null (their own standalone post)
+      lastOther=null;        // consume: never pair one parent with two replies
+    }
+    out.push(item);
   }
   return JSON.stringify(out);
 })()"""
 
 
 def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
-                    exclude_ids: "set | None" = None) -> list:
+                    exclude_ids: "set | None" = None,
+                    capture_parents: bool = False) -> list:
     """Scroll the current timeline, collecting up to `want` of the user's OWN
     authored articles (in DOM order = newest first). `exclude_ids` drops items
     already captured elsewhere — that's how the comments pass (/with_replies)
@@ -250,7 +277,8 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
     scrolling to the bottom each step to force the next lazy-load batch."""
     seen: dict[str, dict] = {}
     exclude_ids = exclude_ids or set()
-    expr = _TIMELINE_JS_TMPL % json.dumps(me.lower())
+    expr = _TIMELINE_JS_TMPL % (json.dumps(me.lower()),
+                                "true" if capture_parents else "false")
     STALL_LIMIT = 4
     stall = 0
     for n in range(max_scrolls):
@@ -281,6 +309,69 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
         time.sleep(2.0)
     items = list(seen.values())
     return items[:want]
+
+
+# --------------------------------------------------------------------------- #
+# Engagement ranking + thread expansion for exemplar extraction.
+# --------------------------------------------------------------------------- #
+def _engagement_score(item: dict) -> int:
+    """Same weighting everywhere exemplars are ranked (voice_exemplars.py
+    re-derives it if absent): a retweet is a stronger signal than a like,
+    a like stronger than a reply-back."""
+    return (int(item.get("likes") or 0) * 3
+            + int(item.get("retweets") or 0) * 5
+            + int(item.get("replies") or 0) * 2)
+
+
+def rank_top(items: list, n: int = 5) -> list:
+    """Top n items by engagement, stamped with rank + engagement_score.
+    Zero-engagement items still rank (small accounts often have nothing else);
+    the score on each entry lets downstream decide what to keep."""
+    ranked = sorted(items, key=_engagement_score, reverse=True)[:n]
+    out = []
+    for i, it in enumerate(ranked, 1):
+        e = dict(it)
+        e["rank"] = i
+        e["engagement_score"] = _engagement_score(it)
+        out.append(e)
+    return out
+
+
+_THREAD_JS_TMPL = r"""(function(){
+  var ME=%s;
+  var out=[];var started=false;
+  var arts=document.querySelectorAll('article');
+  for(var i=0;i<arts.length;i++){
+    var art=arts[i];
+    var authorHandle='';
+    var links=art.querySelectorAll('a[href^="/"]');
+    for(var j=0;j<links.length;j++){
+      var hh=links[j].getAttribute('href')||'';
+      var mm=hh.match(/^\/([A-Za-z0-9_]{1,15})$/);
+      if(mm){authorHandle=mm[1].toLowerCase();break;}
+    }
+    var tEl=art.querySelector('[data-testid="tweetText"]');
+    var text=tEl?(tEl.innerText||'').trim():'';
+    if(authorHandle===ME && text){out.push(text);started=true;}
+    else if(started){break;} // first non-ME article after the run = end of thread
+  }
+  return JSON.stringify(out);
+})()"""
+
+
+def expand_thread(send, me: str, url: str) -> list:
+    """Visit a post's permalink and return the consecutive run of the user's own
+    tweets starting at the focal one ([focal, continuation, ...]). Length 1 =
+    not a thread. Bonus: the permalink shows full text, so this also untruncates
+    posts the timeline cut with 'Show more'. Best-effort; [] on failure."""
+    if not url or not _navigate(send, url, settle=3.5, expect="/status/"):
+        return []
+    raw = _eval(send, _THREAD_JS_TMPL % json.dumps(me.lower())) or "[]"
+    try:
+        parts = json.loads(raw)
+    except Exception:
+        parts = []
+    return parts if isinstance(parts, list) else []
 
 
 GROUNDING_INSTRUCTIONS = (
