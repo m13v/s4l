@@ -8,6 +8,15 @@ fires once the last card is decided or the window is closed. The whole AppKit
 surface is isolated behind that one function so the menu bar wiring doesn't
 depend on the windowing details.
 
+The panel is NONACTIVATING and auto-presented cards never take keyboard focus
+(2026-07-09 customer complaint: cards stole the caret mid-typing); the reply
+field becomes editable on first click, and only a user-initiated open
+(present_review(focus=True), the menu bar's "Review N pending drafts")
+activates the app and seats the caret immediately. A title-bar "Snooze 1h"
+button sits opposite the close cross; it and the cross both just close the
+panel, and the menu bar interprets any close with undecided drafts as a
+snooze (drafts stay pending, re-present after REVIEW_SNOOZE_SECONDS).
+
 Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
 "edited": bool, "drop_link": bool, "reject_category": str|None,
 "reject_note": str|None, "interactions": [{"type": str, "ts": str}],
