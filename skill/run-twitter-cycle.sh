@@ -1729,8 +1729,29 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # directive for the whole cycle; this varies STYLE per draft slot), so neither
 # experiment disturbs the other.
 STYLE_ASSIGN_FILE_B=$(mktemp -t s4l_twitter_assign_b_XXXXXX.json)
-for _style_b_attempt in 1 2 3; do
-    s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE_B" >/dev/null 2>&1 || true
+# --- Draft-B exploration source (2026-07-11) ---------------------------------
+# Style B is now the EXPLORE slot: it trials the newest human_derived styles
+# and post-2026-07-10 inventions (least-used first) instead of drawing a
+# second scored pick from the same proven pool as Style A. This is the
+# distribution channel for the standalone invent_styles.py job: the card
+# pick + the posted draft's engagement write a new style's first real score,
+# and winners graduate into the Draft-A pool via the normal sampler. NOTHING
+# is invented here (pick_exploration_style never returns mode=invent). On an
+# empty pool or API failure we fall back to the legacy second scored pick so
+# dual-draft cards never break. The source tag rides the S4L_EXP_ convention:
+# active_experiments.collect() auto-stamps it onto every plan candidate and
+# the review card's details-eye renders it with zero card-side code.
+DRAFT_B_SOURCE=$(python3 -c "
+import json, sys
+sys.path.insert(0, '$REPO_DIR/scripts')
+from engagement_styles import pick_exploration_style
+a = pick_exploration_style('twitter', context='posting', exclude={'$PICKED_STYLE'})
+if a and a.get('style'):
+    with open('$STYLE_ASSIGN_FILE_B', 'w') as f:
+        json.dump(a, f)
+    print(a.get('source') or '')
+" 2>/dev/null || echo "")
+if [ -n "$DRAFT_B_SOURCE" ]; then
     PICKED_STYLE_B=$(python3 -c "
 import json
 try:
@@ -1740,7 +1761,22 @@ try:
 except Exception:
     print('')
 " 2>/dev/null)
-    PICKED_MODE_B=$(python3 -c "
+    PICKED_MODE_B="use"
+fi
+if [ -z "${PICKED_STYLE_B:-}" ]; then
+    DRAFT_B_SOURCE="scored_fallback"
+    for _style_b_attempt in 1 2 3; do
+        s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE_B" >/dev/null 2>&1 || true
+        PICKED_STYLE_B=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE_B') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+        PICKED_MODE_B=$(python3 -c "
 import json
 try:
     with open('$STYLE_ASSIGN_FILE_B') as f:
@@ -1749,11 +1785,13 @@ try:
 except Exception:
     print('use')
 " 2>/dev/null)
-    if [ "$PICKED_MODE" = "invent" ] || [ "$PICKED_MODE_B" = "invent" ] || [ "$PICKED_STYLE_B" != "$PICKED_STYLE" ]; then
-        break
-    fi
-done
-log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)}"
+        if [ "$PICKED_MODE" = "invent" ] || [ "$PICKED_MODE_B" = "invent" ] || [ "$PICKED_STYLE_B" != "$PICKED_STYLE" ]; then
+            break
+        fi
+    done
+fi
+export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
+log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)} source=$DRAFT_B_SOURCE"
 
 # --- Draft-prompt A/B: decouple product pivot (2026-06-29) -------------------
 # Per-CYCLE arm (the prep session drafts the whole batch from ONE prompt, so
