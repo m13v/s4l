@@ -193,9 +193,21 @@ def build_prompt(platform, replies, reserved_names):
     lines.append("")
     lines.append(
         "These replies all WON the thread (top of the conversation by likes). "
-        "Find the shared pattern that makes them work — the rhetorical move, "
+        "Find the shared pattern that makes them work: the rhetorical move, "
         "the structural shape, the relationship to the OP. Most winners "
         "share ONE pattern; that pattern is your new engagement style."
+    )
+    lines.append("")
+    lines.append(
+        "PRESERVE THE STRUCTURAL FINGERPRINT. Do not smooth the pattern "
+        "into a generic one-liner ('add a thoughtful counterpoint'); keep "
+        "what the winning replies actually DO on the page: how the first "
+        "words enter (lowercase noun, a number, the question itself, a "
+        "quoted phrase), how many sentences and of what shape (one clipped "
+        "line, two short + one long, a fragment), where the punch sits, "
+        "and what the reply refuses to do (no greeting, no hedge, no "
+        "summary). The char counts shown per reply are part of the "
+        "fingerprint; notice where the winners cluster."
     )
     lines.append("")
     lines.append(
@@ -209,14 +221,15 @@ def build_prompt(platform, replies, reserved_names):
     )
     lines.append("")
     for i, r in enumerate(replies, 1):
+        content = r.get("reply_content") or ""
         lines.append(
             f"### #{i} (likes={r['likes']}, replies={r['replies_count']}, "
-            f"rt={r['retweets']})"
+            f"rt={r['retweets']}, chars={len(content.strip())})"
         )
         lines.append(f"Thread: {r['thread_url']}")
         handle = r.get("reply_author_handle") or "(unknown)"
         lines.append(f"Reply by @{handle}:")
-        lines.append(f"> {r['reply_content']}")
+        lines.append(f"> {content}")
         lines.append("")
 
     lines.append("## Schema (match exactly)")
@@ -230,7 +243,12 @@ def build_prompt(platform, replies, reserved_names):
     lines.append("```")
     lines.append("{")
     lines.append('  "name": "<snake_case_name>",')
-    lines.append('  "description": "<one to three sentences describing the style>",')
+    lines.append(
+        '  "description": "<one to three sentences carrying the structural '
+        "fingerprint: the DEFINING MOVE (the one thing every draft in this "
+        "style must contain), the OPENING (how the first words enter), and "
+        'the sentence shape>",'
+    )
     lines.append('  "example": "<one short OP + reply pair demonstrating the style>",')
     lines.append('  "best_in": {')
     lines.append(f'    "{platform}": ["<short context label>", ...],')
@@ -255,8 +273,11 @@ def build_prompt(platform, replies, reserved_names):
         "MOVE (e.g. `mirror_and_extend`, `flip_to_alt`, not `good_reply`)."
     )
     lines.append(
-        "3. The description should make the style copyable: a future model "
-        "reading just that one sentence should know what to write."
+        "3. The description must make the style copyable AS A FORM: a future "
+        "model reading only the description must know the defining move, how "
+        "to open, and what sentence shape to write. 'Add a sharp "
+        "counterpoint' fails this test; 'one clipped sentence, no greeting, "
+        "opens with the concrete number the OP left out' passes."
     )
     lines.append(
         "4. The example should be a realistic OP + reply pair, not lifted "
@@ -270,7 +291,10 @@ def build_prompt(platform, replies, reserved_names):
     lines.append(
         "6. NEVER propose a style about including a product, a URL, or a "
         "mechanism. Our link-tail layer handles that downstream. The style "
-        "is about the text BEFORE the link."
+        "is about the text BEFORE the link. The note MAY state in one "
+        "clause how a plain product mention would enter this style if ever "
+        "(e.g. 'product name fits as the concrete example slot; never in "
+        "the opening'), but no URLs or link mechanics."
     )
     return "\n".join(lines)
 
