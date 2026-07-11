@@ -393,15 +393,21 @@ def _is_actionable(e: dict) -> bool:
     # as actionable as a reject (and it feeds edit_examples).
     if e.get("edited"):
         return True
-    # An explicit pairwise draft choice (switched to B, or tried B and came
-    # back to A) is style evidence on par with an edit; without this trigger a
-    # reviewer who mostly approves would bank pairwise signals behind the
-    # plain-approvals gate forever. Hover-only informed keeps stay
-    # NON-actionable on purpose: they are corroborating-weight evidence (like
-    # no_reason_given) and ride along with the next real trigger instead of
-    # burning a Claude turn on their own.
+    # Any pairwise draft signal triggers the digest (2026-07-10 user rule,
+    # widened same evening): an explicit choice (switched to B, or tried B
+    # and came back to A) is style evidence on par with an edit, and even a
+    # hover-read of the other draft (>= DRAFT_READ_MS) is a small but real
+    # signal that must flow through the pipeline rather than bank forever
+    # behind the plain-approvals gate. The PROMPT still weights the tiers
+    # (explicit strong, hover-read weak/corroborating); this gate only
+    # decides when a Claude turn is worth burning. A zero-interaction
+    # approve (second_draft_not_read) remains non-actionable: no signal.
     dc = _draft_choice(e)
-    if dc and (not dc.get("auto_selected") or dc.get("visited_other")):
+    if dc and (
+        not dc.get("auto_selected")
+        or dc.get("visited_other")
+        or (dc.get("hover_b_ms") or 0) >= DRAFT_READ_MS
+    ):
         return True
     return bool((e.get("reject_note") or "").strip())
 
