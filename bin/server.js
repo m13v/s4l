@@ -6726,6 +6726,9 @@ async function handleApi(req, res) {
                    AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
                    AVG(p.comments_count) AS avg_replies,
                    COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+                   AVG(LENGTH(p.our_content)) AS avg_chars,
+                   STDDEV_POP(LENGTH(p.our_content)) AS sd_chars,
+                   COUNT(DISTINCT p.engagement_style) AS n_styles,
                    MIN(p.posted_at) AS started_at
             FROM posts p
             LEFT JOIN (
@@ -6761,6 +6764,12 @@ async function handleApi(req, res) {
               avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
               avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
               avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              // Form-variance readout: the v3 hypothesis is that styles shape
+              // output, so per-arm length spread and style diversity are the
+              // leading indicators before engagement accumulates.
+              avg_chars: row.avg_chars != null ? Number(row.avg_chars) : null,
+              sd_chars: row.sd_chars != null ? Number(row.sd_chars) : null,
+              n_styles: row.n_styles != null ? Number(row.n_styles) : null,
               started_at: row.started_at || null,
             };
           });
@@ -12937,6 +12946,12 @@ async function loadExperiments() {
       // avg_clicks is populated only for the tail-link experiment; the
       // cycle_variant rows don't compute it and show "—".
       const clicks = v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014';
+      // avg_chars/sd_chars/n_styles come from the draft-prompt experiment
+      // (form-variance readout); other experiments leave them null.
+      const chars = v.avg_chars != null
+        ? Math.round(v.avg_chars) + (v.sd_chars != null ? '\u00b1' + Math.round(v.sd_chars) : '')
+        : '\u2014';
+      const styles = v.n_styles != null ? fmtIntK(v.n_styles) : '\u2014';
       // weight_pct is the configured assignment share (33.33 for ripen
       // ABC, 50 for the two coin-flip experiments). Shown next to the
       // actual share row above the table so operators can spot drift.
@@ -12954,6 +12969,8 @@ async function loadExperiments() {
           '<td class="num">' + fmtIntK(v.n_posted) + '</td>' +
           '<td class="num">' + postRate + '</td>' +
           '<td class="num">' + threadAge + '</td>' +
+          '<td class="num">' + chars + '</td>' +
+          '<td class="num">' + styles + '</td>' +
           '<td class="num">' + views + '</td>' +
           '<td class="num">' + likes + '</td>' +
           '<td class="num">' + replies + '</td>' +
@@ -13044,6 +13061,8 @@ async function loadExperiments() {
             '<th class="num">Posted</th>' +
             '<th class="num">Post rate</th>' +
             '<th class="num">Thread age @discover (p50)</th>' +
+            '<th class="num">Len avg±sd</th>' +
+            '<th class="num">Styles</th>' +
             '<th class="num">Views/post</th>' +
             '<th class="num">Likes/post</th>' +
             '<th class="num">Replies/post</th>' +
