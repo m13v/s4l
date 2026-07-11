@@ -2208,6 +2208,27 @@ CRITICAL:
 # installs) treats --allowedTools as a one-value flag, so a space-separated second
 # tool would leak in as the prompt. On the box these flags ride through
 # claude_job.py; Desktop's own web search + the reworded prompt enable it there.
+# --- Prep-prompt snapshot (2026-07-11) ---------------------------------------
+# Persist the exact rendered PREP_PROMPT per batch so prompt-block presence is
+# verifiable after any release (grep the file), instead of reverse-engineering
+# it from package scripts. The queue's prompt-*.md files are transient work
+# files deleted on completion, and the generation trace deliberately carries
+# only the exemplar context, so this is the ONLY durable full-prompt record.
+# Local-only, newest 50 kept (file cleanup, not candidate-row retention; the
+# no-retention rule covers DB *_candidates rows). Never blocks the run.
+PREP_PROMPT_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/prep-prompts"
+if mkdir -p "$PREP_PROMPT_DIR" 2>/dev/null; then
+    _PP_FILE="$PREP_PROMPT_DIR/prep-prompt-$BATCH_ID.md"
+    if printf '%s' "$PREP_PROMPT" > "$_PP_FILE" 2>/dev/null; then
+        ls -t "$PREP_PROMPT_DIR"/prep-prompt-*.md 2>/dev/null | tail -n +51 | while IFS= read -r _pp_old; do
+            rm -f "$_pp_old"
+        done
+        log "[prep_prompt_snapshot] batch=$BATCH_ID bytes=$(wc -c < "$_PP_FILE" | tr -d ' ') path=$_PP_FILE"
+    else
+        log "WARN: prep-prompt snapshot write failed for batch=$BATCH_ID (non-fatal)"
+    fi
+fi
+
 PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" --allowedTools WebSearch,WebFetch -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
