@@ -55,15 +55,24 @@ DESCRIPTIONS = {
         ),
     },
     "draft_prompt": {
+        "treatment_v3": (
+            "style-as-form: the assigned style is the binding FORM (defining "
+            "move + per-style length + self-check), learned preferences apply "
+            "inside it; keeps the v2 skeleton ban"
+        ),
+        "control_v3": (
+            "plain draft directive, uniform length clamp, no structure ban"
+        ),
+        # v2 arms (skeleton-ban) retired 2026-07-10; v1 arms
+        # (decoupled-product-pivot) retired 2026-07-06; kept so any
+        # straggler card from an old plan still explains itself.
         "treatment_v2": (
-            "skeleton ban: forbids the concede-then-reverse "
+            "v2, retired: skeleton ban, forbids the concede-then-reverse "
             '"easy X / hard Y" structure and forces varied entry points'
         ),
         "control_v2": (
-            "current draft directive (style + product pivot), no structure ban"
+            "v2, retired: draft directive (style + product pivot), no structure ban"
         ),
-        # v1 arms (decoupled-product-pivot) retired 2026-07-06; kept so any
-        # straggler card from an old plan still explains itself.
         "treatment": "v1, retired: product pivot decoupled from the reply",
         "control": "v1, retired: original draft directive",
     },
@@ -113,8 +122,9 @@ def collect(env=None):
         if var.startswith(ENV_PREFIX) and (v or "").strip():
             out[var[len(ENV_PREFIX):].lower()] = v.strip()
     # 2026-07-06: the personal_brand persona directive is now ARM-AWARE in
-    # run-twitter-cycle.sh (treatment_v2 adds the concede-then-reverse skeleton ban,
-    # control_v2 does not), so the assigned draft_prompt arm DOES touch persona
+    # run-twitter-cycle.sh (treatment_v3 adds the skeleton ban + two-layer
+    # style/preferences contract, control_v3 does not), so the assigned
+    # draft_prompt arm DOES touch persona
     # drafts. Keep it stamped so the arm surfaces on persona cards and the per-arm
     # readout covers both lanes. (Previously dropped here because the persona
     # directive overrode both arms wholesale; that is no longer the case.)
