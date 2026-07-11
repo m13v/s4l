@@ -36,7 +36,7 @@ import json
 import os
 import random
 import sys as _sys_mod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ── Style taxonomy ──────────────────────────────────────────────────
 
@@ -1339,6 +1339,106 @@ def pick_style_for_post(platform, context="posting",
         "distribution_snapshot": distribution_snapshot,
         "picked_at": picked_at,
     }
+
+
+# Days back a model_invented style still counts as "recent" for the Draft-B
+# exploration pool. The registry holds ~900 pre-2026-07-10 inventions that
+# are mostly clones of the agree-then-relocate skeleton (see the
+# invent_styles.py docstring); the exploration slot exists to trial the
+# standalone job's structurally-diverse output, not to resurrect those.
+# human_derived rows are NOT date-gated: they arrive one per platform per
+# day and least-used ordering naturally favors the fresh ones.
+EXPLORATION_INVENTED_MAX_AGE_DAYS = 14
+# Hard floor: never trial inventions from before the inline INVENT_RATE was
+# zeroed (2026-07-10). Anything older is the clone flood, regardless of how
+# recent the rolling window makes it look.
+EXPLORATION_INVENTED_EPOCH = datetime(2026, 7, 10, 21, 0,
+                                      tzinfo=timezone.utc)
+
+
+def pick_exploration_style(platform, context="posting", exclude=None,
+                           rng=None):
+    """Draft-B exploration picker (2026-07-11). NEVER invents.
+
+    Returns an assignment dict in the exact pick_style_for_post() shape
+    (so s4l_render_style_block and every downstream consumer work
+    unchanged) with an extra "source" key in {"human_derived",
+    "model_invented"}, or None when the pool is empty / anything fails
+    (caller falls back to the scored picker).
+
+    Pool: registry rows with kind='human_derived' (any age) plus
+    kind='model_invented' rows registered in the last
+    EXPLORATION_INVENTED_MAX_AGE_DAYS days. Selection is LEAST-USED first
+    (30-day post count on this platform via compute_target_distribution),
+    uniform among the up-to-5 least-used, so every new style gets trial
+    exposure instead of waiting behind the score-weighted sampler's
+    winner-take-most weights. This is the distribution channel for the
+    standalone invent_styles.py job; the review card's pick plus the
+    posted draft's engagement write the style's first real score, and
+    winners graduate into the Draft-A pool through the normal sampler.
+    """
+    rnd = rng or random
+    try:
+        never = set(PLATFORM_POLICY.get(platform, {}).get("never", []))
+        skip = set(exclude or ()) | never
+        registry = _fetch_registry_styles()
+        cutoff = max(
+            datetime.now(timezone.utc)
+            - timedelta(days=EXPLORATION_INVENTED_MAX_AGE_DAYS),
+            EXPLORATION_INVENTED_EPOCH,
+        )
+        pool = {}
+        for name, entry in registry.items():
+            if name in skip:
+                continue
+            if (entry.get("status") or "active") != "active":
+                continue
+            kind = entry.get("kind")
+            if kind == "human_derived":
+                pool[name] = entry
+            elif kind == "model_invented":
+                invented_at = _parse_iso_utc(entry.get("invented_at"))
+                if invented_at is not None and invented_at >= cutoff:
+                    pool[name] = entry
+        if not pool:
+            return None
+        usage = {r["style"]: int(r.get("n") or 0)
+                 for r in compute_target_distribution(platform,
+                                                      context=context)}
+        names = list(pool.keys())
+        rnd.shuffle(names)  # random tie order before the stable sort
+        names.sort(key=lambda s: usage.get(s, 0))
+        chosen = rnd.choice(names[:5])
+        entry = pool[chosen]
+        return {
+            "mode": "use",
+            "style": chosen,
+            "description": entry.get("description"),
+            "example": entry.get("example"),
+            "note": entry.get("note"),
+            "target_chars": entry.get("target_chars") or DEFAULT_TARGET_CHARS,
+            "source": entry.get("kind"),
+            "usage_n_30d": usage.get(chosen, 0),
+            "reference_styles": [],
+            "distribution_snapshot": [],
+            "picked_at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"),
+        }
+    except Exception:
+        return None
+
+
+def _parse_iso_utc(value):
+    """Parse an ISO timestamp into aware-UTC; None on any failure."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
 
 
 def get_assigned_style_prompt(platform, assignment, context="posting"):
