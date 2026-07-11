@@ -145,6 +145,10 @@ VALID_SIGNALS = {
     "session_invalid_marker",
     "captcha_detected",
     "manual",
+    # Deliberate pause from scripts/linkedin_cadence.py (4-active-days /
+    # 2-day-break schedule). Not an incident: recover-check must never try to
+    # auto-recover it, and engage() should never email on it.
+    "scheduled_break",
 }
 
 
@@ -893,6 +897,14 @@ def _cmd_recover_check(args):
     terminal, too young, or still inside an unelapsed hold window)."""
     if not is_active():
         print("recover-check: killswitch not active, nothing to recover", file=sys.stderr)
+        sys.exit(1)
+    payload = read() or {}
+    if payload.get("signal") == "scheduled_break":
+        print(
+            "recover-check: scheduled_break active (cadence pause, not a real "
+            "incident); deferring to scripts/linkedin_cadence.py, not probing",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if is_terminal():
         print(
