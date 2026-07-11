@@ -68,6 +68,15 @@ python3 "$REPO_DIR/scripts/scan_twitter_mentions_browser.py" --json-file "$NOTIF
     || log "WARNING: Phase A scan_twitter_mentions_browser.py exited with code $?"
 rm -f "$NOTIFS_JSON"
 
+# Phase A2: fill parent-thread linkage on mention-discovered rows. The
+# notifications feed hides the parent tweet id, so scan rows land with
+# mention_id only; this resolves post_id / parent_reply_id / project via
+# fxtwitter HTTP (no browser, no model). Newest rows first, bounded per run.
+log "Phase A2: Enriching parent linkage on mention replies..."
+python3 "$REPO_DIR/scripts/enrich_reply_parents.py" --limit 25 2>&1 \
+    | tee -a "$LOG_FILE" \
+    || log "WARNING: Phase A2 enrich_reply_parents.py exited with code $?"
+
 # ═══════════════════════════════════════════════════════
 # PHASE B: Respond to pending Twitter replies
 # ═══════════════════════════════════════════════════════
