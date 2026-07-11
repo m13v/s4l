@@ -7,6 +7,7 @@ node_modules/
 config.json
 config.json.bak.*
 .playwright-mcp/
+iphone-automation/
 __pycache__/
 *.db
 *.db-journal
