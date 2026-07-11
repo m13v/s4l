@@ -226,38 +226,50 @@ def cmd_pending_data(batch_size: int) -> int:
     # top slot then and get enriched.
     ENRICH_TOP_N = 60
     history_blocks = [""] * len(rows)
+    chain_blocks = [""] * len(rows)
     try:
         from concurrent.futures import ThreadPoolExecutor
         from counterparty_history import get_counterparty_history_block
 
         def _enrich(r):
             author = r.get("their_author")
-            if not author:
-                return ""
+            history = ""
+            if author:
+                try:
+                    _disengage, history = get_counterparty_history_block(
+                        platform="x",
+                        author=author,
+                        current_post_id=r.get("post_id"),
+                        current_reply_id=r.get("id"),
+                    )
+                    history = history or ""
+                except Exception as e:
+                    print(
+                        f"[engage_twitter_helper] counterparty_history failed "
+                        f"for @{author}: {e}",
+                        file=sys.stderr,
+                    )
             try:
-                _disengage, block = get_counterparty_history_block(
-                    platform="x",
-                    author=author,
-                    current_post_id=r.get("post_id"),
-                    current_reply_id=r.get("id"),
-                )
-                return block or ""
+                chain = _build_chain_block(r)
             except Exception as e:
                 print(
-                    f"[engage_twitter_helper] counterparty_history failed "
-                    f"for @{author}: {e}",
+                    f"[engage_twitter_helper] chain block failed "
+                    f"for reply {r.get('id')}: {e}",
                     file=sys.stderr,
                 )
-                return ""
+                chain = ""
+            return (history, chain)
 
         top_rows = rows[:ENRICH_TOP_N]
         with ThreadPoolExecutor(max_workers=8) as ex:
-            for idx, block in enumerate(ex.map(_enrich, top_rows)):
-                history_blocks[idx] = block
+            for idx, (history, chain) in enumerate(ex.map(_enrich, top_rows)):
+                history_blocks[idx] = history
+                chain_blocks[idx] = chain
         non_empty = sum(1 for b in history_blocks if b)
+        chains_non_empty = sum(1 for b in chain_blocks if b)
         print(
-            f"[engage_twitter_helper] counterparty_history enriched "
-            f"{len(top_rows)}/{len(rows)} rows ({non_empty} with non-empty block)",
+            f"[engage_twitter_helper] enriched {len(top_rows)}/{len(rows)} rows "
+            f"(history={non_empty}, chain={chains_non_empty} non-empty)",
             file=sys.stderr,
         )
     except Exception as e:
@@ -268,7 +280,7 @@ def cmd_pending_data(batch_size: int) -> int:
         )
 
     out = []
-    for r, history_block in zip(rows, history_blocks):
+    for r, history_block, chain_block in zip(rows, history_blocks, chain_blocks):
         out.append({
             "id": r.get("id"),
             "platform": r.get("platform"),
@@ -284,6 +296,7 @@ def cmd_pending_data(batch_size: int) -> int:
             "is_our_original_post": int(r.get("is_our_original_post") or 0),
             "project_name": r.get("project_name"),
             "counterparty_history_block": history_block,
+            "conversation_chain_block": chain_block,
             "their_media_block": _render_media_block(r.get("their_media")),
         })
     # json_agg(...) returns null when the array is empty; engage-twitter.sh's
