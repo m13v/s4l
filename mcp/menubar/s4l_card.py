@@ -741,6 +741,12 @@ class _ReviewController(NSObject):
         # timestamp of any hover still in progress (flushed on decision).
         self._draft_hover_ms = {0: 0, 1: 0}
         self._draft_hover_open = {}
+        # Slots the caret has actually been in this card (2026-07-10 follow-up):
+        # lets the decision distinguish "clicked into B, then came BACK to A"
+        # (an explicit head-to-head choice of A, per user) from "never touched
+        # B at all". Only the UNCHOSEN slot's membership matters at decision
+        # time; the selected slot is trivially visited.
+        self._draft_visited = set()
         # Attention anchors for the unattended-review watchdog: the stack counts
         # as "touched" on present, on any tracked interaction, and on any
         # decision. No touch past the watchdog threshold = the user is not
@@ -1070,6 +1076,7 @@ class _ReviewController(NSObject):
             self._selected_draft = None
             self._draft_hover_ms = {0: 0, 1: 0}
             self._draft_hover_open = {}
+            self._draft_visited = set()
         self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
@@ -1688,11 +1695,18 @@ class _ReviewController(NSObject):
         except Exception:
             return
         for slot, cand_tv in (self._draft_textviews or {}).items():
-            if cand_tv is tv and slot != self._selected_draft:
+            if cand_tv is not tv:
+                continue
+            # Visited even when it's already the selected slot: membership of
+            # the eventually-UNCHOSEN slot is what _record reads, and that
+            # slot only ever gets the caret via a deliberate user click (the
+            # auto-focus seat in _render targets the selected slot only).
+            self._draft_visited.add(slot)
+            if slot != self._selected_draft:
                 self._selected_draft = slot
                 self._textview = cand_tv
                 self._update_draft_borders()
-                break
+            break
 
     @objc.python_method
     def _update_draft_borders(self):
@@ -1779,6 +1793,10 @@ class _ReviewController(NSObject):
                 "unchosen_style": other.get("style") or None,
                 "hover_a_ms": int(self._draft_hover_ms.get(0, 0)),
                 "hover_b_ms": int(self._draft_hover_ms.get(1, 0)),
+                # True = the caret was in the unchosen box at some point, i.e.
+                # they tried the other draft and came back: an explicit choice
+                # even when the winner is the preselected default.
+                "visited_other": bool((1 - sel_idx) in self._draft_visited),
             }
         else:
             orig = (d.get("reply_text") or "").strip()
