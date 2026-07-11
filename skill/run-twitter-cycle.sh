@@ -2047,7 +2047,7 @@ All project configs: $ALL_PROJECTS_JSON
 
 ## PROJECT TOP PERFORMERS (query on demand, do NOT skip routing first)
 The feedback reports below carry a per-style exemplar only; project winners are no longer bulk-injected. AFTER you have decided which project a candidate's draft is for, you MAY pull that project's own recent winners (last 30 days, ranked by real click rate) when you are unsure how this product converts in replies:
-   python3 $REPO_DIR/scripts/top_performers.py --platform twitter --project 'PROJECT_NAME' --top 3 --brief
+   python3 $REPO_DIR/scripts/top_performers.py --platform twitter --project 'PROJECT_NAME' --top 3 --brief --invoked-by '$BATCH_ID'
 (PROJECT_NAME exactly as it appears in the candidate's 'Project match' / config.json.) Treat the results as evidence of which CLAIMS and ANGLES landed for that product, never as structural templates: do not copy their sentence shape, opener, or pivot wording. One call per project at most; skip the call entirely for projects you already queried this session.
 
 $RECENT_SELF_BLOCK
@@ -2363,6 +2363,33 @@ if [ "$PREP_PARSE_EXIT" -eq 0 ] && [ -f "$PLAN_FILE" ]; then
     PLAN_COUNT=$(python3 -c "import json; print(len(json.load(open('$PLAN_FILE')).get('candidates') or []))" 2>/dev/null || echo 0)
 fi
 log "Phase 2b-prep complete. plan_count=$PLAN_COUNT"
+
+# On-demand project-winners usage marker (2026-07-10). top_performers.py
+# appends a JSON line to the state-dir ledger on every --project call (the
+# draft prompt tells the model to pass --invoked-by "$BATCH_ID"). Count this
+# batch's lines and log a greppable marker so "did the drafting session
+# actually use the per-project query" is answerable from the cycle log alone.
+# Stderr-marker convention: format is load-bearing elsewhere; keep it stable.
+TP_ONDEMAND=$(python3 -c "
+import json, os, sys
+path = os.path.join(os.environ.get('S4L_STATE_DIR', os.path.expanduser('~/.social-autoposter-mcp')), 'top-performers-invocations.jsonl')
+n, projects = 0, []
+try:
+    for line in open(path):
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get('invoked_by') == '$BATCH_ID':
+            n += 1
+            p = r.get('project')
+            if p and p not in projects:
+                projects.append(p)
+except OSError:
+    pass
+print(f'{n} projects={projects}')
+" 2>/dev/null || echo "0 projects=[]")
+log "[project_top_performers] batch=$BATCH_ID on_demand_invocations=$TP_ONDEMAND"
 
 # twitter-browser lock was already released right after thread-media capture
 # (before the Claude drafting call above), since nothing from there through
