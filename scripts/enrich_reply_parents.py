@@ -173,13 +173,12 @@ def enrich_row(row, state, sleep_s, dry_run):
     if state.get(tid):
         return "state_skip"
 
-    chain, terminal = walk_ancestors(handle, tid, sleep_s)
-    if not chain:
+    focal, chain, terminal = walk_ancestors(handle, tid, sleep_s)
+    if focal is None:
         if terminal == "transient":
             return "transient"  # retry next run, no state write
-        # Deleted/protected focal tweet, or a standalone mention (not a reply).
-        state[tid] = "gone" if terminal == "gone" else "not_a_reply"
-        return state[tid]
+        state[tid] = "gone"  # deleted/protected focal tweet
+        return "gone"
 
     patch = {}
     matched_post = None
@@ -193,24 +192,56 @@ def enrich_row(row, state, sleep_s, dry_run):
         if not row.get("project_name") and matched_post.get("project_name"):
             patch["project_name"] = matched_post["project_name"]
 
-    parent_id, _parent_handle = chain[0]
-    tracked = lookup_tracked_reply(parent_id)
-    if tracked and tracked["id"] != rid:
-        patch["parent_reply_id"] = tracked["id"]
-        patch["depth"] = (tracked.get("depth") or 1) + 1
+    if chain:
+        parent_id, _parent_handle = chain[0]
+        # Immediate parent: another inbound reply we track, or a reply WE
+        # posted (the dominant case: a fan replying to our engagement reply).
+        tracked = lookup_tracked_reply(parent_id)
+        if tracked and tracked["id"] != rid:
+            patch["parent_reply_id"] = tracked["id"]
+            patch["depth"] = (tracked.get("depth") or 1) + 1
+        else:
+            ours = lookup_our_posted_reply(parent_id)
+            if ours and ours["id"] != rid:
+                patch["parent_reply_id"] = ours["id"]
+                patch["depth"] = (ours.get("depth") or 1) + 1
+                if "post_id" not in patch and ours.get("post_id"):
+                    patch["post_id"] = ours["post_id"]
+                if not row.get("project_name") and not patch.get("project_name") \
+                        and ours.get("project_name"):
+                    patch["project_name"] = ours["project_name"]
+
+    # Quote linkage: a quote-tweet of our post (or of a reply we posted) is
+    # engagement on our content even when replying_to_status is empty.
+    quote_id = str(((focal.get("quote") or {}).get("id")) or "")
+    if quote_id and "post_id" not in patch:
+        qpost = lookup_our_post(quote_id)
+        if qpost:
+            patch["post_id"] = qpost["id"]
+            if not row.get("project_name") and not patch.get("project_name") \
+                    and qpost.get("project_name"):
+                patch["project_name"] = qpost["project_name"]
+        elif "parent_reply_id" not in patch:
+            qours = lookup_our_posted_reply(quote_id)
+            if qours and qours["id"] != rid:
+                patch["parent_reply_id"] = qours["id"]
+                patch["depth"] = (qours.get("depth") or 1) + 1
+                if qours.get("post_id"):
+                    patch["post_id"] = qours["post_id"]
 
     if terminal == "root":
-        root_handle = (chain[-1][1] or "").lstrip("@")
-        if root_handle and not row.get("thread_author_handle"):
+        root_handle = (chain[-1][1] if chain else (focal.get("author") or {}).get("screen_name") or "")
+        root_handle = (root_handle or "").lstrip("@")
+        if chain and root_handle and not row.get("thread_author_handle"):
             patch["thread_author_handle"] = root_handle
 
     if not patch:
         if terminal == "transient":
             return "transient"  # incomplete walk; retry next run
-        # Full chain walked, nothing of ours in it: a foreign thread. Remember
-        # so we don't rewalk it every run.
-        state[tid] = "no_link"
-        return "no_link"
+        # Chain walked to root / cut by a deleted ancestor / not a reply at
+        # all, and nothing of ours anywhere in it: remember permanently.
+        state[tid] = "no_link" if chain else "not_a_reply"
+        return state[tid]
 
     if dry_run:
         print(f"  [DRY] reply {rid}: {json.dumps(patch)}")
