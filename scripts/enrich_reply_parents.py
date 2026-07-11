@@ -87,11 +87,14 @@ def fetch_fxtwitter(handle, tweet_id):
 def walk_ancestors(handle, tweet_id, sleep_s):
     """Ancestor chain bottom-up: [(id, handle), ...] parent first, root last.
 
-    Returns (chain, terminal) where terminal is 'root' when the walk reached a
-    non-reply tweet, or 'cut' when a hop was deleted/protected/transient (the
-    chain up to that point is still usable, but root attribution is not).
+    Returns (focal, chain, terminal): focal is the fetched tweet object for
+    tweet_id itself (None when it is gone/unfetchable — needed for quote
+    linkage), terminal is 'root' when the walk reached a non-reply tweet,
+    'gone'/'transient' when a hop was deleted/protected/errored (the chain up
+    to that point is still usable, but root attribution is not), or 'hop_cap'.
     """
     chain = []
+    focal = None
     cur_handle, cur_id = handle, tweet_id
     for _ in range(MAX_HOPS):
         status, tweet = fetch_fxtwitter(cur_handle, cur_id)
@@ -99,14 +102,16 @@ def walk_ancestors(handle, tweet_id, sleep_s):
         if status != "ok":
             # 'gone' is terminal (deleted/protected); 'transient' must NOT be
             # remembered, the next run retries it.
-            return chain, status
+            return focal, chain, status
+        if focal is None:
+            focal = tweet
         parent_id = tweet.get("replying_to_status")
         parent_handle = tweet.get("replying_to") or ""
         if not parent_id:
-            return chain, "root"
+            return focal, chain, "root"
         chain.append((str(parent_id), parent_handle))
         cur_handle, cur_id = parent_handle, parent_id
-    return chain, "hop_cap"
+    return focal, chain, "hop_cap"
 
 
 def lookup_our_post(tweet_id):
@@ -121,6 +126,16 @@ def lookup_tracked_reply(tweet_id):
     resp = api_get(
         "/api/v1/replies",
         query={"platform": "x", "their_comment_id": str(tweet_id), "limit": "1"},
+    )
+    rows = (resp.get("data") or {}).get("replies") or []
+    return rows[0] if rows else None
+
+
+def lookup_our_posted_reply(tweet_id):
+    """Reply row where WE authored the tweet (our_reply_id / our_reply_url)."""
+    resp = api_get(
+        "/api/v1/replies",
+        query={"platform": "x", "our_reply_status_id": str(tweet_id), "limit": "1"},
     )
     rows = (resp.get("data") or {}).get("replies") or []
     return rows[0] if rows else None
