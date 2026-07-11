@@ -1725,7 +1725,7 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # are actually different (a same-name pair defeats the whole point); INVENT
 # mode on either side is accepted immediately since an invented name is
 # definitionally distinct from a pinned one. This is orthogonal to the
-# treatment_v2/control_v2 draft-prompt A/B below (that varies WORDING of the
+# treatment_v3/control_v3 draft-prompt A/B below (that varies WORDING of the
 # directive for the whole cycle; this varies STYLE per draft slot), so neither
 # experiment disturbs the other.
 STYLE_ASSIGN_FILE_B=$(mktemp -t s4l_twitter_assign_b_XXXXXX.json)
@@ -1793,38 +1793,44 @@ fi
 export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
 log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)} source=$DRAFT_B_SOURCE"
 
-# --- Draft-prompt A/B: decouple product pivot (2026-06-29) -------------------
+# --- Draft-prompt A/B: style-as-form (v3, 2026-07-10) ------------------------
 # Per-CYCLE arm (the prep session drafts the whole batch from ONE prompt, so
 # assignment is at cycle granularity, not per post; the whole batch shares it).
-#   control   = the current draft directive verbatim.
-#   treatment = v2 (2026-07-06): bans the concede-then-reverse antithesis skeleton
-#               ('X is the easy part, the hard part is Y', "not X it's Y", etc.) in
-#               ANY form and forces varied entry points. v1 (2026-06-29) only
-#               forbade pivoting to the PRODUCT, which the model satisfied while
-#               keeping the skeleton (measured: treatment 30% ~= control 28% on
-#               857 local replies), so v2 bans the STRUCTURE, not just the product
-#               tail. The SAME skeleton ban is also added to the personal_brand
-#               directive below (which overrides both arms), so the persona lane
-#               (e.g. customer personal-brand accounts like Karol) gets it too.
-#               Product still mentioned only when genuinely relevant.
+#   control_v3   = the plain draft directive (v2's control text verbatim).
+#   treatment_v3 = style-as-FORM package: the assigned engagement style is the
+#                  binding FORM of the draft (defining move + per-style length +
+#                  end-of-block self-check, rendered arm-aware by
+#                  engagement_styles.get_assigned_style_prompt, which reads
+#                  S4L_DRAFT_PROMPT_VARIANT at render time IN this cycle
+#                  process), PLUS the two-layer learned_preferences contract
+#                  (style owns form, preferences own voice inside it; the old
+#                  'overrides on conflict' phrasing made the model treat the
+#                  style as optional), PLUS the v2 skeleton ban carried over.
+#   History: v1 (2026-06-29) decoupled the product pivot; the model kept the
+#   skeleton (30% ~= 28% on 857 replies). v2 (2026-07-06) banned the
+#   concede-then-reverse STRUCTURE. v3 (2026-07-10) replaces v2's treatment
+#   wholesale: drafts converged in shape regardless of assigned style, so v3
+#   makes the style block load-bearing instead of only banning one skeleton.
 # The arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
 # (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
 # mirroring the tail_link_variant plumbing. Split tunable via
 # TWITTER_DRAFT_PROMPT_AB_RATE = fraction of cycles assigned to 'treatment'.
 # CODE DEFAULT 0.5 = 50/50 EVERYWHERE (2026-07-06): every install runs a real
-# holdback so treatment (skeleton-ban, v2) can always be measured against the old
-# control prompt. The old default of 1 (100% treatment) was changed because it
+# holdback so treatment can always be measured against the plain control
+# prompt. The old default of 1 (100% treatment) was changed because it
 # silently dropped the control arm whenever the .env pin did not propagate to the
 # running env (the installed-package driver reads its OWN .env, not the source
 # tree's), leaving no control data. Robustly defaulting to 0.5 in code, not via an
 # .env override, prevents that. The dashboard reads the SAME var with the SAME
 # default (bin/server.js), so display and routing never diverge.
 DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
-# Arm VALUE versioned to '..._v2' on 2026-07-06 to RESET the experiment. The old
-# 'treatment'/'control' rows (v1, decoupled-product-pivot) are retired: they stay
-# in the DB under their old labels but the dashboard now counts only the '_v2'
-# arms, so the v2 skeleton-ban experiment starts fresh from zero. Bump this suffix
-# again on any future reset (keep bin/server.js DRAFT_PROMPT_VARIANT_DEFS in sync).
+# Arm VALUE versioned to '..._v3' on 2026-07-10 to RESET the experiment. The old
+# v1/v2 rows stay in the DB under their old labels but the dashboard now counts
+# only the '_v3' arms, so the style-as-form experiment starts fresh from zero.
+# Bump this suffix again on any future reset (keep bin/server.js
+# DRAFT_PROMPT_VARIANT_DEFS, scripts/active_experiments.py DESCRIPTIONS, and the
+# treatment_v3 gate in scripts/engagement_styles.py get_assigned_style_prompt in
+# sync).
 S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
@@ -1832,12 +1838,12 @@ try:
 except Exception:
     rate = 0.5
 rate = min(1.0, max(0.0, rate))
-print('treatment_v2' if random.random() < rate else 'control_v2')
-" 2>/dev/null || echo treatment_v2)
+print('treatment_v3' if random.random() < rate else 'control_v3')
+" 2>/dev/null || echo treatment_v3)
 export S4L_DRAFT_PROMPT_VARIANT
 log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
-if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v2" ]; then
-    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. If your draft contains that concede-then-reverse pivot, rewrite it from a different entry point. This rule OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's intent, not its shape. Instead lead with substance from ONE entry point, and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The matched project's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v3" ]; then
+    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. THE ASSIGNED ENGAGEMENT STYLE IS THE FORM OF THIS DRAFT, not a flavor hint: the style block above defines the draft's structure, defining move, and length. Commit to that form BEFORE writing, and run the style block's self-check before returning the draft. Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. If your draft contains that concede-then-reverse pivot, rewrite it from a different entry point. This ban OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's defining move, express it without the skeleton. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The matched project's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory, and it works TOGETHER with the engagement style on different layers: the style owns the FORM (structure, defining move, length) and learned_preferences.draft_style_notes own the voice, wording, and content choices INSIDE that form. When a preference seems to conflict with the style, keep the style's structure and satisfy the preference within it; never drop the style's defining move to satisfy a wording note. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 else
     DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The matched project's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
@@ -1846,20 +1852,28 @@ fi
 # growth: no product, no link, no CTA. The reply must add real value grounded in
 # the persona's first-hand material (the PERSONA CORPUS block + the persona voice
 # block), not concede-and-agree filler. Replaces the product-framed promotion
-# directives above, but is itself arm-aware (see below): treatment_v2 adds the
-# skeleton ban, control_v2 does not, so the A/B runs in this lane too.
+# directives above, but is itself arm-aware (see below): treatment_v3 adds the
+# skeleton ban + the two-layer style/preferences contract, control_v3 keeps the
+# plain persona directive, so the A/B runs in this lane too.
 if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
-    # Arm-aware skeleton ban in the persona lane (2026-07-06): treatment_v2 adds the
-    # concede-then-reverse ban clause; control_v2 keeps the plain persona directive.
-    # This makes the A/B measurable in the persona lane too. The arm is stamped onto
-    # the card + surfaced (active_experiments.py no longer drops draft_prompt for
-    # personal_brand), so persona cards now show treatment_v2 / control_v2.
-    if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v2" ]; then
-        PERSONA_SKELETON_BAN=" Also do NOT use the concede-then-reverse skeleton in ANY form: banned openings include 'X is the easy part/half/win, the hard part is Y', 'X was never the [thing], it's Y', 'X isn't the [problem], it's Y', 'the real/actual/harder part is Y', 'what actually breaks/ships/matters is Y', 'the part nobody says/shows is Y', and 'X is solved, Y is what breaks'; if a draft has that pivot, rewrite it from one of the entry points above. This OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's intent, not its shape."
+    # Arm-aware persona lane (v3, 2026-07-10): treatment_v3 adds the
+    # concede-then-reverse ban clause AND swaps the learned_preferences
+    # relation from 'overrides the style on conflict' to the two-layer
+    # contract (style owns form, preferences own voice inside it);
+    # control_v3 keeps the plain persona directive. The style block itself
+    # (STYLES_BLOCK, rendered in this process) is also arm-aware, so the
+    # persona lane gets the style-as-FORM block on treatment automatically.
+    # The arm is stamped onto the card + surfaced (active_experiments.py no
+    # longer drops draft_prompt for personal_brand), so persona cards show
+    # treatment_v3 / control_v3.
+    if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v3" ]; then
+        PERSONA_SKELETON_BAN=" Also do NOT use the concede-then-reverse skeleton in ANY form: banned openings include 'X is the easy part/half/win, the hard part is Y', 'X was never the [thing], it's Y', 'X isn't the [problem], it's Y', 'the real/actual/harder part is Y', 'what actually breaks/ships/matters is Y', 'the part nobody says/shows is Y', and 'X is solved, Y is what breaks'; if a draft has that pivot, rewrite it from one of the entry points above. This ban OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's defining move, express it without the skeleton."
+        PERSONA_PREFS_RELATION="(learned_preferences work TOGETHER with the engagement style on different layers: the style owns the FORM, structure, defining move, and length; draft_style_notes own the voice and wording INSIDE that form; on apparent conflict keep the style's structure and satisfy the preference within it)"
     else
         PERSONA_SKELETON_BAN=""
+        PERSONA_PREFS_RELATION="(it overrides the engagement style's structural template on conflict)"
     fi
-    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The persona's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The persona's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 
 # 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
