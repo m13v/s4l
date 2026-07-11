@@ -95,6 +95,12 @@ def build_block(platform, limit):
             "order_by": "posted_at",
             "order_dir": "desc",
             "limit": str(limit),
+            # Scope to THIS install's own posts (server filters on the
+            # authenticated X-Installation identity). Without this the
+            # default read returns the whole fleet's posts and the block
+            # would claim another account's replies as "yours"
+            # (found 2026-07-10: 8 of 20 rows were another install's).
+            "own_install": "true",
         },
     )
     rows = ((resp or {}).get("data") or {}).get("posts") or []
