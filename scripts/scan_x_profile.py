@@ -324,13 +324,31 @@ def _own_posted_ids() -> set:
         from http_api import api_get  # noqa: PLC0415
         import re
         ids: set = set()
-        resp = api_get("/api/v1/posts", {"platform": "twitter",
-                                         "has_our_url": "true", "limit": 2000})
-        rows = ((resp or {}).get("data") or {}).get("posts") or []
-        for r in rows:
-            m = re.search(r"/status/(\d+)", str(r.get("our_url") or ""))
-            if m:
-                ids.add(m.group(1))
+        # The route caps limit at 500, so walk the FULL posting history with a
+        # forward posted_at cursor (order_dir=asc + since>=). On prolific
+        # accounts a single newest-500 page misses older S4L posts that the
+        # profile scan still reaches (bit the operator account: 12.8k posted
+        # statuses, 2 of 5 picked exemplars were S4L's own). The since filter
+        # is inclusive, so overlap rows dedupe via the set; a page whose max
+        # posted_at equals the cursor would loop and breaks instead.
+        cursor = None
+        for _ in range(80):  # hard cap 40k statuses
+            q = {"platform": "twitter", "has_our_url": "true", "limit": 500,
+                 "order_by": "posted_at", "order_dir": "asc"}
+            if cursor:
+                q["since"] = cursor
+            resp = api_get("/api/v1/posts", q)
+            rows = ((resp or {}).get("data") or {}).get("posts") or []
+            for r in rows:
+                m = re.search(r"/status/(\d+)", str(r.get("our_url") or ""))
+                if m:
+                    ids.add(m.group(1))
+            if len(rows) < 500:
+                break
+            page_max = max((r.get("posted_at") or "" for r in rows), default="")
+            if not page_max or page_max == cursor:
+                break
+            cursor = page_max
         return ids
     except Exception as e:
         print(f"[scan_x_profile] own-posts exclusion unavailable: {e}", file=sys.stderr)
