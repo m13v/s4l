@@ -1482,13 +1482,35 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
         # LENGTH A/B CONCLUDED 2026-06-04: control won, so the prompt always
         # uses the legacy generic length guidance. The treatment's per-style
         # target prompt remains preserved only in the shipped experiment card.
-        lines.append("")
-        lines.append(
-            "**LENGTH: keep it tight.** One or two sentences, well under the "
-            "250-character Twitter limit. A short, sharp reply almost always "
-            "beats a paragraph. This applies to the comment text only; any "
-            "link/CTA the system appends afterward is separate."
-        )
+        #
+        # EXCEPTION (2026-07-11, Draft-B explore slot): exploration
+        # assignments (pick_exploration_style, marked by `source`) honor the
+        # style's own target_chars so the A/B pair diverges on the length
+        # axis too. The uniform clamp flattened every draft to the same
+        # 2-sentence shape (user: "the older drafts looked all very similar
+        # in terms of the length"). The 06-04 conclusion still governs the
+        # scored path, which never carries `source`.
+        _explore_tc = assignment.get("target_chars")
+        if (assignment.get("source") in ("human_derived", "model_invented")
+                and _explore_tc):
+            lines.append("")
+            lines.append(
+                f"**LENGTH: aim for about {int(_explore_tc)} characters** "
+                "(this style's own winning length; within about 30% either "
+                "way is fine, never above 250). Let the target set the form: "
+                "a very short target means one clipped line, a long one can "
+                "breathe. Do NOT default to the usual two-sentence shape. "
+                "This applies to the comment text only; any link/CTA the "
+                "system appends afterward is separate."
+            )
+        else:
+            lines.append("")
+            lines.append(
+                "**LENGTH: keep it tight.** One or two sentences, well under the "
+                "250-character Twitter limit. A short, sharp reply almost always "
+                "beats a paragraph. This applies to the comment text only; any "
+                "link/CTA the system appends afterward is separate."
+            )
         lines.append("")
         lines.append(
             'In your output JSON, set "engagement_style" to exactly '

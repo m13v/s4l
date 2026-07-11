@@ -431,7 +431,21 @@ def _details_lines(d):
     d = d or {}
     lines = []
     style = (d.get("engagement_style") or "").strip()
-    if style:
+    # Two-draft cards (2026-07-11): name each slot's style so the reviewer
+    # can tell WHICH style produced the draft they are picking (Draft B is
+    # the exploration slot; its source arm renders separately below via the
+    # generic experiments lines). Single-draft cards keep the old one-liner.
+    _dual = d.get("drafts")
+    if isinstance(_dual, list) and len(_dual) == 2:
+        _slot_labels = {"a": "Draft A", "b": "Draft B"}
+        for _draft in _dual:
+            _s = (_draft.get("style") or "").strip()
+            if _s:
+                _label = _slot_labels.get(
+                    (_draft.get("variant") or "").strip().lower(), "Draft"
+                )
+                lines.append(f"{_label} style: {_s}")
+    elif style:
         lines.append(f"Style: {style}")
     desc = (d.get("style_description") or "").strip()
     if desc:
