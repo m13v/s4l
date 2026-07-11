@@ -144,6 +144,59 @@ def _render_media_block(media) -> str:
     )
 
 
+def _build_chain_block(row) -> str:
+    """Conversation chain reconstructed from replies.parent_reply_id linkage.
+
+    Walks ancestors bottom-up via GET /api/v1/replies/:id and renders the
+    chain root-first, each hop showing the inbound comment and (when we
+    responded) our reply. Empty string when the row has no parent linkage:
+    the root post itself already rides PENDING_DATA via the posts JOIN
+    (our_content / thread_title), so a chain block would add nothing.
+
+    Like counterparty_history_block, the block is self-titled and lands
+    inline in PENDING_DATA — no shell-side prompt change needed.
+    """
+    parent_id = row.get("parent_reply_id")
+    if not parent_id:
+        return ""
+    hops = []
+    seen = set()
+    cur = parent_id
+    for _ in range(10):
+        if not cur or cur in seen:
+            break
+        seen.add(cur)
+        try:
+            resp = api_get(f"/api/v1/replies/{cur}")
+        except Exception:
+            break
+        r = (resp.get("data") or {}).get("reply") or {}
+        if not r:
+            break
+        hops.append(r)
+        cur = r.get("parent_reply_id")
+    if not hops:
+        return ""
+
+    def _one_line(text):
+        return " ".join((text or "").split())
+
+    lines = [
+        "## Conversation chain (reconstructed from our DB; root first — "
+        "the row you are drafting for replies to the LAST message)"
+    ]
+    for r in reversed(hops):
+        lines.append(f"@{r.get('their_author') or '?'}: {_one_line(r.get('their_content'))}")
+        ours = _one_line(r.get("our_reply_content"))
+        if ours:
+            lines.append(f"  our reply: {ours}")
+    lines.append(
+        f"@{row.get('their_author') or '?'}: {_one_line(row.get('their_content'))}"
+        "   <- you are replying to this"
+    )
+    return "\n".join(lines)
+
+
 def cmd_pending_data(batch_size: int) -> int:
     try:
         from account_resolver import resolve as _resolve_account  # noqa: WPS433
