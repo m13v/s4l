@@ -40,6 +40,20 @@ ENV_PREFIX = "S4L_EXP_"
 # Keep draft_prompt entries in sync with bin/server.js
 # DRAFT_PROMPT_VARIANT_DEFS and the arm strings in run-twitter-cycle.sh.
 DESCRIPTIONS = {
+    "draft_b_source": {
+        "human_derived": (
+            "Draft B explore slot: style distilled from real top-performing "
+            "human replies (daily synthesizer), least-used first"
+        ),
+        "model_invented": (
+            "Draft B explore slot: freshly invented style from the "
+            "standalone invention job (post 2026-07-10), least-used first"
+        ),
+        "scored_fallback": (
+            "Draft B explore pool was empty; fell back to a second scored "
+            "pick from the proven-style pool"
+        ),
+    },
     "draft_prompt": {
         "treatment_v2": (
             "skeleton ban: forbids the concede-then-reverse "
