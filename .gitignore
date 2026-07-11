@@ -192,3 +192,5 @@ scripts/*.csv
 pii_denylist.local.txt
 config.json.lock
 .voice_exemplars_backfill.json
+persona_corpus.txt
+last_profile_scan.json
