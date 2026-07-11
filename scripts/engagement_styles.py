@@ -1464,38 +1464,53 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
     lines = []
 
     if assignment["mode"] == "use":
-        lines.append(f"## Your assigned engagement style: **{assignment['style']}**")
-        lines.append("")
-        lines.append(
-            f"This style was selected by the picker (weighted by live "
-            f"click-driven performance across {platform}). Use it. Do not "
-            f"swap it for a different listed style."
-        )
-        lines.append("")
-        lines.append(f"Platform tone: {policy.get('note', '')}")
-        lines.append("")
-        lines.append(f"**{assignment['style']}**: {assignment.get('description', '')}")
-        if assignment.get("example"):
-            lines.append(f'  Example: "{assignment["example"]}"')
-        if assignment.get("note"):
-            lines.append(f"  Note: {assignment['note']}")
-        # LENGTH A/B CONCLUDED 2026-06-04: control won, so the prompt always
-        # uses the legacy generic length guidance. The treatment's per-style
-        # target prompt remains preserved only in the shipped experiment card.
-        #
-        # EXCEPTION (2026-07-11, Draft-B explore slot): exploration
-        # assignments (pick_exploration_style, marked by `source`) honor the
-        # style's own target_chars so the A/B pair diverges on the length
-        # axis too. The uniform clamp flattened every draft to the same
-        # 2-sentence shape (user: "the older drafts looked all very similar
-        # in terms of the length"). The 06-04 conclusion still governs the
-        # scored path, which never carries `source`.
-        _explore_tc = assignment.get("target_chars")
-        if (assignment.get("source") in ("human_derived", "model_invented")
-                and _explore_tc):
+        # Draft-prompt A/B v3 (style-as-form, 2026-07-10): the treatment_v3
+        # arm renders the style as the BINDING FORM of the draft (defining
+        # move + per-style length for EVERY assignment + end-of-block
+        # self-check + two-layer learned_preferences contract). The arm is
+        # read from the env HERE because this block is rendered inside the
+        # cycle process where run-twitter-cycle.sh assigns and exports
+        # S4L_DRAFT_PROMPT_VARIANT (stamp-at-source: that same process also
+        # stamps the arm onto every plan candidate via active_experiments).
+        # Downstream/post-time consumers never re-read this env. Unset or
+        # control_v3 (and every non-twitter caller, which never has the env)
+        # renders the legacy block below unchanged.
+        _dp_arm = (os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or "").strip()
+        if _dp_arm == "treatment_v3":
+            _tc = assignment.get("target_chars") or DEFAULT_TARGET_CHARS
+            lines.append(
+                f"## Your assigned engagement style: **{assignment['style']}** "
+                "(this is the FORM of the draft, not a flavor hint)"
+            )
             lines.append("")
             lines.append(
-                f"**LENGTH: aim for about {int(_explore_tc)} characters** "
+                f"This style was selected by the picker (weighted by live "
+                f"click-driven performance across {platform}). Use it. Do not "
+                f"swap it for a different listed style."
+            )
+            lines.append("")
+            lines.append(f"Platform tone: {policy.get('note', '')}")
+            lines.append("")
+            lines.append(f"**{assignment['style']}**: {assignment.get('description', '')}")
+            if assignment.get("example"):
+                lines.append(f'  Example: "{assignment["example"]}"')
+            if assignment.get("note"):
+                lines.append(f"  Note: {assignment['note']}")
+            lines.append("")
+            lines.append(
+                "Commit to the form BEFORE writing. From the description and "
+                "example above, identify the style's DEFINING MOVE (the one "
+                "thing a draft in this style must contain: a specific number, "
+                "a question, a flat disagreement, a confession, whatever the "
+                "description names) and build the reply around that move. The "
+                "test: with the topic removed, a reader should be able to "
+                "identify this style from the draft's shape alone. If your "
+                "draft would read the same under any other style name, it "
+                "does not conform; rewrite it."
+            )
+            lines.append("")
+            lines.append(
+                f"**LENGTH: aim for about {int(_tc)} characters** "
                 "(this style's own winning length; within about 30% either "
                 "way is fine, never above 250). Let the target set the form: "
                 "a very short target means one clipped line, a long one can "
@@ -1503,14 +1518,72 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
                 "This applies to the comment text only; any link/CTA the "
                 "system appends afterward is separate."
             )
-        else:
             lines.append("")
             lines.append(
-                "**LENGTH: keep it tight.** One or two sentences, well under the "
-                "250-character Twitter limit. A short, sharp reply almost always "
-                "beats a paragraph. This applies to the comment text only; any "
-                "link/CTA the system appends afterward is separate."
+                "Learned user preferences (the learned_preferences block in "
+                "the project context) apply INSIDE this form: they control "
+                "voice, wording, and what to avoid; they do not replace the "
+                "style's structure or length. If a preference seems to "
+                "conflict with the style's defining move, keep the move and "
+                "satisfy the preference within it."
             )
+            lines.append("")
+            lines.append(
+                "SELF-CHECK before returning: (1) does the draft contain the "
+                "style's defining move? (2) is the length within about 30% "
+                "of the target? If either fails, rewrite once."
+            )
+        else:
+            lines.append(f"## Your assigned engagement style: **{assignment['style']}**")
+            lines.append("")
+            lines.append(
+                f"This style was selected by the picker (weighted by live "
+                f"click-driven performance across {platform}). Use it. Do not "
+                f"swap it for a different listed style."
+            )
+            lines.append("")
+            lines.append(f"Platform tone: {policy.get('note', '')}")
+            lines.append("")
+            lines.append(f"**{assignment['style']}**: {assignment.get('description', '')}")
+            if assignment.get("example"):
+                lines.append(f'  Example: "{assignment["example"]}"')
+            if assignment.get("note"):
+                lines.append(f"  Note: {assignment['note']}")
+            # LENGTH A/B CONCLUDED 2026-06-04: control won, so the prompt always
+            # uses the legacy generic length guidance. The treatment's per-style
+            # target prompt remains preserved only in the shipped experiment card.
+            #
+            # EXCEPTION (2026-07-11, Draft-B explore slot): exploration
+            # assignments (pick_exploration_style, marked by `source`) honor the
+            # style's own target_chars so the A/B pair diverges on the length
+            # axis too. The uniform clamp flattened every draft to the same
+            # 2-sentence shape (user: "the older drafts looked all very similar
+            # in terms of the length"). The 06-04 conclusion still governs the
+            # scored path, which never carries `source`.
+            #
+            # (The draft-prompt v3 treatment arm above supersedes this clamp
+            # for its cycles; this legacy branch IS the v3 control arm.)
+            _explore_tc = assignment.get("target_chars")
+            if (assignment.get("source") in ("human_derived", "model_invented")
+                    and _explore_tc):
+                lines.append("")
+                lines.append(
+                    f"**LENGTH: aim for about {int(_explore_tc)} characters** "
+                    "(this style's own winning length; within about 30% either "
+                    "way is fine, never above 250). Let the target set the form: "
+                    "a very short target means one clipped line, a long one can "
+                    "breathe. Do NOT default to the usual two-sentence shape. "
+                    "This applies to the comment text only; any link/CTA the "
+                    "system appends afterward is separate."
+                )
+            else:
+                lines.append("")
+                lines.append(
+                    "**LENGTH: keep it tight.** One or two sentences, well under the "
+                    "250-character Twitter limit. A short, sharp reply almost always "
+                    "beats a paragraph. This applies to the comment text only; any "
+                    "link/CTA the system appends afterward is separate."
+                )
         lines.append("")
         lines.append(
             'In your output JSON, set "engagement_style" to exactly '
