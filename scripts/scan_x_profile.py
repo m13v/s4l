@@ -324,10 +324,9 @@ def _own_posted_ids() -> set:
         from http_api import api_get  # noqa: PLC0415
         import re
         ids: set = set()
-        rows = api_get("/posts", {"platform": "twitter", "has_our_url": "true",
-                                  "limit": 2000}) or []
-        if isinstance(rows, dict):
-            rows = rows.get("posts") or rows.get("rows") or []
+        resp = api_get("/api/v1/posts", {"platform": "twitter",
+                                         "has_our_url": "true", "limit": 2000})
+        rows = ((resp or {}).get("data") or {}).get("posts") or []
         for r in rows:
             m = re.search(r"/status/(\d+)", str(r.get("our_url") or ""))
             if m:
