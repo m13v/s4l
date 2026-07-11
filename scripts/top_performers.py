@@ -567,8 +567,42 @@ def main():
                               "summary, no bottom posts). This is the lean "
                               "on-demand shape the drafting session calls "
                               "after routing a candidate to a project."))
+    parser.add_argument("--invoked-by", default=None,
+                        help=("Caller tag recorded in the on-demand invocation "
+                              "ledger (the drafting prompt passes the cycle's "
+                              "batch_id). Tracking only; no behavior change."))
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
+
+    # On-demand invocation ledger (2026-07-10). Any --project call is the
+    # on-demand per-project winners lookup the draft prompt offers; record it
+    # at the TOOL level (model self-reports are unreliable) so we can measure
+    # whether drafting sessions actually use the query. One JSON line per
+    # call in $S4L_STATE_DIR/top-performers-invocations.jsonl; the cycle
+    # counts lines for its batch_id after prep and logs a
+    # [project_top_performers] marker. Best-effort: never block the report.
+    if args.project:
+        try:
+            import datetime
+            state_dir = os.environ.get(
+                "S4L_STATE_DIR",
+                os.path.expanduser("~/.social-autoposter-mcp"))
+            os.makedirs(state_dir, exist_ok=True)
+            with open(os.path.join(state_dir,
+                                   "top-performers-invocations.jsonl"),
+                      "a") as fh:
+                fh.write(json.dumps({
+                    "ts": datetime.datetime.now(
+                        datetime.timezone.utc).isoformat(),
+                    "project": args.project,
+                    "platform": args.platform,
+                    "brief": bool(args.brief),
+                    "top": args.top,
+                    "invoked_by": args.invoked_by,
+                }) + "\n")
+        except Exception as exc:
+            print(f"[top_performers] invocation ledger write failed: {exc!r}",
+                  file=sys.stderr)
 
     (summary, style_perf, top, bottom, fallback_top,
      top_by_group, top_by_style) = _fetch_report_via_api(
