@@ -31,6 +31,14 @@
 
 MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
 
+# Repo root for the helper scripts this file shells out to, resolved from this
+# file's own location (skill/lib/ -> two up), honoring S4L_REPO_DIR when the
+# caller sets it. The old $HOME/social-autoposter hardcodes ran code OUTSIDE
+# the managed package on customer boxes (unreachable by auto-update) and
+# silently no-op'd where that directory didn't exist, so session restore and
+# tab cleanup never actually ran on such installs (S4L-4H triage 2026-07-12).
+_BH_REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 # Per-host env override (written by bin/cli.js when installing on an AppMaker
 # VM, where the canonical browser is Chromium on port 9222 behind the SOAX
 # residential proxy at 127.0.0.1:3003, NOT the harness Chrome on 9555). On a
@@ -134,7 +142,30 @@ cleanup_harness_tabs() {
             return 0
         fi
     fi
-    python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
+    python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
+}
+
+_bh_cdp_ready() {
+    # Real CDP readiness: complete an actual connect_over_cdp handshake against
+    # the harness. /json/version alone is a liveness probe that a WEDGED Chrome
+    # still passes (S4L-4H); see scripts/cdp_ready_check.py. Prints the probe's
+    # one-line JSON verdict on stdout; exit status is the verdict.
+    "${S4L_PYTHON:-python3}" "$_BH_REPO_DIR/scripts/cdp_ready_check.py" \
+        "${1:-$_BH_DEFAULT_URL}" 8000 2>/dev/null
+}
+
+_bh_record_cdp_health() {
+    # Persist the latest readiness verdict where memory_snapshot.py picks it up
+    # (cdp_health block on the per-minute heartbeat sample), so a wedge and its
+    # restart are visible centrally in installation_resource_samples without
+    # SSHing the box. $1 = action tag, $2 = the probe's JSON verdict (may be
+    # empty). Best effort, never fails the caller.
+    printf '{"ts":"%s","url":"%s","action":"%s","verdict":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${TWITTER_CDP_URL:-$_BH_DEFAULT_URL}" \
+        "$1" \
+        "${2:-null}" \
+        > "$_BH_REPO_DIR/skill/logs/cdp-health.json" 2>/dev/null || true
 }
 
 _resolve_chrome_bin() {
@@ -165,21 +196,67 @@ ensure_twitter_browser_for_backend() {
     if [ "${TWITTER_CDP_URL:-$_BH_DEFAULT_URL}" != "$_BH_DEFAULT_URL" ]; then
         local _ext_url="${TWITTER_CDP_URL}"
         if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
+            # HTTP answers; verify the CDP handshake actually completes before
+            # handing this browser to the pipeline. We do NOT restart an
+            # externally-managed Chrome; fail fast so the cycle doesn't burn
+            # 180s per downstream attach against a wedged browser.
+            local _ext_verdict
+            if ! _ext_verdict=$(_bh_cdp_ready "$_ext_url"); then
+                echo "[$(date +%H:%M:%S)] ERROR: external Chrome at ${_ext_url} is WEDGED (/json/version answers but the CDP handshake never completes). Host must restart it (AppMaker /opt/startup.sh, etc)." >&2
+                echo "twitter_cdp_wedge: detected url=${_ext_url} action=none-external" >&2
+                _bh_record_cdp_health external_wedged "$_ext_verdict"
+                return 1
+            fi
+            _bh_record_cdp_health ok-external "$_ext_verdict"
             echo "[$(date +%H:%M:%S)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
             # Restore the Twitter login if the sandbox was substituted. AppMaker
             # Hobby-tier sandboxes have a 1h TTL; on substitution /root is reseeded
             # from /etc/skel-root and the harness profile (cookies) is wiped. This
             # re-injects the stored session from social_accounts via the HTTP API.
             # No-op when already logged in. Never blocks the cycle on failure.
-            python3 "$HOME/social-autoposter/scripts/restore_twitter_session.py" 2>&1 | sed 's/^/[restore] /' >&2 || true
+            python3 "$_BH_REPO_DIR/scripts/restore_twitter_session.py" 2>&1 | sed 's/^/[restore] /' >&2 || true
             return 0
         fi
         echo "[$(date +%H:%M:%S)] ERROR: TWITTER_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host (AppMaker /opt/startup.sh, etc)." >&2
         return 1
     fi
-    # Probe + launch harness Chrome on port 9555 if needed.
+    # Probe + launch harness Chrome on port 9555 if needed. Two-stage probe:
+    # /json/version (liveness) then a real CDP handshake (readiness). A wedged
+    # Chrome passes the first and fails the second; handing it downstream made
+    # every attach eat Playwright's 180s default while holding the browser lock
+    # (S4L-4H), so it gets killed and relaunched here instead.
+    local _need_launch=0 _launch_reason=""
+    local _bh_prof_dir="$HOME/.claude/browser-profiles/browser-harness"
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
+        _need_launch=1; _launch_reason="http_down"
         echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
+    else
+        local _ready_verdict
+        if ! _ready_verdict=$(_bh_cdp_ready "$_BH_DEFAULT_URL"); then
+            _need_launch=1; _launch_reason="cdp_wedge"
+            echo "[$(date +%H:%M:%S)] Harness Chrome WEDGED on port 9555 (/json/version answers but the CDP handshake never completes: ${_ready_verdict:-no verdict}); killing and relaunching..." >&2
+            # Machine-greppable marker (same stderr-marker convention as
+            # twitter_access_gate; bin/server.js parses these).
+            echo "twitter_cdp_wedge: detected url=$_BH_DEFAULT_URL action=restart" >&2
+            _bh_record_cdp_health wedge_restart "$_ready_verdict"
+            local _wedge_pids
+            _wedge_pids=$(pgrep -f -- "--user-data-dir=$_bh_prof_dir " 2>/dev/null || true)
+            if [ -n "$_wedge_pids" ]; then
+                kill $_wedge_pids 2>/dev/null || true
+                sleep 2
+                _wedge_pids=$(pgrep -f -- "--user-data-dir=$_bh_prof_dir " 2>/dev/null || true)
+                [ -n "$_wedge_pids" ] && { kill -9 $_wedge_pids 2>/dev/null || true; sleep 1; }
+                rm -f "$_bh_prof_dir/SingletonLock" "$_bh_prof_dir/SingletonSocket" "$_bh_prof_dir/SingletonCookie" 2>/dev/null || true
+            fi
+        fi
+    fi
+    if [ "$_need_launch" = 1 ]; then
+        # Dated relaunch stamp for central observability: memory_snapshot.py
+        # counts these (chrome_relaunches block) so a kill-respawn loop like
+        # 2026-07-12's launchd pgroup reaping is visible per-install in Cloud
+        # Logging without depending on the menubar foreground observer.
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) port=9555 reason=${_launch_reason}" \
+            >> "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/chrome-relaunch-events.log" 2>/dev/null || true
         local _chrome_bin
         _chrome_bin=$(_resolve_chrome_bin)
         if [ -z "$_chrome_bin" ]; then
@@ -232,7 +309,18 @@ ensure_twitter_browser_for_backend() {
             [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
             rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
         fi
-        "$_chrome_bin" \
+        # os.setsid: Chrome must escape THIS job's process group. The kicker is a
+        # transient launchd job, and launchd SIGKILLs the job's whole process
+        # group the moment the shell exits (no AbandonProcessGroup) — `disown`
+        # does not change the pgid, so a plainly-backgrounded Chrome died on
+        # every cycle completion and the NEXT cycle's relaunch stole the user's
+        # focus (2026-07-12 root cause; the foreground-telemetry `cause:launched`
+        # loop). A new session makes Chrome survive its launcher regardless of
+        # which lane spawned it.
+        "${S4L_PYTHON:-python3}" -c 'import os,sys
+os.setsid()
+os.execv(sys.argv[1], sys.argv[1:])' \
+            "$_chrome_bin" \
             --remote-debugging-port=9555 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
             --no-first-run --no-default-browser-check \
@@ -248,9 +336,23 @@ ensure_twitter_browser_for_backend() {
         done
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] ERROR: harness Chrome failed to start within 12s" >&2
+            _bh_record_cdp_health launch_failed null
             return 1
         fi
+        # Verify the fresh Chrome actually completes a CDP handshake before
+        # declaring victory; a relaunch that comes up wedged again should fail
+        # the cycle loudly, not feed 180s hangs downstream.
+        local _post_verdict
+        if ! _post_verdict=$(_bh_cdp_ready "$_BH_DEFAULT_URL"); then
+            echo "[$(date +%H:%M:%S)] ERROR: harness Chrome answers HTTP after relaunch but the CDP handshake is STILL failing: ${_post_verdict:-no verdict}" >&2
+            echo "twitter_cdp_wedge: detected url=$_BH_DEFAULT_URL action=relaunch_failed" >&2
+            _bh_record_cdp_health relaunch_failed "$_post_verdict"
+            return 1
+        fi
+        _bh_record_cdp_health relaunched "$_post_verdict"
         echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" >&2
+    else
+        _bh_record_cdp_health ok "${_ready_verdict:-null}"
     fi
     # Re-inject the stored X session if the harness Chrome is logged out — e.g. a
     # keychain re-lock wiped Chrome's encrypted Cookies SQLite on this launch
@@ -259,7 +361,7 @@ ensure_twitter_browser_for_backend() {
     # No-op when already logged in; never blocks the cycle on failure. Runs on
     # both the freshly-launched and already-up paths so a mid-life logout heals.
     TWITTER_CDP_URL="http://127.0.0.1:9555" \
-        python3 "$HOME/social-autoposter/scripts/restore_twitter_session.py" 2>&1 \
+        python3 "$_BH_REPO_DIR/scripts/restore_twitter_session.py" 2>&1 \
         | sed 's/^/[restore] /' >&2 || true
     # Always close leftover tabs from prior runs. Safe under acquire_lock
     # "twitter-browser" serialization (every caller of this function holds
