@@ -700,6 +700,8 @@ def build_summary() -> dict[str, Any]:
         "menubar": menubar_status(),
         "twitter_cycle": twitter_cycle_status(),
         "draft_publish": draft_publish_wrapper_status(),
+        "chrome_relaunches": chrome_relaunch_status(),
+        "cdp_health": cdp_health_status(),
         "process_count": len(rows),
         "mem": {
             "total_mb": total,
@@ -845,6 +847,25 @@ def reaper_status() -> dict[str, Any] | None:
         return None
 
 
+def cdp_health_status() -> dict[str, Any] | None:
+    """Last CDP readiness verdict, carried on the heartbeat.
+
+    Written by skill/lib/twitter-backend.sh on every
+    ensure_twitter_browser_for_backend call: whether the harness Chrome
+    completed a REAL connect_over_cdp handshake (not just /json/version),
+    plus the action taken (ok / wedge_restart / relaunched / relaunch_failed /
+    external_wedged). Makes a wedged-Chrome episode (S4L-4H, 2026-07-11) a
+    one-query answer in installation_resource_samples instead of a Sentry +
+    local-log archaeology session. Best-effort."""
+    try:
+        p = REPO_DIR / "skill" / "logs" / "cdp-health.json"
+        data = json.loads(p.read_text())
+        data["age_sec"] = round(time.time() - p.stat().st_mtime, 1)
+        return data
+    except Exception:
+        return None
+
+
 def twitter_cycle_status() -> dict[str, Any] | None:
     """Tail of the newest twitter-cycle log, carried on the heartbeat.
 
@@ -894,6 +915,42 @@ def draft_publish_wrapper_status() -> dict[str, Any] | None:
             "age_sec": round(time.time() - p.stat().st_mtime, 1),
             "last_lines": [ln[:200] for ln in lines[-8:]],
         }
+    except Exception:
+        return None
+
+
+def chrome_relaunch_status() -> dict[str, Any] | None:
+    """Harness-Chrome relaunch rate from skill/logs/chrome-relaunch-events.log.
+
+    The skill/lib/*-backend.sh launchers append one dated line per Chrome
+    launch. A healthy box launches Chrome rarely (boot, user quit, crash); a
+    high 24h count is the signature of the 2026-07-12 kill-respawn loop
+    (launchd reaping the kicker job's process group took Chrome with it every
+    cycle, and each relaunch stole the user's focus). Carried on the heartbeat
+    so the rate is queryable per-install WITHOUT the menubar foreground
+    observer, which only reports while the menubar process is alive."""
+    try:
+        p = REPO_DIR / "skill" / "logs" / "chrome-relaunch-events.log"
+        if not p.exists():
+            return None
+        now = time.time()
+        counts = {"1h": 0, "24h": 0}
+        last_line = None
+        for ln in _tail_lines(p, 400, approx_line_bytes=64):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                ts = dt.datetime.strptime(ln.split()[0], "%Y-%m-%dT%H:%M:%SZ")
+                age = now - ts.replace(tzinfo=dt.timezone.utc).timestamp()
+            except (ValueError, IndexError):
+                continue
+            if age <= 3600:
+                counts["1h"] += 1
+            if age <= 86400:
+                counts["24h"] += 1
+            last_line = ln
+        return {"count_1h": counts["1h"], "count_24h": counts["24h"], "last": last_line}
     except Exception:
         return None
 

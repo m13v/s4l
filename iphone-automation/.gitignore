@@ -1,7 +1,0 @@
-node_modules/
-venv/
-logs/*.png
-logs/*.log
-*.pyc
-__pycache__/
-.DS_Store
