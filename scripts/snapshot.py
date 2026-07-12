@@ -70,7 +70,7 @@ PERSONA_REQUIRED_FIELDS = ["name", "description", "voice", "search_topics"]
 CURRENT_WORKER_TASK_IDS = ("s4l-worker", "saps-worker")
 LEGACY_WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 UPDATER_LABEL = "com.m13v.social-autoposter-update"
-AUTOPILOT_STALL_MS = 180_000
+AUTOPILOT_STALL_MS = 1_200_000
 
 # Milestones overlaid with LIVE state for display (the rest keep their ledger
 # value). Mirrors the overlay in buildSnapshot().
