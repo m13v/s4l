@@ -68,6 +68,15 @@ PREEMPT_KILL_WAIT = 5  # secs to wait for a preempted scan holder to die before 
 LOCK_ROLE = (os.environ.get("S4L_LOCK_ROLE") or "scan").strip() or "scan"
 VIEWPORT = {"width": 911, "height": 1016}
 
+# CDP connect ceiling. Playwright's connect_over_cdp default is 180s; a wedged
+# harness Chrome (process alive, /json/version answering, websocket upgrade
+# completing, but the browser loop never servicing the CDP handshake) made
+# every reply attempt eat the full 3 minutes WHILE HOLDING the browser lock
+# (S4L-4H, Karol 2026-07-11; identical wedge locally 2026-07-09). A localhost
+# socket either completes the handshake in milliseconds or is wedged; 15s is
+# generous headroom for a loaded box without feeding the lock-contention family.
+CDP_CONNECT_TIMEOUT_MS = int(os.environ.get("S4L_CDP_CONNECT_TIMEOUT_MS") or "15000")
+
 # Posting handle. Resolved at call time from AUTOPOSTER_TWITTER_HANDLE env
 # var (set by per-account launchd/systemd units) or config.json
 # accounts.twitter.handle. Returns None when neither source is set.
@@ -226,6 +235,7 @@ def find_twitter_cdp_port():
 
 _LOCK_SESSION_ID = f"python:{os.getpid()}"
 _LOCK_INHERITED = False
+_LOCK_ACQUIRED_AT = 0.0
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -243,6 +253,19 @@ def _release_browser_lock():
                 lock = json.load(f)
             if lock.get("session_id") == _LOCK_SESSION_ID:
                 os.remove(LOCK_FILE)
+                # Quantify hold time: long holds are what starve peers into the
+                # "locked by session ... waited 45s, giving up" family (S4L-B),
+                # and the 2026-07-09/11 wedge showed a hung CDP connect holding
+                # this lock for 3 minutes per attempt. >=5s filter keeps the
+                # healthy-path noise out of the logs.
+                if _LOCK_ACQUIRED_AT:
+                    _held = time.time() - _LOCK_ACQUIRED_AT
+                    if _held >= 5:
+                        print(
+                            f"[browser-lock] held {_held:.0f}s "
+                            f"(role={LOCK_ROLE}, pid={os.getpid()})",
+                            file=sys.stderr,
+                        )
     except (json.JSONDecodeError, OSError):
         pass
 
@@ -392,7 +415,7 @@ def _acquire_browser_lock():
     LIVE peers' locks (defect b) and was removed 2026-06-16. Dead holders are
     reclaimed here instead. See docs/twitter_browser_lock.md.
     """
-    global _LOCK_SESSION_ID, _LOCK_INHERITED
+    global _LOCK_SESSION_ID, _LOCK_INHERITED, _LOCK_ACQUIRED_AT
     deadline = time.time() + LOCK_WAIT_MAX
     # Guarantee the lock dir exists so _try_take_lock's O_EXCL create can't fail
     # for a missing-parent reason (which would otherwise spin the no-file path).
@@ -548,6 +571,7 @@ def _acquire_browser_lock():
             sys.exit(1)
         time.sleep(LOCK_POLL_INTERVAL)
         continue
+    _LOCK_ACQUIRED_AT = time.time()
 
 
 def _refresh_browser_lock():
@@ -557,6 +581,33 @@ def _refresh_browser_lock():
             json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time()), "role": LOCK_ROLE}, f)
     except OSError:
         pass
+
+
+def _cdp_diagnostics(cdp_url):
+    """Cheap post-mortem probe after a failed CDP attach.
+
+    Distinguishes "Chrome down" (HTTP dead) from "Chrome wedged" (HTTP still
+    answering /json/version but the CDP session handshake never completing) in
+    the error JSON itself, so the Sentry event carries the diagnosis instead of
+    requiring log archaeology on the customer box (S4L-4H took exactly that).
+    """
+    import urllib.request
+    diag = {"http_alive": False}
+    base = cdp_url if "://" in cdp_url else f"http://{cdp_url}"
+    try:
+        with urllib.request.urlopen(f"{base}/json/version", timeout=3) as r:
+            v = json.loads(r.read().decode())
+        diag["http_alive"] = True
+        diag["browser"] = v.get("Browser")
+    except Exception as e:
+        diag["version_error"] = str(e)[:120]
+        return diag
+    try:
+        with urllib.request.urlopen(f"{base}/json/list", timeout=3) as r:
+            diag["targets"] = len(json.loads(r.read().decode()))
+    except Exception as e:
+        diag["list_error"] = str(e)[:120]
+    return diag
 
 
 def get_browser_and_page(playwright):
@@ -581,8 +632,11 @@ def get_browser_and_page(playwright):
 
     cdp_url_override = os.environ.get("TWITTER_CDP_URL", "").strip()
     if cdp_url_override:
+        _t0 = time.time()
         try:
-            browser = playwright.chromium.connect_over_cdp(cdp_url_override)
+            browser = playwright.chromium.connect_over_cdp(
+                cdp_url_override, timeout=CDP_CONNECT_TIMEOUT_MS
+            )
             contexts = browser.contexts
             if contexts:
                 context = contexts[0]
@@ -601,16 +655,19 @@ def get_browser_and_page(playwright):
             _release_browser_lock()
             print(json.dumps({
                 "success": False,
-                "error": f"TWITTER_CDP_URL connect failed ({cdp_url_override}): {e}"
+                "error": f"TWITTER_CDP_URL connect failed ({cdp_url_override}): {e}",
+                "connect_elapsed_s": round(time.time() - _t0, 1),
+                "cdp_diag": _cdp_diagnostics(cdp_url_override),
             }))
             sys.exit(1)
 
     cdp_port = find_twitter_cdp_port()
 
     if cdp_port:
+        _t0 = time.time()
         try:
             browser = playwright.chromium.connect_over_cdp(
-                f"http://localhost:{cdp_port}"
+                f"http://localhost:{cdp_port}", timeout=CDP_CONNECT_TIMEOUT_MS
             )
             contexts = browser.contexts
             if contexts:
@@ -625,7 +682,9 @@ def get_browser_and_page(playwright):
             _release_browser_lock()
             print(json.dumps({
                 "success": False,
-                "error": f"harness CDP attach failed (port {cdp_port}): {e}"
+                "error": f"harness CDP attach failed (port {cdp_port}): {e}",
+                "connect_elapsed_s": round(time.time() - _t0, 1),
+                "cdp_diag": _cdp_diagnostics(f"http://localhost:{cdp_port}"),
             }))
             sys.exit(1)
 
