@@ -199,7 +199,12 @@ def _launch_chrome() -> bool:
         cmd += ["--window-position=80,80", "--window-size=1100,900"]
     cmd.append("about:blank")
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # start_new_session: Chrome must not inherit this process's group. When the
+    # caller is a transient launchd job, launchd SIGKILLs the job's whole
+    # process group on exit, reaping Chrome with it; the next lane's relaunch
+    # then steals the user's focus (2026-07-12, same fix as *-backend.sh).
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
     try:
         PID_FILE.write_text(str(proc.pid))
     except OSError:
