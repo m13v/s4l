@@ -3397,7 +3397,7 @@ function queueDir(): string {
 // (which orphans the routines while their global SKILL.md files stay put, so the
 // SKILL.md-presence check in autopilotLoaded() reads a FALSE green). Mirrors the
 // menu bar's AUTOPILOT_STALL_SECONDS in mcp/menubar/s4l_menubar.py — keep in sync.
-const AUTOPILOT_STALL_MS = 180_000;
+const AUTOPILOT_STALL_MS = 1_200_000;
 
 // True when no scheduled-task routine is draining the draft queue. Two signals,
 // OR'd (keep in lockstep with mcp/menubar/s4l_menubar.py::_autopilot_stalled and
