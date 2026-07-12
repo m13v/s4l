@@ -56,6 +56,7 @@ ulimit -n 4096 2>/dev/null || true
 # below (sourced libs + child scripts inherit it), so this one line fixes the
 # whole cycle's repo resolution on a bare .mcpb install.
 REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
+export REPO_DIR
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
@@ -502,7 +503,7 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 _PJ_ERR="$(mktemp)"
 PROJECTS_JSON=$(python3 - 2>"$_PJ_ERR" <<'PY'
 import json, os, subprocess, sys
-REPO = os.path.expanduser('~/social-autoposter')
+REPO = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
 sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import project_excludes as pe
 
@@ -977,7 +978,8 @@ if [ "$SCAN_ATTEMPT" -gt 1 ]; then
     rm -f "$UNIVERSE_EXHAUSTED_MARKER"
     PROJECTS_JSON=$(python3 - "$PROJECTS_JSON" "$TRIED_TOPICS_JSON" "$UNIVERSE_EXHAUSTED_MARKER" <<'PY' 2>>"$LOG_FILE"
 import json, os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+REPO = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
 from pick_search_topic import pick_topic_for_project, PickerError, UniverseExhaustedError
 
 projects = json.loads(sys.argv[1] or '[]')
@@ -1349,7 +1351,8 @@ fi
 # search_attempts log so a Phase 1 abort still leaves the marks behind.
 python3 - "$PROJECTS_JSON" <<'PY' 2>&1 | tee -a "$LOG_FILE" || true
 import json, os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+REPO = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import project_excludes as pe
 projects = json.loads(sys.argv[1] or '[]')
 total = 0
@@ -1643,9 +1646,10 @@ done <<< "$CANDIDATES"
 
 ALL_PROJECTS_JSON=$(python3 -c "
 import json, os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
 import learned_preferences as lp
-config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
+config = json.load(open(os.path.join(repo_dir, 'config.json')))
 projects = config.get('projects', [])
 # learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
 # scripts/learned_preferences.py), not one per project. Computed once here
@@ -2269,7 +2273,8 @@ VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.90" \
     S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
     python3 -c "
 import os, sys
-sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.expanduser('~/social-autoposter/scripts'))
+_repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.join(_repo, 'scripts'))
 from http_api import api_get
 try:
     r = api_get('/api/v1/twitter-candidates/virality-threshold',
