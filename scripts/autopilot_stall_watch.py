@@ -47,13 +47,13 @@ import identity  # noqa: E402  (lives next to this file in scripts/)
 s4l_env.mirror()
 
 # Keep in sync with AUTOPILOT_STALL_SECONDS (menubar) / AUTOPILOT_STALL_MS (index.ts).
-STALL_SECONDS = 180
+STALL_SECONDS = 1200
 # A job CLAIMED but never finished (sits in running/ this long) means a worker
 # picked it up and then died mid-run — the claude -p drafting child never came up
 # or crashed. Must be generous enough to clear the longest real drafting turn so a
 # healthy run never trips it. Keep in sync with AUTOPILOT_RUNNING_STALL_SECONDS
 # (menubar). See _oldest_running_age.
-RUNNING_STALL_SECONDS = 900
+RUNNING_STALL_SECONDS = 1200
 # Require the stall to persist this many consecutive checks before paging, so a
 # transient slow claim (e.g. right after a Claude restart) doesn't false-alarm.
 # At StartInterval 120 that is ~6 min of continuous stall.
