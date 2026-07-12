@@ -883,6 +883,33 @@ print(cd//60, cons, cd, max(0, now-fs))' "$_GATE_FILE" "$_NOW" 2>/dev/null || ec
     release_lock "twitter-browser" 2>/dev/null || true
     exit 1
 fi
+# Probe-error guard (2026-07-12, S4L-4H): output lacking a "gated" verdict
+# means the probe CRASHED (typically the CDP attach failed or timed out on a
+# wedged Chrome) rather than returning a clean bill. The old code logged
+# 'Pre-flight access OK: {"success": false, ...}' and marched a wedged browser
+# into the scan. Heal once (ensure_twitter_browser_for_backend now does a real
+# CDP readiness check and restarts a wedged harness Chrome), re-probe, and end
+# the cycle if there is still no verdict.
+if [ -z "$_ACCESS_OUT" ] || ! printf '%s' "$_ACCESS_OUT" | grep -q '"gated"'; then
+    log "  Pre-flight access probe FAILED (no verdict; browser not driveable): $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+    echo "twitter_cdp_wedge: access_probe_no_verdict" >&2
+    ensure_twitter_browser_for_backend || true
+    _ACCESS_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
+        python3 "$REPO_DIR/scripts/twitter_access_check.py" --session-probe --wait-ms 12000 2>/dev/null)
+    if [ -z "$_ACCESS_OUT" ] || ! printf '%s' "$_ACCESS_OUT" | grep -q '"gated"'; then
+        log "  Pre-flight access probe still has no verdict after harness heal; ending cycle."
+        echo "twitter_batches: ended $BATCH_ID"
+        release_lock "twitter-browser" 2>/dev/null || true
+        exit 1
+    fi
+    if printf '%s' "$_ACCESS_OUT" | grep -q '"gated": *true'; then
+        log "  Recovered probe reports an access gate; ending cycle (backoff engages on the next firing)."
+        echo "twitter_batches: ended $BATCH_ID"
+        release_lock "twitter-browser" 2>/dev/null || true
+        exit 1
+    fi
+    log "  Access probe recovered after harness heal."
+fi
 # Probe came back clean. If a backoff marker exists we were gated: record the
 # recovery (how long the gate lasted, since first_seen) BEFORE deleting it, so
 # the lift event + duration survive in the log even though the marker is gone.
