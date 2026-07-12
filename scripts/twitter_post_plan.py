@@ -104,7 +104,16 @@ signal.signal(signal.SIGTERM, _on_sigterm)
 # since both shell out to this script. Set before any child is spawned.
 os.environ["S4L_LOCK_ROLE"] = "post"
 
-REPO_DIR = os.path.expanduser("~/social-autoposter")
+# Resolve the repo root the way the rest of the pipeline does (run_claude.sh,
+# identity.py): S4L_REPO_DIR when the caller sets it, else this script's own
+# parent tree. The old hardcoded ~/social-autoposter pointed OUTSIDE the
+# managed package on customer boxes, so every child spawned below
+# (twitter_browser.py, log_post.py, ...) ran code auto-update could never
+# reach (S4L-4H triage 2026-07-12, Karol's install).
+REPO_DIR = (
+    os.environ.get("S4L_REPO_DIR")
+    or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 TWITTER_BROWSER = os.path.join(REPO_DIR, "scripts", "twitter_browser.py")
 LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
