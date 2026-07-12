@@ -272,11 +272,21 @@ function plistXml(opts: {
   // (launchd restarts it whenever it exits) instead of StartInterval (which
   // re-invokes a short-lived command on a timer). intervalSecs is ignored.
   keepAlive?: boolean;
+  // When true, launchd leaves the job's surviving children alone when the main
+  // process exits. Without it, launchd SIGKILLs the job's whole process group
+  // on exit — which reaped the harness Chrome the cycle had just launched, so
+  // the NEXT cycle relaunched Chrome and stole the user's focus (2026-07-12).
+  // Set on the kicker; the setsid wrapper in skill/lib/*-backend.sh is the
+  // primary fix, this is the launchd-side backstop.
+  abandonProcessGroup?: boolean;
 }): string {
   const args = opts.programArgs.map((a) => `\t\t<string>${a}</string>`).join("\n");
   const schedule = opts.keepAlive
     ? `\t<key>KeepAlive</key>\n\t<true/>`
     : `\t<key>StartInterval</key>\n\t<integer>${opts.intervalSecs}</integer>`;
+  const abandon = opts.abandonProcessGroup
+    ? `\n\t<key>AbandonProcessGroup</key>\n\t<true/>`
+    : "";
   // Background (cron/autopilot) runs get the same Chrome the interactive cycle
   // uses, so a no-sudo ~/Applications install (which the shell's own resolver
   // doesn't scan) is still found off-screen. Omitted when Chrome resolves via
@@ -302,7 +312,7 @@ function plistXml(opts: {
 \t<array>
 ${args}
 \t</array>
-${schedule}
+${schedule}${abandon}
 \t<key>StandardOutPath</key>
 \t<string>${opts.stdoutLog}</string>
 \t<key>StandardErrorPath</key>
@@ -3901,6 +3911,9 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
       stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
       stderrLog: path.join(logDir, "launchd-twitter-cycle-stderr.log"),
       extraEnv: kickerEnv(),
+      // Don't let launchd reap the harness Chrome the cycle launches when the
+      // kicker shell exits (2026-07-12 foreground-steal loop).
+      abandonProcessGroup: true,
     });
     // Content-aware install: an existing box has the OLD kicker plist pointing at
     // run-twitter-cycle.sh (no merge step). ensurePlist won't overwrite, so detect
