@@ -403,13 +403,13 @@ DIAGNOSE_PROMPT_TEMPLATE = (
 # were firing. False-positive-free: an idle queue has no pending job at all, so a
 # quiet pipeline (no candidates) never trips this. Comfortably above the host
 # scheduler's per-minute cadence + a slow claim.
-AUTOPILOT_STALL_SECONDS = 180
+AUTOPILOT_STALL_SECONDS = 1200
 
 # A job CLAIMED but never finished (sits in running/ this long) means a worker
 # picked it up and then wedged mid-run (the claude -p drafting child died / never
 # spawned). Generous enough that the longest real drafting turn never trips it.
 # Keep in sync with RUNNING_STALL_SECONDS (scripts/autopilot_stall_watch.py).
-AUTOPILOT_RUNNING_STALL_SECONDS = 900
+AUTOPILOT_RUNNING_STALL_SECONDS = 1200
 
 # The "firing" window (how fresh lastRunAt must be) lives in the single source of
 # truth, scripts/schedule_state.py (FIRING_WINDOW there). _schedule_state delegates
@@ -898,7 +898,7 @@ class S4LMenuBar(rumps.App):
               to see between cycles) -> the ⚠ stays on continuously instead of
               flickering off. This is the durable signal.
           (2) FAST: a draft job has sat unclaimed in pending/ past
-              AUTOPILOT_STALL_SECONDS -> catches a fresh stall ~3 min in, before
+              AUTOPILOT_STALL_SECONDS -> catches a fresh stall ~20 min in, before
               the first full producer timeout has even latched (1).
           (3) IN-FLIGHT: a draft job was claimed (moved to running/) but never
               finished within AUTOPILOT_RUNNING_STALL_SECONDS -> the worker picked
