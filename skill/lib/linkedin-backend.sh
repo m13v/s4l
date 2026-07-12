@@ -289,6 +289,9 @@ ensure_linkedin_browser_for_backend() {
     # Probe + launch harness Chrome on port 9556 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
         echo "[$(date +%H:%M:%S)] LinkedIn harness Chrome down on port 9556, launching..." >&2
+        # Dated relaunch stamp for central observability (see twitter-backend.sh).
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) port=9556" \
+            >> "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/chrome-relaunch-events.log" 2>/dev/null || true
         local _chrome_bin
         _chrome_bin=$(_resolve_chrome_bin)
         if [ -z "$_chrome_bin" ]; then
@@ -330,7 +333,15 @@ ensure_linkedin_browser_for_backend() {
         # The occlusion/backgrounding flags matter: the window sits offscreen,
         # and without them Chrome stops laying out SPA-rendered content, so
         # every element measures 0x0 and clicks become impossible (2026-07-03).
-        "$_chrome_bin" \
+        # os.setsid: Chrome must escape THIS job's process group — launchd
+        # SIGKILLs a transient job's whole process group when the shell exits,
+        # and `disown` does not change the pgid, so Chrome died with every
+        # completed run and the next lane's relaunch stole the user's focus
+        # (2026-07-12; same fix as twitter-backend.sh).
+        "${S4L_PYTHON:-python3}" -c 'import os,sys
+os.setsid()
+os.execv(sys.argv[1], sys.argv[1:])' \
+            "$_chrome_bin" \
             --remote-debugging-port=9556 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
             --no-first-run --no-default-browser-check \
