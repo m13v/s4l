@@ -94,6 +94,29 @@ def _registry_worker_recs(by_id):
 # false "not scheduled".
 FIRING_WINDOW = 420
 
+# --- Stall thresholds (single source of truth) --------------------------------
+# The longest a fully healthy drain can take end to end: a draft job can wait
+# minutes for a worker slot (per-minute scheduler cadence, workers busy on other
+# jobs) and the drafting turn itself runs multiple minutes. Observed healthy
+# episodes reach 8-10 min (2026-07-13); alarm at 20 min for margin. Every stall
+# detector derives from this ONE number so they can't drift apart again (99e695bf
+# retuned the two per-state timers to 1200s but left the end-to-end DRAFT_STUCK
+# check at 300s, which then false-alarmed on healthy 8-minute drains). The Node
+# server can't import this module — mcp/src/index.ts::AUTOPILOT_STALL_MS must be
+# kept in sync by hand.
+HEALTHY_DRAIN_MAX_SECONDS = 1200
+
+# A pending draft job unclaimed this long: no routine is draining the queue
+# (an idle queue has no pending job at all, so a quiet pipeline never trips it).
+STALL_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
+# A job claimed but still sitting in running/ this long: the worker picked it up
+# and then wedged mid-run (the claude -p drafting child died / never spawned).
+RUNNING_STALL_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
+# The producer's "drafting Nm" label alive this long: the end-to-end clock. This
+# is the only timer that spans claim→die→requeue churn loops, which reset the two
+# per-state timers above on every transition while nothing ever completes.
+DRAFT_STUCK_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
+
 # Grace for a JUST-scheduled task that hasn't fired yet. When the user runs
 # "Set up draft schedule", create_scheduled_task registers both worker tasks
 # (cron "* * * * *", enabled) but lastRunAt is null until the host fires them the
