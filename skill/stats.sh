@@ -87,7 +87,7 @@ mkdir -p "$LOG_DIR"
 LOG_TAG="${PLATFORM:-all}"
 LOGFILE="$LOG_DIR/stats-${LOG_TAG}-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOGFILE"; echo "[$(date +%H:%M:%S)] $*"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOGFILE"; echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 RUN_START=$(date +%s)
 STEP1_EXIT=0; STEP2_EXIT=0; STEP3_EXIT=0; STEP4_EXIT=0
