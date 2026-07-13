@@ -1878,7 +1878,7 @@ if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v3" ]; then
 else
     DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The matched project's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
-# Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by saps_mode.py):
+# Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by s4l_mode.py):
 # replace the product-framed directive entirely. This lane is pure organic
 # growth: no product, no link, no CTA. The reply must add real value grounded in
 # the persona's first-hand material (the PERSONA CORPUS block + the persona voice
