@@ -38,7 +38,7 @@ AUDIT_HELPER="$REPO_DIR/scripts/audit_helper.py"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/audit-reddit-resurrect-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"; echo "[$(date +%H:%M:%S)] $*"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG_FILE"; echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 RUN_START=$(date +%s)
 log "=== Reddit resurrect audit: $(date) ==="
