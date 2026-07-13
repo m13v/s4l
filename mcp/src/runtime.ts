@@ -900,6 +900,42 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       timeoutMs: 120000,
     });
     await sh("git", ["-C", HARNESS_DIR, "reset", "--hard", "FETCH_HEAD"], { timeoutMs: 60000 });
+    // Vendored fix on top of the pin: loopback CDP requests must never route
+    // through a proxy. macOS system proxy settings leak into urllib's default
+    // opener, and a box-wide forwarder 403s every 127.0.0.1 probe, so Chrome
+    // reads as "wedged"/logged-out while it is actually fine (2026-07-13).
+    // Upstream doesn't carry the fix and we don't control that repo, so apply
+    // our patch at install time, on every machine. If it stops applying
+    // cleanly, upstream has either merged the fix (detected below; fine) or
+    // refactored the files (warn); never fail the install over it.
+    const harnessPatch = path.join(
+      MATERIALIZED_REPO,
+      "scripts",
+      "patches",
+      "browser-harness-loopback-cdp-proxy.patch"
+    );
+    if (fs.existsSync(harnessPatch)) {
+      const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
+        timeoutMs: 30000,
+      });
+      if (chk.code === 0) {
+        await sh("git", ["-C", HARNESS_DIR, "apply", harnessPatch], { timeoutMs: 30000 });
+      } else {
+        let fixedUpstream = false;
+        try {
+          fixedUpstream = fs
+            .readFileSync(path.join(HARNESS_DIR, "src", "browser_harness", "admin.py"), "utf-8")
+            .includes("cdp_urlopen");
+        } catch {
+          /* file moved — fall through to the warning */
+        }
+        if (!fixedUpstream) {
+          console.error(
+            "[runtime] browser-harness loopback-proxy patch no longer applies and the fix is absent upstream; CDP probes may 403 behind a system proxy"
+          );
+        }
+      }
+    }
     // Install the CLI via uv tool (lands at ~/.local/bin/browser-harness).
     // --force so a refreshed source / changed entry point is reinstalled.
     const inst = await sh(uv, ["tool", "install", "--force", "-e", HARNESS_DIR], {
