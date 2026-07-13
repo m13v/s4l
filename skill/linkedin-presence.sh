@@ -25,7 +25,7 @@ BATCH_ID="lipres-$(date +%Y%m%d_%H%M%S)-$$"
 export SA_CYCLE_ID="$BATCH_ID"
 export S4L_PIPELINE_NAME="linkedin-presence"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 DRY_RUN="${LINKEDIN_PRESENCE_DRY_RUN:-0}"
 
