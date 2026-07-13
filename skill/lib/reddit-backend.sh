@@ -123,7 +123,7 @@ cleanup_harness_tabs() {
     if ! $_probe 2>/dev/null; then
         sleep 1
         if ! $_probe 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] cleanup_harness_tabs: SKIPPED (reddit-harness CDP /json/version unreachable after 10s+retry)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cleanup_harness_tabs: SKIPPED (reddit-harness CDP /json/version unreachable after 10s+retry)" >&2
             return 0
         fi
     fi
@@ -156,19 +156,19 @@ ensure_reddit_browser_for_backend() {
     if [ "${REDDIT_CDP_URL:-$_BH_REDDIT_DEFAULT_URL}" != "$_BH_REDDIT_DEFAULT_URL" ]; then
         local _ext_url="${REDDIT_CDP_URL}"
         if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
             return 0
         fi
-        echo "[$(date +%H:%M:%S)] ERROR: REDDIT_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: REDDIT_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
         return 1
     fi
     # Probe + launch harness Chrome on port 9557 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null; then
-        echo "[$(date +%H:%M:%S)] Reddit harness Chrome down on port 9557, launching..." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Reddit harness Chrome down on port 9557, launching..." >&2
         local _chrome_bin
         _chrome_bin=$(_resolve_chrome_bin)
         if [ -z "$_chrome_bin" ]; then
-            echo "[$(date +%H:%M:%S)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
             return 1
         fi
         # On Linux + no display, run headless. On root, add --no-sandbox.
@@ -196,7 +196,7 @@ ensure_reddit_browser_for_backend() {
         local _stale_pids
         _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
         if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
             kill $_stale_pids 2>/dev/null || true
             sleep 2
             _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
@@ -216,10 +216,10 @@ ensure_reddit_browser_for_backend() {
             sleep 1
         done
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] ERROR: Reddit harness Chrome failed to start within 12s" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: Reddit harness Chrome failed to start within 12s" >&2
             return 1
         fi
-        echo "[$(date +%H:%M:%S)] Reddit harness Chrome up on port 9557" >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Reddit harness Chrome up on port 9557" >&2
     fi
     # Always close leftover tabs from prior runs. Safe under acquire_lock
     # "reddit-browser" serialization.
