@@ -427,6 +427,29 @@ function installBrowserHarness() {
     if (reset.status !== 0) {
       console.warn('    WARNING: could not reset browser-harness clone to pinned commit; using existing checkout.');
     }
+    // Vendored fix on top of the pin (keep in sync with runtime.ts): loopback
+    // CDP requests must never route through a proxy — macOS system proxy
+    // settings leak into urllib's default opener and a box-wide forwarder
+    // 403s every 127.0.0.1 probe (2026-07-13). Applied at install time since
+    // we don't control the upstream repo. If it stops applying, upstream has
+    // either merged the fix (detected; fine) or refactored (warn); never fail
+    // the install over it.
+    const harnessPatch = path.join(PKG_ROOT, 'scripts', 'patches', 'browser-harness-loopback-cdp-proxy.patch');
+    if (fs.existsSync(harnessPatch)) {
+      const chk = spawnSync('git', ['-C', harnessDir, 'apply', '--check', harnessPatch], { stdio: 'pipe' });
+      if (chk.status === 0) {
+        spawnSync('git', ['-C', harnessDir, 'apply', harnessPatch], { stdio: 'inherit' });
+        console.log('    applied loopback-proxy patch to browser-harness');
+      } else {
+        let fixedUpstream = false;
+        try {
+          fixedUpstream = fs.readFileSync(path.join(harnessDir, 'src', 'browser_harness', 'admin.py'), 'utf-8').includes('cdp_urlopen');
+        } catch { /* file moved — fall through to the warning */ }
+        if (!fixedUpstream) {
+          console.warn('    WARNING: browser-harness loopback-proxy patch no longer applies and the fix is absent upstream; CDP probes may 403 behind a system proxy.');
+        }
+      }
+    }
   };
   if (!fs.existsSync(harnessDir)) {
     fs.mkdirSync(path.dirname(harnessDir), { recursive: true });
