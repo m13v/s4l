@@ -121,11 +121,11 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
       # is defect "owner=OTHER" (wipes a live peer's lock -> double-hold).
       if _sa_we_own_lock "$d"; then
         _sa_lock_event trap_rm "$_lname" "$(_sa_lock_owner_tag "$d")"
-        echo "[lock] trap-released $_lname pid=$$ at $(date +%H:%M:%S)" >&2
+        echo "[lock] trap-released $_lname pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
         rm -rf "$d"
       else
         _sa_lock_event trap_rm_skipped "$_lname" "$(_sa_lock_owner_tag "$d")"
-        echo "[lock] trap-release SKIPPED $_lname pid=$$ (not owner) at $(date +%H:%M:%S)" >&2
+        echo "[lock] trap-release SKIPPED $_lname pid=$$ (not owner) at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
       fi
     done
     for t in ${_SA_LOCK_TICKETS[@]+"${_SA_LOCK_TICKETS[@]}"}; do
@@ -149,7 +149,7 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
   _sa_exit_on_signal() {
     local _sig="$1" _code="$2"
     _sa_lock_event signal_exit "-" "signal=$_sig"
-    echo "[lock] caught SIG${_sig} pid=$$; releasing locks and exiting $_code at $(date +%H:%M:%S)" >&2
+    echo "[lock] caught SIG${_sig} pid=$$; releasing locks and exiting $_code at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
     _sa_release_locks
     trap - EXIT
     exit "$_code"
@@ -247,7 +247,7 @@ acquire_lock() {
           [ "$_existing" != "$ticket_file" ] && _new_t+=("$_existing")
         done
         _SA_LOCK_TICKETS=(${_new_t[@]+"${_new_t[@]}"})
-        echo "[lock] acquired $name pid=$$ at $(date +%H:%M:%S) waited=${waited}s" >&2
+        echo "[lock] acquired $name pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) waited=${waited}s" >&2
         _sa_lock_event acquired "$name" "waited=${waited}s"
         break
       fi
@@ -694,10 +694,10 @@ release_lock() {
   if _sa_we_own_lock "$lock_dir"; then
     _sa_lock_event release "$name" "$(_sa_lock_owner_tag "$lock_dir")"
     rm -rf "$lock_dir"
-    echo "[lock] released $name pid=$$ at $(date +%H:%M:%S)" >&2
+    echo "[lock] released $name pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
   else
     _sa_lock_event release_skipped "$name" "$(_sa_lock_owner_tag "$lock_dir")"
-    echo "[lock] release SKIPPED $name pid=$$ (not owner) at $(date +%H:%M:%S)" >&2
+    echo "[lock] release SKIPPED $name pid=$$ (not owner) at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
   fi
   # Rebuild the lock stack without this entry so the EXIT trap doesn't try to
   # rm it again (harmless, but keeps the stack honest if release_lock is paired
