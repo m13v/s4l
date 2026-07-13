@@ -154,7 +154,7 @@ cleanup_harness_tabs() {
     if ! $_probe 2>/dev/null; then
         sleep 1
         if ! $_probe 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] cleanup_harness_tabs: SKIPPED (linkedin-harness CDP /json/version unreachable after 10s+retry)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cleanup_harness_tabs: SKIPPED (linkedin-harness CDP /json/version unreachable after 10s+retry)" >&2
             return 0
         fi
     fi
@@ -221,7 +221,7 @@ _acquire_linkedin_pipeline_lock() {
             echo "$$" > "$_LI_PIPELINE_LOCK_DIR/pid"
             echo "$_who" > "$_LI_PIPELINE_LOCK_DIR/holder"
             export _LI_PIPELINE_LOCK_HELD=1
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock ACQUIRED by $_who (pid $$)" >&2
             return 0
         fi
         local _h_pid _h_who
@@ -236,11 +236,11 @@ _acquire_linkedin_pipeline_lock() {
             return 0
         fi
         if [ -z "$_h_pid" ] || ! kill -0 "$_h_pid" 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: reclaiming stale lock (dead holder ${_h_who} pid ${_h_pid:-unknown})" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: reclaiming stale lock (dead holder ${_h_who} pid ${_h_pid:-unknown})" >&2
             rm -rf "$_LI_PIPELINE_LOCK_DIR"
             continue
         fi
-        echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} skipping this fire (rc=78) to avoid two drivers on the 9556 Chrome" >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} skipping this fire (rc=78) to avoid two drivers on the 9556 Chrome" >&2
         return 78
     done
 }
@@ -271,10 +271,10 @@ ensure_linkedin_browser_for_backend() {
     if [ "${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" != "$_BH_LINKEDIN_DEFAULT_URL" ]; then
         local _ext_url="${LINKEDIN_CDP_URL}"
         if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
             return 0
         fi
-        echo "[$(date +%H:%M:%S)] ERROR: LINKEDIN_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: LINKEDIN_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
         return 1
     fi
     # Cross-pipeline whole-run lock: only one LinkedIn browser pipeline drives
@@ -288,14 +288,14 @@ ensure_linkedin_browser_for_backend() {
     _acquire_linkedin_pipeline_lock || return $?
     # Probe + launch harness Chrome on port 9556 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
-        echo "[$(date +%H:%M:%S)] LinkedIn harness Chrome down on port 9556, launching..." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LinkedIn harness Chrome down on port 9556, launching..." >&2
         # Dated relaunch stamp for central observability (see twitter-backend.sh).
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) port=9556" \
             >> "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/chrome-relaunch-events.log" 2>/dev/null || true
         local _chrome_bin
         _chrome_bin=$(_resolve_chrome_bin)
         if [ -z "$_chrome_bin" ]; then
-            echo "[$(date +%H:%M:%S)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
             return 1
         fi
         # On Linux + no display, run headless. On root, add --no-sandbox.
@@ -323,7 +323,7 @@ ensure_linkedin_browser_for_backend() {
         local _stale_pids
         _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
         if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
             kill $_stale_pids 2>/dev/null || true
             sleep 2
             _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
@@ -357,10 +357,10 @@ os.execv(sys.argv[1], sys.argv[1:])' \
             sleep 1
         done
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] ERROR: LinkedIn harness Chrome failed to start within 12s" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: LinkedIn harness Chrome failed to start within 12s" >&2
             return 1
         fi
-        echo "[$(date +%H:%M:%S)] LinkedIn harness Chrome up on port 9556" >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LinkedIn harness Chrome up on port 9556" >&2
     fi
     # Always close leftover tabs from prior runs. Safe under acquire_lock
     # "linkedin-browser" serialization.
@@ -395,7 +395,7 @@ _linkedin_session_detect_gate() {
     "$_py" "$HOME/social-autoposter/scripts/linkedin_killswitch.py" detect-gate \
         --cdp-url "${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" >&2 || _rc=$?
     if [ "$_rc" = "2" ]; then
-        echo "[$(date +%H:%M:%S)] detect-gate tripped the LinkedIn killswitch; aborting this fire" >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] detect-gate tripped the LinkedIn killswitch; aborting this fire" >&2
         return 1
     fi
     return 0
