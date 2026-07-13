@@ -662,9 +662,16 @@ export function ensureRuntimeProvisioned(): boolean {
 // live without a reinstall). Best-effort; never blocks startup.
 export async function ensureHarnessPatched(): Promise<{ ok: boolean; detail: string }> {
   try {
-    const adminPy = path.join(HARNESS_DIR, "src", "browser_harness", "admin.py");
-    if (!fs.existsSync(adminPy)) return { ok: false, detail: "harness not installed yet" };
-    if (fs.readFileSync(adminPy, "utf-8").includes("cdp_urlopen")) {
+    // Version marker of the CURRENT vendored patch: a symbol that exists only
+    // in its newest revision (v2 added the daemon.py websocket-proxy
+    // neutralization after v1's cdp_urlopen alone proved insufficient — the
+    // WS dial still routed through the macOS system proxy and died with
+    // "proxy rejected connection: HTTP 503"). Bump this string whenever the
+    // patch gains a new hunk, or upgraded installs will silently keep the
+    // previous revision.
+    const daemonPy = path.join(HARNESS_DIR, "src", "browser_harness", "daemon.py");
+    if (!fs.existsSync(daemonPy)) return { ok: false, detail: "harness not installed yet" };
+    if (fs.readFileSync(daemonPy, "utf-8").includes("s4l_no_proxy_ws")) {
       return { ok: true, detail: "already patched" };
     }
     const harnessPatch = path.join(
@@ -674,6 +681,12 @@ export async function ensureHarnessPatched(): Promise<{ ok: boolean; detail: str
       "browser-harness-loopback-cdp-proxy.patch"
     );
     if (!fs.existsSync(harnessPatch)) return { ok: false, detail: "patch file missing from package" };
+    // Discard any PRIOR vendored-patch revision (e.g. v1) so the cumulative
+    // patch applies onto pristine pinned sources. Only src/ is touched; the
+    // checkout is a managed artifact, never a place for local edits.
+    await sh("git", ["-C", HARNESS_DIR, "checkout", "--", "src/browser_harness"], {
+      timeoutMs: 30000,
+    });
     const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
       timeoutMs: 30000,
     });
