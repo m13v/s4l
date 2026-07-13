@@ -2670,6 +2670,11 @@ class S4LMenuBar(rumps.App):
             int(self._review_snooze_until)
             if time.time() < self._review_snooze_until
             else 0,
+            # Reveal cadence: rebuilds when the preset changes (checkmark +
+            # submenu title) and when a hold starts or lapses (the "Next cards
+            # around HH:MM" line in _state_c).
+            round(st.read_reveal_cadence()),
+            int(self._reveal_hold_until(pending_count)),
         )
         if sig != self._sig:
             self._sig = sig
@@ -2880,6 +2885,17 @@ class S4LMenuBar(rumps.App):
                     sys.stderr.flush()
                 self._last_review_sig = sig
             return
+        # Reveal cadence: hold FRESH pop-ups until the configured interval since
+        # the last presentation has passed (0 = show immediately). Drafting is
+        # untouched; the backlog keeps accumulating and is presented whole once
+        # due. Deliberately after the extend-open-card path above (an on-screen
+        # card keeps growing live) and skipped for focus=True (the menu's
+        # "Review N pending drafts" is an explicit ask). _last_review_sig is NOT
+        # stamped on a hold, so the same set still presents fresh when due.
+        if not focus:
+            cadence = st.read_reveal_cadence()
+            if cadence > 0 and time.time() - self._last_presented_at < cadence:
+                return
         with self._review_lock:
             self._reset_posting_progress_locked()
             self._review_active = True
@@ -2903,6 +2919,7 @@ class S4LMenuBar(rumps.App):
             # Record as shown only AFTER the cards are actually up, so a transient
             # card-UI failure never permanently suppresses this pending set.
             self._last_review_sig = sig
+            self._stamp_presented()
             # No macOS notification for fresh drafts, per explicit user
             # request (2026-07-03): the card itself is the surface. A missed
             # card is the unattended watchdog's job (it heals the window and
@@ -3491,6 +3508,22 @@ class S4LMenuBar(rumps.App):
                 split_menu.add(it)
             items.append(split_menu)
 
+        # Reveal cadence: how often fresh draft cards may pop (the drafting
+        # pipeline is unchanged; this only paces the pop-up). Always offered:
+        # it is the "don't interrupt me every few minutes" control.
+        cadence = st.read_reveal_cadence()
+        cadence_menu = rumps.MenuItem(
+            f"Show draft cards: {self._cadence_label(cadence).lower()}"
+        )
+        for preset, label in self.REVEAL_CADENCE_PRESETS:
+            it = rumps.MenuItem(
+                label,
+                callback=functools.partial(self._on_cadence_preset, preset),
+            )
+            it.state = 1 if round(cadence) == preset else 0
+            cadence_menu.add(it)
+        items.append(cadence_menu)
+
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
         # The one entry point for overall feedback (the review card no longer
@@ -3629,6 +3662,18 @@ class S4LMenuBar(rumps.App):
                     )
                 )
             )
+        else:
+            # Reveal-cadence hold: the backlog exists but the pop-up is being
+            # paced. Same courtesy line as the snooze; "Review N pending
+            # drafts" above shows them right now regardless.
+            hold_until = self._reveal_hold_until(pending_count)
+            if hold_until:
+                items.append(
+                    self._label(
+                        "Next cards around "
+                        + time.strftime("%H:%M", time.localtime(hold_until))
+                    )
+                )
         # No bulk-discard item here anymore: "Discard all…" lives in the
         # review card's title bar (2026-07-10). Reaching it with no card open
         # is "Review N pending drafts" -> Discard all, two clicks.
