@@ -83,9 +83,10 @@ sys.stderr = _TimestampedStderr(sys.stderr)
 # best-effort: a missing repo path or SDK degrades to a silent no-op.
 _sentry = None
 try:
-    # Read the repo dir from the plist env; this read runs
-    # BEFORE scripts/ is on sys.path, so the s4l_env mirror can't help yet.
-    _repo = os.environ.get("S4L_REPO_DIR")
+    # Read the repo dir from the plist env. This runs BEFORE scripts/ is on
+    # sys.path, so the s4l_env mirror cannot help yet; the old key is accepted
+    # only at this bootstrap seam so pre-rename plists can find the mirror.
+    _repo = os.environ.get("S4L_REPO_DIR") or os.environ.get("SAPS_REPO_DIR")
     if _repo:
         _scripts = os.path.join(_repo, "scripts")
         if _scripts not in sys.path:
