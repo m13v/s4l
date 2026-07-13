@@ -14,7 +14,8 @@ autopilot" item). This watcher is the part the user can't see: a fleet-side aler
 so a sustained stall pages us even when nobody is looking at the menu bar.
 
 Design mirrors the stall signal in mcp/menubar/s4l_menubar.py (_autopilot_stalled)
-and mcp/src/index.ts (autopilotStalled) — keep the threshold in sync:
+and mcp/src/index.ts (autopilotStalled); the thresholds are shared via
+schedule_state.py (index.ts mirrors by hand):
   stalled = the autopilot is configured (a complete worker set's SKILL.md
             files present — see WORKER_TASK_SETS)
             AND a draft job has sat unclaimed in pending/ past STALL_SECONDS.
@@ -46,14 +47,10 @@ import identity  # noqa: E402  (lives next to this file in scripts/)
 
 s4l_env.mirror()
 
-# Keep in sync with AUTOPILOT_STALL_SECONDS (menubar) / AUTOPILOT_STALL_MS (index.ts).
-STALL_SECONDS = 1200
-# A job CLAIMED but never finished (sits in running/ this long) means a worker
-# picked it up and then died mid-run — the claude -p drafting child never came up
-# or crashed. Must be generous enough to clear the longest real drafting turn so a
-# healthy run never trips it. Keep in sync with AUTOPILOT_RUNNING_STALL_SECONDS
-# (menubar). See _oldest_running_age.
-RUNNING_STALL_SECONDS = 1200
+# Stall thresholds live in schedule_state.py (HEALTHY_DRAIN_MAX_SECONDS and the
+# names derived from it) — retune there, not here. STALL_SECONDS = pending job
+# unclaimed; RUNNING_STALL_SECONDS = claimed but wedged (see _oldest_running_age).
+from schedule_state import STALL_SECONDS, RUNNING_STALL_SECONDS  # noqa: E402
 # Require the stall to persist this many consecutive checks before paging, so a
 # transient slow claim (e.g. right after a Claude restart) doesn't false-alarm.
 # At StartInterval 120 that is ~6 min of continuous stall.
