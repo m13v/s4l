@@ -31,5 +31,5 @@ python3 "$REPO_DIR/scripts/precompute_dashboard_stats.py"
 EXIT_CODE=$?
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 
-echo "[$(date +%H:%M:%S)] === done in ${RUN_ELAPSED}s (exit=${EXIT_CODE}) ==="
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] === done in ${RUN_ELAPSED}s (exit=${EXIT_CODE}) ==="
 exit "$EXIT_CODE"
