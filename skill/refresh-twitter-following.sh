@@ -16,7 +16,7 @@ set -uo pipefail
 LOG_DIR="$HOME/social-autoposter/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/refresh-twitter-following-$(date +%Y-%m-%d_%H%M%S).log"
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 REPO_DIR="$HOME/social-autoposter"
 
