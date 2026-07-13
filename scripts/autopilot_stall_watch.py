@@ -407,6 +407,30 @@ def _report_queue_health_sample(
 
 
 def main() -> int:
+    now = time.time()
+    st = _read_state()
+
+    # Sleep detection: launchd skips ticks while the host is suspended, so a
+    # wall-clock gap between this tick and the previous one of >= 3 intervals
+    # means the box slept (see the S4L-4B block by the constants above).
+    last_tick_at = st.get("last_tick_at")
+    last_sleep_gap_at = st.get("last_sleep_gap_at")
+    if last_tick_at is not None:
+        tick_gap = now - float(last_tick_at)
+        if tick_gap > SLEEP_GAP_SECONDS:
+            last_sleep_gap_at = now
+            sys.stderr.write(
+                f"[stall-watch] tick gap {int(tick_gap)}s (> {SLEEP_GAP_SECONDS}s) — "
+                "host was asleep/off; treating stall signals as sleep-tainted for "
+                f"{SLEEP_GAP_RECENT_SECONDS}s\n"
+            )
+    sleep_gap_recent = bool(
+        last_sleep_gap_at is not None
+        and (now - float(last_sleep_gap_at)) < SLEEP_GAP_RECENT_SECONDS
+    )
+
+    pending = _pending_count()
+    running = _running_count()
     age = _oldest_pending_age()
     run_age = _oldest_running_age()
     timeouts = _consecutive_timeouts()
@@ -421,8 +445,16 @@ def main() -> int:
     # never claimed), (3) running-age (job claimed then wedged mid-run) — (3) is
     # the only one of the first three that catches a worker dying after it picked
     # up the job — (4) batches_stuck, the outcome-level backstop above.
+    # Latch sanity gate (S4L-4B): consecutive_timeouts is durable and only
+    # clears on a successful drain, so ONE timed-out enqueue keeps a box
+    # looking stalled for as long as no cycle runs — even with a provably idle
+    # queue (pending=0, running=0). A single timeout only counts when there is
+    # actual queued work to corroborate it; an idle-queue latch needs >= 2.
+    # NOTE: deliberately stricter than the menubar/_index.ts stall HINT
+    # (timeouts >= 1) — a UI hint may over-trigger, a fleet page must not.
+    timeouts_signal = timeouts >= 2 or (timeouts >= 1 and (pending > 0 or running > 0))
     stalled = configured and (
-        timeouts >= 1
+        timeouts_signal
         or (age is not None and age > STALL_SECONDS)
         or (run_age is not None and run_age > RUNNING_STALL_SECONDS)
         or batches_stuck
@@ -432,13 +464,17 @@ def main() -> int:
     # episode resets and a LATER real stall (orphaned routines) still alerts.
     if stalled and _recent_rate_limit():
         stalled = False
+    # Sleep suppression: right after a wake, the latch (and any pre-nap ages)
+    # predate the sleep, not a worker failure. Require corroboration by real
+    # queued work or the outcome-level backstop before calling it a stall.
+    if stalled and sleep_gap_recent and not (pending > 0 or running > 0 or batches_stuck):
+        stalled = False
 
     # Record this tick regardless of outcome — see _report_queue_health_sample.
     _report_queue_health_sample(
-        _pending_count(), _running_count(), timeouts, age, run_age, stalled, batches_stuck
+        pending, running, timeouts, age, run_age, stalled, batches_stuck
     )
 
-    st = _read_state()
     consecutive = int(st.get("consecutive", 0))
     alerted = bool(st.get("alerted", False))
     # first_seen_at: first check this episode looked stalled at all (predates
@@ -449,6 +485,10 @@ def main() -> int:
     first_seen_at = st.get("first_seen_at")
     alerted_at = st.get("alerted_at")
 
+    # Tick bookkeeping persisted on EVERY exit path — the sleep detector needs
+    # an unbroken last_tick_at chain even (especially) while healthy.
+    tick_state = {"last_tick_at": now, "last_sleep_gap_at": last_sleep_gap_at}
+
     if not stalled:
         # Recovered (or never stalled) -> reset the episode so the next stall pages.
         if consecutive or alerted:
@@ -456,7 +496,7 @@ def main() -> int:
                 total_duration = time.time() - float(first_seen_at)
                 paged_duration = (time.time() - float(alerted_at)) if alerted_at else None
                 _report_recovery(total_duration, paged_duration)
-            _write_state({"consecutive": 0, "alerted": False})
+        _write_state({**tick_state, "consecutive": 0, "alerted": False})
         return 0
 
     consecutive += 1
