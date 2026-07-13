@@ -2148,7 +2148,7 @@ def read_conversation(thread_url, max_messages=20):
                 browser.close()
 
 
-def send_dm(thread_url, message, dm_id=None):
+def send_dm(thread_url, message, dm_id=None, apply_campaigns=True):
     """Send a message in a Twitter/X DM conversation.
 
     Navigates to the thread URL, types the message in the compose box,
@@ -2186,8 +2186,16 @@ def send_dm(thread_url, message, dm_id=None):
         message = wrap_res["text"]
         minted_link_codes = wrap_res.get("minted_codes", [])
 
+    # apply_campaigns=False (via S4L_SKIP_CAMPAIGN_SUFFIX on the send-dm CLI)
+    # opts this DM out of active-campaign suffixes. Set ONLY when delivering a
+    # HUMAN-drafted escalation reply (engage-dm-replies Phase 0): a human
+    # answering an escalation — often an AI-callout — must not get a bot tell
+    # coin-flipped onto their words (2026-07-13: the ' written with ai' suffix
+    # landing on a hand-approved recovery DM to ngeloxyz helped burn the lead).
+    # The autopilot never sets it, so the A/B experiment continues everywhere
+    # else. Mirrors reply_to_tweet's apply_campaigns plumbing.
     applied_campaigns = []
-    for cid, suffix, sample_rate in _load_active_twitter_campaigns():
+    for cid, suffix, sample_rate in (_load_active_twitter_campaigns() if apply_campaigns else []):
         if random.random() < sample_rate:
             # Wrap any URLs in the suffix through dm_short_links (DM rail) so
             # clicks attribute to this DM. Falls back to raw suffix if dm_id
@@ -2927,7 +2935,11 @@ def main():
             except ValueError:
                 print(f"send-dm: dm_id must be int, got {sys.argv[4]!r}", file=sys.stderr)
                 sys.exit(1)
-        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg)
+        # S4L_SKIP_CAMPAIGN_SUFFIX=1 opts this DM out of campaign suffixes.
+        # Set ONLY by engage-dm-replies Phase 0 when delivering a human-drafted
+        # escalation reply — see send_dm's apply_campaigns comment.
+        _skip_camp = os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg, apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
     elif cmd == "notifications":
