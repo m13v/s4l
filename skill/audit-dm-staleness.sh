@@ -14,7 +14,7 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/audit-dm-staleness-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 # HTTP-only lane (2026-06-01): both staleness UPDATEs run server-side via the
 # s4l.ai API (POST /api/v1/dms/staleness-sweep). No DATABASE_URL, no psql.
