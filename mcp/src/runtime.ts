@@ -307,6 +307,30 @@ function bundledVersion(): string | null {
   }
 }
 
+// `ensurePipelineCurrent()` extracts updates over the existing materialized
+// repo so customer config and logs survive. That also means deleting a file
+// from the npm tarball does not delete an older copy already on disk. Keep
+// explicit tombstones for retired helpers long enough for the fleet to pass
+// through this release; new installs never receive these files.
+const RETIRED_MATERIALIZED_FILES = [
+  "scripts/saps_mode.py",
+  "scripts/saps_activity.py",
+  "scripts/_lock_preempt_test.py",
+];
+
+function removeRetiredMaterializedFiles(): void {
+  for (const rel of RETIRED_MATERIALIZED_FILES) {
+    const target = path.join(MATERIALIZED_REPO, rel);
+    try {
+      if (!fs.existsSync(target)) continue;
+      fs.rmSync(target, { force: true });
+      console.error(`[runtime] removed retired pipeline file ${rel}`);
+    } catch (e: any) {
+      console.error(`[runtime] could not remove retired pipeline file ${rel}: ${e?.message || e}`);
+    }
+  }
+}
+
 // Re-materialize the pipeline source when a plugin UPDATE shipped a newer
 // pipeline.tgz than what's on disk. The .mcpb update refreshes dist/ (this
 // server) but does NOT re-extract the embedded tarball, so without this the box
@@ -334,6 +358,9 @@ export function ensurePipelineCurrent(): void {
 
     const bundled = bundledVersion();
     if (!bundled) return; // dev build, no stamp — leave the materialized repo alone.
+    // Run before the version early-return too: a prior package build may have
+    // accidentally included a retired file under this same version.
+    removeRetiredMaterializedFiles();
     const rt = readRuntime();
     if (rt?.pipeline_version === bundled) return; // already current.
     const prevVer = rt?.pipeline_version ?? "unrecorded"; // capture before we mutate rt below.
@@ -350,6 +377,9 @@ export function ensurePipelineCurrent(): void {
       );
       return;
     }
+    // Defense in depth: a stale/locally-built tarball cannot reintroduce a
+    // retired helper even if its package allowlist drifts.
+    removeRetiredMaterializedFiles();
     // Record the new version so we don't re-extract on every boot.
     const next = rt ?? readRuntime();
     if (next) {
