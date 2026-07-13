@@ -43,7 +43,7 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run-reddit-search-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Reddit Search Post Run: $(date) ==="
 
@@ -88,7 +88,7 @@ _parse_post_results() {
         # Bug observed 2026-05-08: a leaked "[14:57:04] Post phase: ..." line
         # produced "TOTAL_POSTED + [14:57:04]: syntax error" and `set -e` aborted
         # the script BEFORE the discover lane ran.
-        echo "[$(date +%H:%M:%S)] Post phase: exit code $rc; counting as failed." >> "$LOG_FILE"
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Post phase: exit code $rc; counting as failed." >> "$LOG_FILE"
         echo "0 1"
     fi
 }
