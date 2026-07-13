@@ -19,6 +19,34 @@ REPO = Path("/Users/matthewdi/social-autoposter")
 LOG_RUN_PY = REPO / "scripts" / "log_run.py"
 SKILL_PATH_MARKER = "/social-autoposter/skill/"
 MAX_AGE_SEC = 45 * 60
+
+# --- L2: browser-lock liveness (2026-07-13) ----------------------------------
+# The age caps below are backstops sized ABOVE the worst-case duration of a
+# HEALTHY run, so they can't tell "90 min in and progressing" from "wedged
+# since minute 4". This check can: the shared browser libs (twitter_browser.py
+# / reddit_browser.py get_browser_and_page) touch <lock_dir>/heartbeat on every
+# attach and page network event, so a *-browser lock held by a LIVE process
+# whose heartbeat has gone stale means the holder is wedged mid-browser-work
+# (2026-07-13: pid 1380 hung 60+ min in Phase 2b-prep media capture during a
+# network flap, blocking every peer pipeline until the 180-min age cap).
+# Thresholds: WARN at 30 min stale (log-only). KILL at 90 min stale — above
+# the gen phase's documented 60-min worst-case ceiling, so a legit long hold
+# with no python browser invocations can't be false-killed — and ONLY when
+# peers are actually queued waiting (an unwanted lock harms nobody). The
+# 2026-07-12 lock.sh signal fix makes the TERM safe: the holder releases its
+# locks and exits instead of continuing lock-protected work.
+# ONLY the heartbeat-instrumented platforms. linkedin-browser holders write no
+# heartbeat (the linkedin pipeline drives Chrome via the bh harness, not a
+# shared python lib), so on pid-file age alone a healthy long linkedin run
+# would be indistinguishable from a wedge — add it here only once its driver
+# touches <lock_dir>/heartbeat too.
+BROWSER_LOCKS_WATCHED = (
+    "/tmp/social-autoposter-twitter-browser.lock",
+    "/tmp/social-autoposter-reddit-browser.lock",
+)
+HB_WARN_SEC = 30 * 60
+HB_KILL_SEC = 90 * 60
+HB_REWARN_SEC = 30 * 60  # re-log the warning at most this often per holder
 # Per-script cap overrides for pipelines that legitimately run longer than
 # the 45 min global (stats.py over ~4-5k posts + rate-limit sleeps).
 # Key is (script_file, platform_or_None). Lookup order: (script, platform),
@@ -317,6 +345,83 @@ def emit_job_log(label, elapsed_sec):
     )
 
 
+def _holder_cmdline(pid: int) -> str:
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        return out[:200]
+    except Exception:
+        return ""
+
+
+def check_browser_lock_liveness() -> None:
+    """L2: TERM a live *-browser lock holder whose liveness heartbeat has gone
+    stale for HB_KILL_SEC while peers wait. See the constants block up top."""
+    now = time.time()
+    for lock_dir in BROWSER_LOCKS_WATCHED:
+        if not os.path.isdir(lock_dir):
+            continue
+        try:
+            with open(os.path.join(lock_dir, "pid")) as f:
+                holder = int((f.read().strip() or "0"))
+        except (OSError, ValueError):
+            continue
+        if holder <= 0:
+            continue
+        try:
+            os.kill(holder, 0)  # liveness probe only
+        except ProcessLookupError:
+            continue  # dead holder: acquire_lock's dead_pid reclaim owns this
+        except OSError:
+            continue
+        # Last liveness = freshest of the heartbeat (browser libs) and the pid
+        # file (stamped at acquire), so a just-acquired lock is never "stale".
+        marks = []
+        for name in ("heartbeat", "pid"):
+            try:
+                marks.append(os.path.getmtime(os.path.join(lock_dir, name)))
+            except OSError:
+                pass
+        if not marks:
+            continue
+        stale = now - max(marks)
+        if stale < HB_WARN_SEC:
+            continue
+        try:
+            waiters = len(os.listdir(f"{lock_dir}.queue"))
+        except OSError:
+            waiters = 0
+        lock_name = os.path.basename(lock_dir)
+        if stale >= HB_KILL_SEC and waiters >= 1:
+            cmd = _holder_cmdline(holder)
+            watchdog_log(
+                f"KILL-STALE-HOLDER {lock_name} pid={holder} heartbeat_stale={int(stale)}s "
+                f"waiters={waiters} cmd={cmd!r}"
+            )
+            killed = kill_tree(holder)
+            watchdog_log(f"  killed pids: {killed}")
+            continue
+        # Warn tier: log-only, rate-limited via a marker inside the lock dir
+        # (dies with the lock, so each hold re-warns independently).
+        marker = os.path.join(lock_dir, "hb-warned")
+        try:
+            if now - os.path.getmtime(marker) < HB_REWARN_SEC:
+                continue
+        except OSError:
+            pass
+        try:
+            with open(marker, "w") as f:
+                f.write(str(int(now)))
+        except OSError:
+            pass
+        watchdog_log(
+            f"WARN-STALE-HOLDER {lock_name} pid={holder} heartbeat_stale={int(stale)}s "
+            f"waiters={waiters} cmd={_holder_cmdline(holder)!r}"
+        )
+
+
 def main() -> None:
     procs = list_skill_shell_processes()
     for pid, ppid, etimes, script_file, platform in procs:
@@ -337,6 +442,7 @@ def main() -> None:
             watchdog_log(f"  script trap already logged {label} — skipping watchdog emit")
         else:
             emit_job_log(label, etimes)
+    check_browser_lock_liveness()
 
 
 if __name__ == "__main__":
