@@ -29,12 +29,18 @@ Run as a script -> heals, then prints {"ok": true, ...} as JSON.
 from __future__ import annotations
 
 import glob
+import ctypes
+import ctypes.util
+import hashlib
 import json
 import os
 import shutil
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
+import uuid as uuidlib
 
 import schedule_state  # noqa: E402  (lives next to this file in scripts/)
 
@@ -52,6 +58,180 @@ SCHED_REGISTRY_GLOB = os.path.join(
     os.path.expanduser("~"), "Library", "Application Support", "Claude*",
     "claude-code-sessions", "*", "*", "scheduled-tasks.json",
 )
+
+CLAUDE_COOKIE_HOST = ".claude.ai"
+CLAUDE_SAFE_STORAGE_SERVICE = "Claude Safe Storage"
+
+
+def _normalized_uuid(value) -> str | None:
+    """Return a canonical UUID string, or None for anything path-unsafe."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuidlib.UUID(value.strip()))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _last_active_org_cookie_row(root: str):
+    """Read only the lastActiveOrg row from this Claude profile's cookie DB.
+
+    Opening through SQLite (rather than copying/parsing the file ourselves)
+    also lets SQLite include a live WAL when Claude is still running. Cookie
+    values never leave this helper except as the one selected row.
+    """
+    db = os.path.join(root, "Cookies")
+    if not os.path.isfile(db):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)
+        return conn.execute(
+            """
+            SELECT host_key, value, encrypted_value
+              FROM cookies
+             WHERE name = 'lastActiveOrg'
+               AND (host_key = '.claude.ai' OR host_key = 'claude.ai')
+             ORDER BY last_access_utc DESC
+             LIMIT 1
+            """
+        ).fetchone()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _has_last_active_org_cookie(root: str) -> bool:
+    """Cheap capability probe that never reads Keychain or shows a prompt."""
+    row = _last_active_org_cookie_row(root)
+    if not row:
+        return False
+    _host, value, encrypted = row
+    if _normalized_uuid(value):
+        return True
+    return isinstance(encrypted, bytes) and encrypted.startswith(b"v10")
+
+
+def _claude_safe_storage_password() -> bytes | None:
+    """Read Electron's per-user cookie key from macOS Keychain.
+
+    There is deliberately no password field in S4L. macOS owns authorization:
+    the read commonly succeeds silently, but it may show its standard Keychain
+    dialog for the logged-in user. A denial, locked keychain, missing item, or
+    unanswered dialog simply makes this best-effort resolver return None.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-w",
+                "-s",
+                CLAUDE_SAFE_STORAGE_SERVICE,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        password = result.stdout
+        if password.endswith(b"\r\n"):
+            password = password[:-2]
+        elif password.endswith(b"\n"):
+            password = password[:-1]
+        return password or None
+    except Exception:
+        return None
+
+
+def _aes_128_cbc_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes | None:
+    """AES-CBC/PKCS7 via macOS CommonCrypto, available through libSystem.
+
+    Keeping this in-process avoids passing the derived cookie key on an
+    `openssl -K ...` command line, where another local process could see it.
+    """
+    if sys.platform != "darwin" or not ciphertext:
+        return None
+    try:
+        system_lib = ctypes.util.find_library("System") or "/usr/lib/libSystem.dylib"
+        common_crypto = ctypes.CDLL(system_lib)
+        cc_crypt = common_crypto.CCCrypt
+        cc_crypt.argtypes = [
+            ctypes.c_uint32,  # operation
+            ctypes.c_uint32,  # algorithm
+            ctypes.c_uint32,  # options
+            ctypes.c_void_p, ctypes.c_size_t,  # key, key length
+            ctypes.c_void_p,  # IV
+            ctypes.c_void_p, ctypes.c_size_t,  # input, input length
+            ctypes.c_void_p, ctypes.c_size_t,  # output, output capacity
+            ctypes.POINTER(ctypes.c_size_t),  # bytes written
+        ]
+        cc_crypt.restype = ctypes.c_int32
+
+        key_buf = ctypes.create_string_buffer(key, len(key))
+        iv_buf = ctypes.create_string_buffer(iv, len(iv))
+        input_buf = ctypes.create_string_buffer(ciphertext, len(ciphertext))
+        output_buf = ctypes.create_string_buffer(len(ciphertext) + 16)
+        output_len = ctypes.c_size_t()
+        status = cc_crypt(
+            1,  # kCCDecrypt
+            0,  # kCCAlgorithmAES
+            1,  # kCCOptionPKCS7Padding
+            key_buf, len(key),
+            iv_buf,
+            input_buf, len(ciphertext),
+            output_buf, len(output_buf),
+            ctypes.byref(output_len),
+        )
+        if status != 0:
+            return None
+        return output_buf.raw[:output_len.value]
+    except Exception:
+        return None
+
+
+def _active_org_uuid_from_cookie(root: str) -> str | None:
+    """Resolve the active org without any claude-code-sessions directory.
+
+    Chromium's macOS v10 cookie format uses a PBKDF2-derived AES key from the
+    app's Safe Storage item. Newer databases bind plaintext to the cookie host
+    by prepending SHA-256(host_key); older ones omit that prefix, so accept
+    both formats but only return a syntactically valid UUID.
+    """
+    row = _last_active_org_cookie_row(root)
+    if not row:
+        return None
+    host, value, encrypted = row
+    plain_uuid = _normalized_uuid(value)
+    if plain_uuid:
+        return plain_uuid
+    if not isinstance(encrypted, bytes) or not encrypted.startswith(b"v10"):
+        return None
+
+    password = _claude_safe_storage_password()
+    if not password:
+        return None
+    key = hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", 1003, 16)
+    clear = _aes_128_cbc_decrypt(encrypted[3:], key, b" " * 16)
+    if clear is None:
+        return None
+    host_digest = hashlib.sha256(str(host).encode("utf-8")).digest()
+    if clear.startswith(host_digest):
+        clear = clear[len(host_digest):]
+    try:
+        return _normalized_uuid(clear.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
 
 
 def _ensure_worker_skill_md() -> bool:
@@ -110,9 +290,13 @@ def heal() -> dict:
          tree held zero registry files. Resolves the active account via
          schedule_state.py's config.json lookup (lastKnownAccountUuid,
          verified correct against real installs 2026-07-08) and writes a
-         fresh worker entry into its most-recently-touched EXISTING session
-         directory (never fabricates a new directory). Same user-intent and
-         worker_skill_ok guards as fix 4.
+         fresh worker entry into its most-recently-touched existing session
+         directory. If the account has no directory yet, decrypts Claude
+         Desktop's .claude.ai/lastActiveOrg cookie with the current user's
+         macOS `Claude Safe Storage` Keychain item and creates the exact
+         <account>/<organization> pair. Keychain denial/missing-cookie cases
+         fail closed and retain the live-host-tool fallback. Same user-intent
+         and worker_skill_ok guards as fix 4.
     Best-effort: never raises. Returns a small summary dict for logging."""
     summary = {"ok": True, "edited": [], "created": [], "error": None}
     try:
@@ -218,12 +402,25 @@ def heal() -> dict:
                     p for p in glob.glob(os.path.join(account_dir, "*"))
                     if os.path.isdir(p)
                 ]
-                if not session_dirs:
-                    continue  # Desktop has never created a session for this
-                              # account on this box -- nowhere safe to write
-                # Most-recently-touched session dir is the best available
-                # guess for "the one Desktop is actively using".
-                target_dir = max(session_dirs, key=lambda p: os.path.getmtime(p))
+                if session_dirs:
+                    # Most-recently-touched session dir is the best available
+                    # choice when Desktop has already materialized one.
+                    target_dir = max(session_dirs, key=lambda p: os.path.getmtime(p))
+                else:
+                    # A login creates lastActiveOrg before agent mode creates
+                    # claude-code-sessions. It is therefore the missing
+                    # server-assigned half of the exact account/org path.
+                    org_uuid = _active_org_uuid_from_cookie(root)
+                    if not org_uuid:
+                        continue
+                    target_dir = os.path.join(account_dir, org_uuid)
+                    try:
+                        # Private identity-scoped state. Do not chmod a path
+                        # Desktop already made; mode applies only when new.
+                        os.makedirs(account_dir, mode=0o700, exist_ok=True)
+                        os.makedirs(target_dir, mode=0o700, exist_ok=True)
+                    except Exception:
+                        continue
                 target_file = os.path.join(target_dir, "scheduled-tasks.json")
                 new_entry = {
                     "id": WORKER_TASK_ID,
@@ -268,12 +465,12 @@ def heal() -> dict:
 
 def can_create_for_active_account() -> bool:
     """Read-only: would fix 5 (see heal()) actually be able to create a fresh
-    registration right now? True only if the active account (resolved the same
-    way heal() does, via schedule_state's config.json lookup) has at least one
-    EXISTING session directory to write into — fix 5 never fabricates one.
-    Used by callers (the menu bar) to decide whether to offer an automatic
-    "restart to finish setup" action or fall back to the manual re-arm prompt,
-    BEFORE committing to a restart that would turn out to fix nothing."""
+    registration right now? True if the active account has either an existing
+    session directory or a plausible lastActiveOrg cookie. This passive menu/
+    status probe deliberately does NOT read Keychain (which could show an
+    authorization dialog); heal() performs and validates decryption only after
+    the user chooses the restart action. Any denial then fails closed and the
+    post-restart verification points the user to the manual re-arm fallback."""
     try:
         for cfg in schedule_state._config_json_paths():
             root = os.path.dirname(cfg)
@@ -285,7 +482,7 @@ def can_create_for_active_account() -> bool:
                 p for p in glob.glob(os.path.join(account_dir, "*"))
                 if os.path.isdir(p)
             ]
-            if session_dirs:
+            if session_dirs or _has_last_active_org_cookie(root):
                 return True
     except Exception:
         pass
