@@ -43,7 +43,7 @@ if [ -f "$REPO_DIR/.env" ]; then
   set +a
 fi
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 # Run accounting for dashboard Job History (Render · Instagram). Matches the
 # pattern in run-instagram-daily.sh / run-twitter-threads.sh / run-reddit-threads.sh:
