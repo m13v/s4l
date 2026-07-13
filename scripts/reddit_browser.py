@@ -347,7 +347,53 @@ def _refresh_browser_lock():
     _heartbeat_bash_lease()
 
 
+# --- L1/L2 browser-hang guards (2026-07-13, mirrors twitter_browser.py) ------
+# L1: default per-op/navigation timeouts so no Playwright call can hang forever.
+# L2: liveness heartbeat on the shell reddit-browser lock dir; lock held +
+# stale heartbeat = wedged holder, TERMed by watchdog_hung_runs.py in ~30 min
+# instead of the multi-hour age cap. See twitter_browser.py for the incident
+# writeup (2026-07-13 pid 1380 media-capture wedge during a network flap).
+BROWSER_OP_TIMEOUT_MS = 30_000
+BROWSER_NAV_TIMEOUT_MS = 60_000
+_BROWSER_LOCK_HEARTBEAT = "/tmp/social-autoposter-reddit-browser.lock/heartbeat"
+_HB_THROTTLE_S = 5
+_hb_last_touch = 0.0
+
+
+def _touch_browser_heartbeat(*_args):
+    global _hb_last_touch
+    now = time.time()
+    if now - _hb_last_touch < _HB_THROTTLE_S:
+        return
+    _hb_last_touch = now
+    try:
+        if os.path.isdir(os.path.dirname(_BROWSER_LOCK_HEARTBEAT)):
+            with open(_BROWSER_LOCK_HEARTBEAT, "w") as f:
+                f.write(str(int(now)))
+    except Exception:
+        pass
+
+
 def get_browser_and_page(playwright):
+    """Instrumented entry point: attach via _get_browser_and_page_raw, then
+    (L1) set default per-op/navigation timeouts so no page call can hang
+    forever, and (L2) wire the browser-lock liveness heartbeat. All new code
+    should use THIS, never the raw variant."""
+    browser, page, is_cdp = _get_browser_and_page_raw(playwright)
+    try:
+        page.set_default_timeout(BROWSER_OP_TIMEOUT_MS)
+        page.set_default_navigation_timeout(BROWSER_NAV_TIMEOUT_MS)
+    except Exception:
+        pass
+    _touch_browser_heartbeat()
+    try:
+        page.on("request", _touch_browser_heartbeat)
+    except Exception:
+        pass
+    return browser, page, is_cdp
+
+
+def _get_browser_and_page_raw(playwright):
     """Get a logged-in Reddit page, preferring CDP-attach over launch_persistent_context.
 
     Two paths:
