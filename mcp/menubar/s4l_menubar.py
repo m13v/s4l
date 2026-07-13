@@ -398,32 +398,33 @@ DIAGNOSE_PROMPT_TEMPLATE = (
     "<that file>` so the report reaches the S4L developers. Keep replies short."
 )
 
-# A pending draft job older than this (seconds) with nothing claiming it means no
-# routine is draining the queue — the worker would claim within a minute if it
-# were firing. False-positive-free: an idle queue has no pending job at all, so a
-# quiet pipeline (no candidates) never trips this. Comfortably above the host
-# scheduler's per-minute cadence + a slow claim.
-AUTOPILOT_STALL_SECONDS = 1200
-
-# A job CLAIMED but never finished (sits in running/ this long) means a worker
-# picked it up and then wedged mid-run (the claude -p drafting child died / never
-# spawned). Generous enough that the longest real drafting turn never trips it.
-# Keep in sync with RUNNING_STALL_SECONDS (scripts/autopilot_stall_watch.py).
-AUTOPILOT_RUNNING_STALL_SECONDS = 1200
-
-# The "firing" window (how fresh lastRunAt must be) lives in the single source of
-# truth, scripts/schedule_state.py (FIRING_WINDOW there). _schedule_state delegates
-# to it, so it is intentionally NOT redefined here.
-
-# How long the producer can sit narrating "draft Nm" before we treat
-# the draft as STUCK rather than healthy. The producer writes that label the whole
-# time it blocks waiting for a worker to return a result (up to its 30-min queue
-# timeout). A healthy drain clears in ~1-2 min; if the label has been "drafting"
-# this long, the worker keeps dying mid-run (host inactivity-kill) or never claims,
-# and nothing is draining — so we flip the menu bar from a reassuring spinner to
-# ⚠ instead of letting the stale "drafting (8m)" lie persist. Well above any
-# healthy single drain (the worker itself dies at ~2 min today).
-DRAFT_STUCK_SECONDS = 300
+# Stall thresholds live in the single source of truth, scripts/schedule_state.py
+# (HEALTHY_DRAIN_MAX_SECONDS and the names derived from it) — retune there, not
+# here. Same module that owns FIRING_WINDOW; _schedule_state already delegates to
+# it. The three names cover three distinct failure modes:
+#   AUTOPILOT_STALL_SECONDS          pending job unclaimed → no routine draining
+#                                    (fix: Re-arm). Idle queue has no pending job,
+#                                    so a quiet pipeline never trips it.
+#   AUTOPILOT_RUNNING_STALL_SECONDS  job claimed but wedged in running/ → worker
+#                                    died mid-run (fix: Diagnose).
+#   DRAFT_STUCK_SECONDS              the producer's "draft Nm" label alive this
+#                                    long → end-to-end clock; the only timer that
+#                                    spans claim→die→requeue churn loops, which
+#                                    reset the two per-state timers on every
+#                                    transition while nothing ever completes.
+# The import is best-effort because the S4L_REPO_DIR sys.path insertion near the
+# top of this file is best-effort; the fallback literal mirrors
+# HEALTHY_DRAIN_MAX_SECONDS.
+try:
+    from schedule_state import (  # noqa: E402
+        STALL_SECONDS as AUTOPILOT_STALL_SECONDS,
+        RUNNING_STALL_SECONDS as AUTOPILOT_RUNNING_STALL_SECONDS,
+        DRAFT_STUCK_SECONDS,
+    )
+except Exception:
+    AUTOPILOT_STALL_SECONDS = 1200
+    AUTOPILOT_RUNNING_STALL_SECONDS = 1200
+    DRAFT_STUCK_SECONDS = 1200
 
 # A poll can read a transient "not stuck" moment (e.g. the activity file
 # between one dying worker attempt and the next claim on the same aged job)
@@ -2445,11 +2446,12 @@ class S4LMenuBar(rumps.App):
             self._stall_reason_info = ("", "")
         # Draft worker stuck/killed: the producer narrates "drafting replies (Nm)"
         # the whole time it blocks waiting for a worker to return a result, with NO
-        # idea the worker died. A healthy drain clears in ~1-2 min; once that label
-        # has been "drafting" past DRAFT_STUCK_SECONDS the worker keeps getting
-        # killed mid-run (or never claims) and nothing is draining — flip to ⚠
-        # instead of leaving the reassuring "drafting (8m)" spinner up. Skip when a
-        # more specific cause (rate limit) already owns the reason.
+        # idea the worker died. A healthy drain can run 8-10 min end to end (slot
+        # wait + the drafting turn); once that label has been "drafting" past
+        # DRAFT_STUCK_SECONDS the worker keeps getting killed mid-run (or never
+        # claims) and nothing is draining — flip to ⚠ instead of leaving the
+        # reassuring "drafting (25m)" spinner up. Skip when a more specific cause
+        # (rate limit) already owns the reason.
         #
         # Gated on schedule_state in ("ok", "stalled"), NOT missing/disabled: when
         # the schedule is missing/disabled (e.g. orphaned by an account switch),

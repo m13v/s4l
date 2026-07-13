@@ -3406,8 +3406,10 @@ function queueDir(): string {
 // routine is draining the queue — the worker would claim within a minute if it
 // were firing. This is the liveness signal that survives a Claude account switch
 // (which orphans the routines while their global SKILL.md files stay put, so the
-// SKILL.md-presence check in autopilotLoaded() reads a FALSE green). Mirrors the
-// menu bar's AUTOPILOT_STALL_SECONDS in mcp/menubar/s4l_menubar.py — keep in sync.
+// SKILL.md-presence check in autopilotLoaded() reads a FALSE green). Mirrors
+// HEALTHY_DRAIN_MAX_SECONDS in scripts/schedule_state.py, the single source of
+// truth every Python stall detector derives from; this TS constant can't import
+// it, so keep it in sync by hand when retuning there.
 const AUTOPILOT_STALL_MS = 1_200_000;
 
 // True when no scheduled-task routine is draining the draft queue. Two signals,
