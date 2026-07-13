@@ -62,10 +62,10 @@ case "${PLATFORM:-all}" in
         _LI_BOOT_RC=0
         ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
         if [ "$_LI_BOOT_RC" -eq 78 ]; then
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
             exit 0
         elif [ "$_LI_BOOT_RC" -ne 0 ]; then
-            echo "[$(date +%H:%M:%S)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
             exit "$_LI_BOOT_RC"
         fi
         ;;
@@ -84,10 +84,10 @@ case "${PLATFORM:-all}" in
         _LI_BOOT_RC=0
         ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
         if [ "$_LI_BOOT_RC" -eq 78 ]; then
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire (all-platform audit)"
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire (all-platform audit)"
             exit 0
         elif [ "$_LI_BOOT_RC" -ne 0 ]; then
-            echo "[$(date +%H:%M:%S)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
             exit "$_LI_BOOT_RC"
         fi
         python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
@@ -113,7 +113,7 @@ mkdir -p "$LOG_DIR"
 LOG_TAG="${PLATFORM:-all}"
 LOG_FILE="$LOG_DIR/audit-${LOG_TAG}-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"; echo "[$(date +%H:%M:%S)] $*"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG_FILE"; echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 RUN_START=$(date +%s)
 log "=== Audit Pipeline Run (${LOG_TAG}): $(date) ==="
