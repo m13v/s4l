@@ -61,7 +61,7 @@ esac
 # four space-separated tokens: "<channel> <tag> <version> <mcpb_url>".
 STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
 RESOLVED="$(S4L_STATE_DIR="$STATE_DIR" "$PY" - <<'PYEOF' 2>/dev/null || true
-import json, os, re, subprocess
+import json, os, re, subprocess, time
 
 state = os.environ.get("S4L_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
 try:
@@ -113,6 +113,25 @@ if best is None:
     print("unresolved")
     raise SystemExit(0)
 tag = best[1]
+# Deposit the freshly resolved release into the SHARED cross-process cache
+# (<state dir>/latest-release.json) that version.ts and snapshot.py read, so
+# this probe also feeds the menu bar / MCP for the next TTL window instead of
+# them re-spending quota. etag stays null (this resolver doesn't capture one);
+# the next conditional probe simply pays one 200 and re-seeds it. Best effort:
+# a failed write never blocks the update itself. NOTE: staging resolves here
+# from the same LIST endpoint the other surfaces use, but stable picks newest
+# non-prerelease from the LIST while they use releases/latest — same result,
+# so the cache stays consistent either way.
+try:
+    os.makedirs(state, exist_ok=True)
+    _p = os.path.join(state, "latest-release.json")
+    _tmp = "%s.tmp.%d" % (_p, os.getpid())
+    with open(_tmp, "w") as _f:
+        json.dump({"at": time.time(), "channel": channel,
+                   "version": tag.lstrip("v"), "tag": tag, "etag": None}, _f)
+    os.replace(_tmp, _p)
+except Exception:
+    pass
 print("%s %s %s %s" % (channel, tag, tag.lstrip("v"), TAG_DL % (REPO, tag)))
 PYEOF
 )"
