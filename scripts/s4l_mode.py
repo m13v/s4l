@@ -70,9 +70,8 @@ toggle): this CLI and mode.json are the only way to flip it.
 `env` additionally exports S4L_CYCLE_LANE=<lane> for both lanes so the wrapper
 knows which lane this cycle is without re-deriving it.
 
-Before the 2026-07-06 SAPS->S4L rename this file lived at scripts/saps_mode.py;
-a thin shim keeps that old path alive for the chflags-locked
-run-twitter-cycle.sh. Do not reference the old name in new code.
+The pre-2026-07-06 helper filename is retired. Current code must import or
+invoke this module directly.
 """
 
 import json
@@ -101,7 +100,7 @@ DEFAULT_PERSONAL_BRAND_SHARE = 0.5
 
 
 def state_dir() -> Path:
-    # Mirrors mcp/src/index.ts sapsStateDir() and menubar/s4l_state.py state_dir().
+    # Mirrors mcp/src/index.ts s4lStateDir() and menubar/s4l_state.py state_dir().
     return Path(
         os.environ.get("S4L_STATE_DIR")
         or (Path.home() / ".social-autoposter-mcp")
