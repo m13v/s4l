@@ -45,7 +45,7 @@ SOCIAL_ID=""
 REPLY_TO=""
 DO_POST=0
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
