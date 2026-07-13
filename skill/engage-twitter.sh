@@ -25,12 +25,12 @@ source "$(dirname "$0")/lock.sh"
 # Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS, exports TWITTER_CDP_URL=9555.
 source "$(dirname "$0")/lib/twitter-backend.sh"
 
-echo "[$(date +%H:%M:%S)] Acquiring twitter-browser lock (pid=$$)..." | tee -a "$LOG_FILE"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Acquiring twitter-browser lock (pid=$$)..." | tee -a "$LOG_FILE"
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
-echo "[$(date +%H:%M:%S)] twitter-browser lock held (pid=$$)" | tee -a "$LOG_FILE"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] twitter-browser lock held (pid=$$)" | tee -a "$LOG_FILE"
 # Probe + launch harness Chrome on port 9555 if needed, then sweep leftover tabs.
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
-echo "[$(date +%H:%M:%S)] Acquiring twitter (pipeline) lock (pid=$$)..." | tee -a "$LOG_FILE"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Acquiring twitter (pipeline) lock (pid=$$)..." | tee -a "$LOG_FILE"
 acquire_lock "twitter" 3600 2>>"$LOG_FILE"
 
 # Load secrets
@@ -47,7 +47,7 @@ BATCH_SIZE=500
 ENGAGE_TWITTER_HELPER="$REPO_DIR/scripts/engage_twitter_helper.py"
 # (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== Twitter Engagement Run: $(date) ==="
