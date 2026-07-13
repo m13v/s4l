@@ -132,7 +132,31 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
       rm -f "$t"
     done
   }
-  trap _sa_release_locks EXIT INT TERM HUP
+  trap _sa_release_locks EXIT
+  # 2026-07-12: INT/TERM/HUP release locks AND EXIT, instead of sharing the
+  # plain EXIT handler. Scenario this fixes (observed 2026-07-12 12:02:09,
+  # engage-dm-replies.sh pid 72465): a stray signal fired the old combined
+  # trap, which released BOTH held locks and then RESUMED the script (bash
+  # continues after a trapped signal when the handler doesn't exit). The run
+  # kept driving the shared twitter Chrome without its twitter-browser lock,
+  # the twitter cycle legitimately acquired the freed lock and navigated the
+  # same tab mid-send, and all 3 send-dm attempts died with
+  # thread_url_redirected ("shared-tab drift", human_dm_replies id 100045).
+  # A signaled run must never continue lock-protected work: log WHICH signal
+  # hit (the old single-line event gave no clue), clean up once, exit 128+N.
+  # Scripts that install their own combined traps after sourcing this file
+  # (e.g. run-twitter-cycle.sh's _sa_combined_exit) still override these.
+  _sa_exit_on_signal() {
+    local _sig="$1" _code="$2"
+    _sa_lock_event signal_exit "-" "signal=$_sig"
+    echo "[lock] caught SIG${_sig} pid=$$; releasing locks and exiting $_code at $(date +%H:%M:%S)" >&2
+    _sa_release_locks
+    trap - EXIT
+    exit "$_code"
+  }
+  trap '_sa_exit_on_signal INT 130' INT
+  trap '_sa_exit_on_signal TERM 143' TERM
+  trap '_sa_exit_on_signal HUP 129' HUP
 fi
 
 acquire_lock() {
