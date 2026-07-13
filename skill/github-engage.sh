@@ -20,7 +20,7 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/github-engage-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 # Per-cycle batch id stamped onto every claude_sessions row spawned by this
 # engagement run (via SA_CYCLE_ID env -> log_claude_session.py). 2026-05-10
