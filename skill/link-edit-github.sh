@@ -30,7 +30,7 @@ LE_HELPER="$REPO_DIR/scripts/link_edit_helper.py"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/link-edit-github-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== GitHub Link Edit Run: $(date) ==="
