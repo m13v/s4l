@@ -510,60 +510,86 @@ def main() -> int:
     # the fallback is the classic orphaned-routine case.
     wedged_inflight = run_age is not None and run_age > RUNNING_STALL_SECONDS
     if consecutive >= ALERT_AFTER and not alerted:
-        try:
-            sentry = _sentry()
-            sentry.init()
-            if wedged_inflight:
-                cause = (
-                    "a worker claimed a draft job and then died mid-run (claude -p child "
-                    "never came up / crashed)"
-                )
-                stall_shape = "inflight_wedged"
-            elif batches_stuck:
-                cause = (
-                    f"last {BATCH_PROGRESSION_MIN_BATCHES} twitter_batches all failed to "
-                    "reach phase2b-gen — drafting is not actually happening even if the "
-                    "queue-level counters look ambiguous"
-                )
-                stall_shape = "batches_not_progressing"
-            else:
-                cause = "scheduled-task routines likely orphaned — Claude Desktop account change?"
-                stall_shape = "not_draining"
-            # Our own staging/QA/dev boxes (identity.is_internal_install) get set
-            # up and rebuilt with nobody actively feeding the queue, which looks
-            # identical to a real stall on the signals above. Downgrade those to
-            # warning instead of error so they don't page as a customer incident
-            # (the digest only scans error/fatal) while still leaving a Sentry
-            # record if we ever need to look one up by hand.
-            is_internal = identity.is_internal_install()
-            sentry.capture_message(
-                "social-autoposter autopilot stalled: draft jobs are not being "
-                f"drained ({cause}). producer consecutive timeouts={timeouts}, "
-                f"oldest pending job age={age_str}, oldest in-flight (running) job "
-                f"age={run_age_str}, sustained {consecutive} checks.",
-                level=("warning" if is_internal else "error"),
-                tags={
-                    "component": "autopilot",
-                    "issue": "stall",
-                    "stall_shape": stall_shape,
-                    "consecutive_timeouts": str(timeouts),
-                    "oldest_pending_age_s": str(int(age)) if age is not None else "",
-                    "oldest_running_age_s": str(int(run_age)) if run_age is not None else "",
-                    "batches_stuck": str(batches_stuck),
-                    "internal_install": str(is_internal),
-                },
-            )
-            sentry.flush()
-        except Exception:
-            # No Sentry (helper/SDK missing) -> at least leave a local breadcrumb.
+        if not _api_reachable():
+            # No network: an offline box is a different, self-healing condition,
+            # the page would misattribute it to the worker (and the event can't
+            # ship anyway). Keep the episode counting so a stall that survives
+            # the outage still pages the tick connectivity returns.
             sys.stderr.write(
-                f"[stall-watch] autopilot stalled (timeouts={timeouts}, "
-                f"pending_age={age_str}, running_age={run_age_str}) but Sentry report failed\n"
+                f"[stall-watch] stall persisted {consecutive} checks but the API is "
+                "unreachable (box offline?); deferring the page until network returns\n"
             )
-        alerted = True
-        alerted_at = time.time()
+        else:
+            try:
+                sentry = _sentry()
+                sentry.init()
+                if wedged_inflight:
+                    cause = (
+                        "a worker claimed a draft job and then died mid-run (claude -p child "
+                        "never came up / crashed)"
+                    )
+                    stall_shape = "inflight_wedged"
+                elif batches_stuck:
+                    cause = (
+                        f"last {BATCH_PROGRESSION_MIN_BATCHES} twitter_batches all failed to "
+                        "reach phase2b-gen — drafting is not actually happening even if the "
+                        "queue-level counters look ambiguous"
+                    )
+                    stall_shape = "batches_not_progressing"
+                elif _worker_ran_recently():
+                    # On-disk transcripts prove the worker routines ARE firing, so
+                    # this cannot be the orphaned-routines shape (S4L-4B paged with
+                    # exactly that bogus cause while the registry sample showed the
+                    # task had run seconds earlier).
+                    cause = (
+                        "producer timeout latch, but worker-task transcripts show recent "
+                        "runs — routines are firing; suspect a transient enqueue timeout"
+                        + (" or a host sleep gap" if sleep_gap_recent else "")
+                        + ", NOT orphaned routines"
+                    )
+                    stall_shape = "latch_worker_alive"
+                else:
+                    cause = "scheduled-task routines likely orphaned — Claude Desktop account change?"
+                    stall_shape = "not_draining"
+                # Our own staging/QA/dev boxes (identity.is_internal_install) get set
+                # up and rebuilt with nobody actively feeding the queue, which looks
+                # identical to a real stall on the signals above. Downgrade those to
+                # warning instead of error so they don't page as a customer incident
+                # (the digest only scans error/fatal) while still leaving a Sentry
+                # record if we ever need to look one up by hand.
+                is_internal = identity.is_internal_install()
+                sentry.capture_message(
+                    "social-autoposter autopilot stalled: draft jobs are not being "
+                    f"drained ({cause}). producer consecutive timeouts={timeouts}, "
+                    f"oldest pending job age={age_str}, oldest in-flight (running) job "
+                    f"age={run_age_str}, sustained {consecutive} checks.",
+                    level=("warning" if is_internal else "error"),
+                    tags={
+                        "component": "autopilot",
+                        "issue": "stall",
+                        "stall_shape": stall_shape,
+                        "consecutive_timeouts": str(timeouts),
+                        "oldest_pending_age_s": str(int(age)) if age is not None else "",
+                        "oldest_running_age_s": str(int(run_age)) if run_age is not None else "",
+                        "batches_stuck": str(batches_stuck),
+                        "internal_install": str(is_internal),
+                        "pending": str(pending),
+                        "running": str(running),
+                        "recent_sleep_gap": str(sleep_gap_recent),
+                    },
+                )
+                sentry.flush()
+            except Exception:
+                # No Sentry (helper/SDK missing) -> at least leave a local breadcrumb.
+                sys.stderr.write(
+                    f"[stall-watch] autopilot stalled (timeouts={timeouts}, "
+                    f"pending_age={age_str}, running_age={run_age_str}) but Sentry report failed\n"
+                )
+            alerted = True
+            alerted_at = time.time()
 
     _write_state({
+        **tick_state,
         "consecutive": consecutive,
         "alerted": alerted,
         "first_seen_at": first_seen_at,
