@@ -116,7 +116,7 @@ tag = best[1]
 # Deposit the freshly resolved release into the SHARED cross-process cache
 # (<state dir>/latest-release.json) that version.ts and snapshot.py read, so
 # this probe also feeds the menu bar / MCP for the next TTL window instead of
-# them re-spending quota. etag stays null (this resolver doesn't capture one);
+# them re-spending quota. etag stays null (this resolver does not capture one);
 # the next conditional probe simply pays one 200 and re-seeds it. Best effort:
 # a failed write never blocks the update itself. NOTE: staging resolves here
 # from the same LIST endpoint the other surfaces use, but stable picks newest
