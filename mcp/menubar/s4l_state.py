@@ -1251,6 +1251,46 @@ def write_split(share):
     return share
 
 
+# Draft-card reveal cadence: minimum seconds between FRESH card pop-ups
+# (0 = present as soon as drafts are ready). Drafting itself is untouched;
+# drafts keep accumulating in the review store and the menubar just paces the
+# pop-up. Lives in mode.json (every writer preserves unknown keys). Presets
+# are the menubar's REVEAL_CADENCE_PRESETS; any non-negative value is valid.
+REVEAL_CADENCE_DEFAULT = 3600.0
+
+
+def read_reveal_cadence():
+    """Seconds between draft-card reveals (0 = immediately, default 1 hour)."""
+    d = read_json(MODE_FILE)
+    try:
+        secs = float(d.get("reveal_cadence_secs"))
+    except (TypeError, ValueError, AttributeError):
+        return REVEAL_CADENCE_DEFAULT
+    return max(0.0, secs)
+
+
+def write_reveal_cadence(secs):
+    """Persist the reveal cadence, preserving every other mode.json key.
+    Returns the written value. Never raises (a menu click must not crash)."""
+    try:
+        secs = max(0.0, float(secs))
+    except (TypeError, ValueError):
+        return read_reveal_cadence()
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["reveal_cadence_secs"] = secs
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return secs
+
+
 def write_mode(mode):
     """Legacy single-mode setter: named lane ON, the other OFF (compat)."""
     if mode not in _VALID_MODES:
