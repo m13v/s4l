@@ -37,7 +37,7 @@ LOG_FILE="$LOG_DIR/sentry-digest-$TS.log"
 SCAN_FILE="$LOG_DIR/sentry-digest-scan-$TS.json"
 OUTCOME_FILE="$LOG_DIR/outcome-sentry-digest-$TS.json"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 cd "$REPO_DIR"
 
