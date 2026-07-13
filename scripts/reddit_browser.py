@@ -1750,7 +1750,7 @@ def _log_dm_outbound(chat_url, content, dm_id=None, minted_codes=None):
         return False
 
 
-def send_dm(chat_url, message, dm_id=None):
+def send_dm(chat_url, message, dm_id=None, apply_campaigns=True):
     """Send a message in a Reddit chat or PM thread.
 
     For chat URLs (reddit.com/chat/...), navigates to the chat room and
@@ -1792,8 +1792,12 @@ def send_dm(chat_url, message, dm_id=None):
         minted_link_codes = wrap_res.get("minted_codes", [])
 
     # Tool-level campaign suffix injection (guaranteed delivery of literal text).
+    # apply_campaigns=False (via S4L_SKIP_CAMPAIGN_SUFFIX on the send-dm CLI)
+    # opts this DM out — set ONLY for human-drafted escalation replies
+    # (engage-dm-replies Phase 0); see twitter_browser.py send_dm for the
+    # incident rationale. The autopilot never sets it.
     applied_campaigns = []
-    for cid, suffix, sample_rate in _load_active_reddit_campaigns_for_dm():
+    for cid, suffix, sample_rate in (_load_active_reddit_campaigns_for_dm() if apply_campaigns else []):
         if random.random() < sample_rate:
             message = message + suffix
             applied_campaigns.append(cid)
@@ -2507,7 +2511,11 @@ def main():
                 dm_id_arg = int(sys.argv[4])
             except ValueError:
                 print(f"[send-dm] ignoring non-int dm_id arg: {sys.argv[4]!r}", file=sys.stderr)
-        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg)
+        # S4L_SKIP_CAMPAIGN_SUFFIX=1 opts this DM out of campaign suffixes.
+        # Set ONLY by engage-dm-replies Phase 0 when delivering a human-drafted
+        # escalation reply — see send_dm's apply_campaigns comment.
+        _skip_camp = os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg, apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
     elif cmd == "compose-dm":
