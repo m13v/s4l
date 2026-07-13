@@ -55,7 +55,7 @@ set -euo pipefail
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -85,7 +85,7 @@ SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/stats-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== LinkedIn Stats Run (unified): $(date) ==="
