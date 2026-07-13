@@ -111,6 +111,88 @@ export function releaseChannel(): "stable" | "staging" {
   return "stable";
 }
 
+// SHARED CROSS-PROCESS CACHE (2026-07-13): <state dir>/latest-release.json.
+// Every surface that resolves the newest release (this module, scripts/
+// snapshot.py for the menu bar, scripts/s4l_box_update.sh) reads and writes
+// THIS one file, so a box makes at most one real GitHub probe per
+// SHARED_TTL_S no matter how many short-lived processes spin up (MCP servers
+// respawn per s4l-worker session, buildSnapshot shells snapshot.py as a fresh
+// subprocess, the menu bar ticks). The persisted ETag makes even those probes
+// quota-free between releases (304s do not count against the anonymous
+// 60/h-per-IP quota; before this cache each process held its OWN in-process
+// ETag that died with the process, so every respawn paid a full 200). Added
+// after the box's aggregate probing (~80-100 req/h across processes) burned
+// the quota on 2026-07-13 and silenced the update banner. Failures
+// (version=null) are cached too. Keep the file shape in lockstep with
+// snapshot.py::_read_shared_cache.
+type SharedCache = {
+  at: number; // epoch SECONDS (python time.time() convention)
+  channel: "stable" | "staging";
+  version: string | null;
+  tag: string | null;
+  etag: string | null;
+};
+const SHARED_TTL_S = 600; // banner latency ceiling: a new release surfaces within 10 min
+const PROBE_LOCK_STALE_MS = 30_000;
+
+function sharedCachePath(): string {
+  return path.join(STATE_DIR, "latest-release.json");
+}
+
+function readSharedCache(channel: "stable" | "staging"): SharedCache | null {
+  try {
+    const d = JSON.parse(fs.readFileSync(sharedCachePath(), "utf-8"));
+    if (!d || d.channel !== channel || typeof d.at !== "number") return null;
+    return {
+      at: d.at,
+      channel,
+      version: typeof d.version === "string" ? d.version : null,
+      tag: typeof d.tag === "string" ? d.tag : null,
+      etag: typeof d.etag === "string" ? d.etag : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeSharedCache(c: SharedCache): void {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const tmp = `${sharedCachePath()}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(c));
+    fs.renameSync(tmp, sharedCachePath());
+  } catch {
+    /* best effort; worst case another process re-probes */
+  }
+}
+
+// Single-flight guard so N concurrent processes with an expired shared cache
+// don't all probe at once. acquired=false ONLY when another probe holds a
+// FRESH lock; any other failure probes anyway rather than going blind.
+function tryProbeLock(): { acquired: boolean; lock: string | null } {
+  const lock = path.join(STATE_DIR, "latest-release.lock");
+  const create = () => fs.closeSync(fs.openSync(lock, "wx"));
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    create();
+    return { acquired: true, lock };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > PROBE_LOCK_STALE_MS) {
+          fs.unlinkSync(lock); // stale: holder died mid-probe
+          create();
+          return { acquired: true, lock };
+        }
+      } catch {
+        /* raced with the holder */
+      }
+      return { acquired: false, lock: null };
+    }
+    return { acquired: true, lock: null };
+  }
+}
+
 function parseSemverish(v: string): string | null {
   return /^\d+\.\d+\.\d+/.test(v) ? v : null;
 }
