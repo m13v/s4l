@@ -33,7 +33,7 @@ RUN_START_EPOCH=$(date +%s)
 # calls added in 5e41d96 (2026-05-10) fall through to macOS /usr/bin/log,
 # which barfs `Unknown subcommand` and ERR-traps the run at exit=64 before
 # the browser lease is ever acquired (silent kill since 2026-05-10).
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 # Diagnostic: log the failing line and command before set -e kills the script.
 # Without this, silent deaths (e.g., Claude exits non-zero inside the $() below)
