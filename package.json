@@ -17,6 +17,7 @@
     "!bin/server.js",
     "!bin/auth.js",
     "scripts/*.py",
+    "scripts/patches/",
     "!scripts/db_direct.py",
     "!scripts/sync_blocked_authors.py",
     "!scripts/backfill_real_clicks.py",
