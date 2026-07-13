@@ -610,7 +610,61 @@ def _cdp_diagnostics(cdp_url):
     return diag
 
 
+# --- L1/L2 browser-hang guards (2026-07-13) ----------------------------------
+# L1: no single Playwright operation may block forever. Until today NO script
+# set a default timeout, so any page op could hang indefinitely — a twitter
+# cycle wedged 60+ min in Phase 2b-prep media capture during a network flap
+# (2026-07-13 08:02, pid 1380) while holding the twitter-browser lock, blocking
+# every peer pipeline until the 180-min watchdog cap. Healthy ops here finish
+# in <10s; navigation on the x.com SPA gets extra slack. Callers all have
+# retry layers above, so failing fast is strictly better than hanging.
+BROWSER_OP_TIMEOUT_MS = 30_000
+BROWSER_NAV_TIMEOUT_MS = 60_000
+# L2: liveness heartbeat for the SHELL browser lock (the cross-pipeline mutex,
+# /tmp/social-autoposter-twitter-browser.lock). Touched on attach and on every
+# page network request (throttled), so "lock held + heartbeat stale" means the
+# holder is wedged, not just slow — a healthy 65-min phase2b-gen hold shows
+# constant traffic. watchdog_hung_runs.py reads this to TERM wedged holders in
+# ~30 min instead of the 180-min age cap. Best-effort: never fails the caller.
+_BROWSER_LOCK_HEARTBEAT = "/tmp/social-autoposter-twitter-browser.lock/heartbeat"
+_HB_THROTTLE_S = 5
+_hb_last_touch = 0.0
+
+
+def _touch_browser_heartbeat(*_args):
+    global _hb_last_touch
+    now = time.time()
+    if now - _hb_last_touch < _HB_THROTTLE_S:
+        return
+    _hb_last_touch = now
+    try:
+        if os.path.isdir(os.path.dirname(_BROWSER_LOCK_HEARTBEAT)):
+            with open(_BROWSER_LOCK_HEARTBEAT, "w") as f:
+                f.write(str(int(now)))
+    except Exception:
+        pass
+
+
 def get_browser_and_page(playwright):
+    """Instrumented entry point: attach via _get_browser_and_page_raw, then
+    (L1) set default per-op/navigation timeouts so no page call can hang
+    forever, and (L2) wire the browser-lock liveness heartbeat. All new code
+    should use THIS, never the raw variant."""
+    browser, page, is_cdp = _get_browser_and_page_raw(playwright)
+    try:
+        page.set_default_timeout(BROWSER_OP_TIMEOUT_MS)
+        page.set_default_navigation_timeout(BROWSER_NAV_TIMEOUT_MS)
+    except Exception:
+        pass
+    _touch_browser_heartbeat()
+    try:
+        page.on("request", _touch_browser_heartbeat)
+    except Exception:
+        pass
+    return browser, page, is_cdp
+
+
+def _get_browser_and_page_raw(playwright):
     """Connect to the running twitter-harness Chrome via CDP.
 
     Returns (browser, page, is_cdp=True). `page` is a reused existing Twitter
