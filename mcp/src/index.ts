@@ -60,6 +60,7 @@ import {
   clearMenubarStop,
   ensurePipelineCurrent,
   ensureRuntimeProvisioned,
+  ensureHarnessPatched,
   retryProvisionIfStalled,
 } from "./runtime.js";
 import {
@@ -5564,6 +5565,17 @@ async function main() {
       "[social-autoposter-mcp] owned runtime not ready; provisioning on boot"
     );
   }
+  // Vendored harness patch for ALREADY-ready runtimes: provision() is skipped
+  // above when the runtime is ready, so a patch shipped in an rc would never
+  // reach an existing install's harness checkout without this. Idempotent
+  // (marker check) and best-effort; never blocks boot.
+  void ensureHarnessPatched()
+    .then((r) => {
+      if (!(r.ok && r.detail === "already patched")) {
+        console.error(`[social-autoposter-mcp] harness patch: ${r.ok ? "ok" : "skip"} (${r.detail})`);
+      }
+    })
+    .catch(() => {});
   // Queue-backed drafting (2026-06-23): keep the two worker-task prompts current,
   // pre-approve their tools EAGERLY (before onboarding even creates the tasks, so
   // the first unattended fire can't stall), and (re)install the launchd kicker
