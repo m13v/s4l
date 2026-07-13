@@ -652,6 +652,44 @@ export function ensureRuntimeProvisioned(): boolean {
   }
 }
 
+// Boot hook closing the provisioning gap for ALREADY-ready runtimes: provision()
+// skips when runtimeReady(), so a vendored-patch update shipped in an rc never
+// reaches an existing install's harness checkout (proved on the QA box: rc.26
+// delivered scripts/patches/ but the checkout stayed unpatched, 2026-07-13).
+// This runs on every MCP boot: if the fix marker is absent and the patch
+// applies, apply it and reload the harness daemon so the running process picks
+// up the new source (the uv tool install is EDITABLE, so patched files are
+// live without a reinstall). Best-effort; never blocks startup.
+export async function ensureHarnessPatched(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const adminPy = path.join(HARNESS_DIR, "src", "browser_harness", "admin.py");
+    if (!fs.existsSync(adminPy)) return { ok: false, detail: "harness not installed yet" };
+    if (fs.readFileSync(adminPy, "utf-8").includes("cdp_urlopen")) {
+      return { ok: true, detail: "already patched" };
+    }
+    const harnessPatch = path.join(
+      MATERIALIZED_REPO,
+      "scripts",
+      "patches",
+      "browser-harness-loopback-cdp-proxy.patch"
+    );
+    if (!fs.existsSync(harnessPatch)) return { ok: false, detail: "patch file missing from package" };
+    const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
+      timeoutMs: 30000,
+    });
+    if (chk.code !== 0) {
+      return { ok: false, detail: "patch does not apply (dirty or diverged checkout)" };
+    }
+    const app = await sh("git", ["-C", HARNESS_DIR, "apply", harnessPatch], { timeoutMs: 30000 });
+    if (app.code !== 0) return { ok: false, detail: `git apply failed (exit ${app.code})` };
+    // Reload the daemon so the long-lived process re-imports the patched source.
+    await sh(HARNESS_BIN, ["--reload"], { timeoutMs: 30000 });
+    return { ok: true, detail: "patched + daemon reloaded" };
+  } catch (e: any) {
+    return { ok: false, detail: String(e?.message || e) };
+  }
+}
+
 async function provision(progress: InstallProgress): Promise<InstallProgress> {
   const setStep = (id: string, status: StepStatus, detail?: string) => {
     const st = progress.steps.find((s) => s.id === id);
