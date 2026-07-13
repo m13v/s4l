@@ -12,7 +12,7 @@ set -euo pipefail
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -37,10 +37,10 @@ acquire_lock "linkedin-browser" 3600
 _LI_BOOT_RC=0
 ensure_linkedin_browser_for_backend || _LI_BOOT_RC=$?
 if [ "$_LI_BOOT_RC" -eq 78 ]; then
-    echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
     exit 0
 elif [ "$_LI_BOOT_RC" -ne 0 ]; then
-    echo "[$(date +%H:%M:%S)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
     exit "$_LI_BOOT_RC"
 fi
 acquire_lock "dm-outreach-linkedin" 2700
@@ -56,7 +56,7 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/dm-outreach-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== LinkedIn DM Outreach Run: $(date) ==="
