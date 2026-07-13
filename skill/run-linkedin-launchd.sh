@@ -40,7 +40,7 @@ mkdir -p "$LOG_DIR"
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Skipping run-linkedin." \
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Skipping run-linkedin." \
         >> "$LOG_DIR/launchd-linkedin-stderr.log"
     exit 0
 fi
