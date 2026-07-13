@@ -30,10 +30,10 @@ namespace `mcp__social-autoposter__*`, launchd labels, paths.
 
 ## Tier 2 — internal SAPS_* env vars -> S4L_* (COMPLETED 2026-07-06)
 
-Executed with Matthew's explicit unlock authorization. Every functional SAPS_*
-read/write, saps* identifier (sapsStateDir, saps_pick_style/topic, lock paths,
-tmp prefixes, __saps* JS globals, marker keys) is renamed to the S4L form. The
-ONLY remaining "saps" references in the tree are legacy-NEUTRALIZERS, kept on
+Executed with Matthew's explicit unlock authorization. Every functional old-prefix
+env read/write and internal identifier (state helpers, style/topic pickers, lock
+paths, temp prefixes, JS globals, and marker keys) is renamed to the S4L form.
+The ONLY remaining old-prefix references are legacy neutralizers, kept on
 purpose while pre-rename artifacts exist in the field:
   - entry-script SAPS_->S4L_ env mirror blocks (old baked plists keep working)
   - env scrubbers (menubar launch filter, s4l_box_update env -u)
