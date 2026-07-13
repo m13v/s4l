@@ -46,10 +46,11 @@ menu bar registers at boot via `set_feedback_handler` (it ships
 decision='feedback' review events).
 
 Rejecting is a two-step flow: the Reject button swaps the card body for a
-reason picker (three one-tap categories plus Other, with an optional free-text
-note). The category feeds the feedback-digest loop that distills human
-rejections into each project's learned_preferences config block; "Skip" keeps
-the old zero-friction reject (no reason recorded). Link clicks (author profile,
+reason picker (three one-tap categories, all optional, plus an optional
+free-text note). The category feeds the feedback-digest loop that distills
+human rejections into each project's learned_preferences config block; the
+picker's red Reject button commits with no category (the note, if typed, is
+still sent). Link clicks (author profile,
 thread ↗) and per-card dwell time ride along on the decision so the digest can
 infer intent (e.g. profile-checked-then-rejected = author-quality signal) even
 when the reason is skipped.
@@ -2016,7 +2017,7 @@ class _ReviewController(NSObject):
         content.addSubview_(skip)
 
         content.addSubview_(
-            _label(NSMakeRect(M, H - 72, W - 2 * M, 20), "Why reject this draft?", size=13, bold=True)
+            _label(NSMakeRect(M, H - 72, W - 2 * M, 20), "Why reject this draft? (optional)", size=13, bold=True)
         )
         y = H - 106
         for i, (_, title) in enumerate(REJECT_REASONS):
@@ -2064,7 +2065,7 @@ class _ReviewController(NSObject):
         note.setEditable_(True)
         note.setFont_(NSFont.systemFontOfSize_(12))
         try:
-            note.setPlaceholderString_("Optional note (sent with whichever reason you pick)")
+            note.setPlaceholderString_("Optional note (sent with or without a reason)")
             note.cell().setWraps_(True)
         except Exception:
             pass
