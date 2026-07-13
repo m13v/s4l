@@ -185,13 +185,15 @@ M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
 
 # Reject-reason categories, in display order. Tags are 1-based button tags on
-# the reason picker; values must match the review_events.reject_category CHECK
-# constraint server-side (wrong_author | off_topic | bad_draft | other).
+# the reason picker; values must be a subset of the review_events.reject_category
+# CHECK constraint server-side (wrong_author | off_topic | bad_draft | other).
+# "other" is still valid server-side but no longer offered as a button: picking
+# a category is optional (the red Reject button commits without one) and the
+# free-text note covers everything a generic Other chip used to.
 REJECT_REASONS = (
     ("wrong_author", "Wrong author / audience"),
     ("off_topic", "Off-topic thread"),
-    ("bad_draft", "Draft doesn't sound right"),
-    ("other", "Other"),
+    ("bad_draft", "Feels like AI writing"),
 )
 
 # Client-side cap on tracked interactions per card (server clips at 50 too).
@@ -1990,10 +1992,11 @@ class _ReviewController(NSObject):
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
         # Buttons at the TOP, above the title, mirroring the card's action
-        # row so the cursor doesn't have to travel between steps: "Reject,
-        # no reason" sits right-aligned exactly where Reject was (one-click
-        # double-tap keeps the old zero-friction reject), Back sits at the
-        # left where Approve was.
+        # row so the cursor doesn't have to travel between steps: "Reject"
+        # sits exactly where the card's Reject was (one-click double-tap
+        # keeps the old zero-friction reject) and commits with no category,
+        # since picking one is optional; Back sits at the left where Approve
+        # was.
         back = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 90, 30))
         back.setTitle_("Back")
         back.setBezelStyle_(NSBezelStyleRounded)
@@ -2001,8 +2004,8 @@ class _ReviewController(NSObject):
         back.setAction_("rejectBack:")
         content.addSubview_(back)
 
-        skip = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 150, H - 42, 150, 30))
-        skip.setTitle_("Reject, no reason")
+        skip = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
+        skip.setTitle_("Reject")
         skip.setBezelStyle_(NSBezelStyleRounded)
         try:
             skip.setHasDestructiveAction_(True)  # red title on macOS 12+
