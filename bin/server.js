@@ -1639,15 +1639,15 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   // Patterns. Each compute-style marker is captured ONCE (first occurrence).
   // Lock acquires accumulate so we can sum waits across the 2-3 acquire/release
   // dances in a single cycle (Phase 1 → release → Phase 2b-post → release).
-  const RE_CYCLE_START   = /^\[(\d{2}):(\d{2}):(\d{2})\] === Twitter Cycle/;
-  const RE_LOCK_ACQ      = /^\[lock\] acquired twitter-browser pid=\d+ at (\d{2}):(\d{2}):(\d{2}) waited=(\d+)s/;
-  const RE_PHASE1_START  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 1: drafting/;
-  const RE_PHASE1_END    = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 1 complete/;
-  const RE_RIPEN_SLEEP   = /^\[(\d{2}):(\d{2}):(\d{2})\] Variant \w: sleeping (\d+)s before T1/;
-  const RE_PHASE2A       = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2a: re-polling/;
-  const RE_PHASE2B_PREP  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep: Claude reading/;
-  const RE_PHASE2B_PREP_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep complete/;
-  const RE_PHASE2B_GEN   = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-gen:/;
+  const RE_CYCLE_START   = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] === Twitter Cycle/;
+  const RE_LOCK_ACQ      = /^\[lock\] acquired twitter-browser pid=\d+ at (?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z? waited=(\d+)s/;
+  const RE_PHASE1_START  = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 1: drafting/;
+  const RE_PHASE1_END    = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 1 complete/;
+  const RE_RIPEN_SLEEP   = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Variant \w: sleeping (\d+)s before T1/;
+  const RE_PHASE2A       = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2a: re-polling/;
+  const RE_PHASE2B_PREP  = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-prep: Claude reading/;
+  const RE_PHASE2B_PREP_END = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-prep complete/;
+  const RE_PHASE2B_GEN   = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-gen:/;
   // End-of-gen marker. The script logs this immediately after the gen step
   // returns and BEFORE it sits in mkdir/ticket-queue waiting for the browser
   // lock to re-acquire for posting. Using `Phase 2b-post: posting` as the gen
@@ -1656,9 +1656,9 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   // surfaced on 2026-05-26 when an 08:45 cycle with TWITTER_PAGE_GEN_RATE=0
   // (gen truly ran in <1s) showed "Phase 2b-gen: 1m 11s" because 69s of lock
   // re-acquire wait was attributed to gen instead of to lock wait (pre-post).
-  const RE_PHASE2B_GEN_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Re-acquiring twitter-browser lock for Phase 2b-post/;
-  const RE_PHASE2B_POST  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-post: posting/;
-  const RE_CYCLE_END     = /^\[(\d{2}):(\d{2}):(\d{2})\] === Cycle complete/;
+  const RE_PHASE2B_GEN_END = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Re-acquiring twitter-browser lock for Phase 2b-post/;
+  const RE_PHASE2B_POST  = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-post: posting/;
+  const RE_CYCLE_END     = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] === Cycle complete/;
   let m;
   for (const line of body.split('\n')) {
     if (cycleStartMs == null && (m = line.match(RE_CYCLE_START))) cycleStartMs = tsToMs(m[1], m[2], m[3]);
@@ -2447,7 +2447,7 @@ async function enrichPostCommentsRedditRuns(runs) {
   const redditSearchMarkerRe = /^\[reddit_search\] .*? raw=(\d+) returned=(\d+)/;
   const planFailedRe = /Plan phase: Claude failed/;
   const planRateRe = /Plan phase: rate-limited/;
-  const iterationRe = /^\[\d{2}:\d{2}:\d{2}\] --- Iteration \d+\//;
+  const iterationRe = /^\[(?:\d{4}-\d{2}-\d{2}T)?\d{2}:\d{2}:\d{2}Z?\] --- Iteration \d+\//;
   // New 4-phase pipeline markers (discover/ripen/draft/post split).
   // 2026-05-08: discover output is logged as either "Discover found N" (legacy)
   // or "Discover harvested N candidate(s) from dump dir" (current opaque-mode
