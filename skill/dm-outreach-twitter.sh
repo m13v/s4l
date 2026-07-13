@@ -44,7 +44,7 @@ SKILL_FILE="$REPO_DIR/SKILL.md"
 # dm-outreach-linkedin.sh (migrated 2026-05-12).
 # (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== Twitter DM Outreach Run: $(date) ==="
