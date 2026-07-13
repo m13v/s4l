@@ -325,6 +325,81 @@ def _x_status():
 _ver_cache = {"at": 0.0, "latest": None, "tag": None, "channel": None, "checked": False}
 _VER_TTL = 55.0
 
+# SHARED CROSS-PROCESS CACHE (2026-07-13): <state dir>/latest-release.json.
+# Every surface that resolves the newest release (this module, mcp/src/
+# version.ts, scripts/s4l_box_update.sh) reads and writes THIS one file, so a
+# box makes at most one real GitHub probe per _SHARED_TTL no matter how many
+# short-lived processes spin up (MCP servers respawn per s4l-worker session,
+# buildSnapshot shells this module as a fresh subprocess, the menu bar ticks).
+# The persisted ETag makes even those probes quota-free between releases (304s
+# do not count against the anonymous 60/h-per-IP quota, and before this cache
+# each process held its OWN in-process ETag that died with the process, so
+# every respawn paid a full 200). Added after the box's aggregate probing
+# (~80-100 req/h across processes) burned the quota on 2026-07-13 and silenced
+# the update banner. Failures (version=None) are cached too, same rationale as
+# _ver_cache. Keep the file shape in lockstep with version.ts::SharedCache:
+# {"at": <epoch s>, "channel": ..., "version": ..., "tag": ..., "etag": ...}
+_SHARED_TTL = 600.0  # banner latency ceiling: a new release surfaces within 10 min
+_PROBE_LOCK_STALE = 30.0
+
+
+def _shared_cache_path():
+    return os.path.join(_state_dir(), "latest-release.json")
+
+
+def _read_shared_cache(channel):
+    d = _read_json(_shared_cache_path())
+    if not isinstance(d, dict) or d.get("channel") != channel:
+        return None
+    if not isinstance(d.get("at"), (int, float)):
+        return None
+    return {
+        "at": float(d["at"]),
+        "channel": channel,
+        "version": d.get("version") if isinstance(d.get("version"), str) else None,
+        "tag": d.get("tag") if isinstance(d.get("tag"), str) else None,
+        "etag": d.get("etag") if isinstance(d.get("etag"), str) else None,
+    }
+
+
+def _write_shared_cache(channel, version, tag, etag):
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        p = _shared_cache_path()
+        tmp = "%s.tmp.%d" % (p, os.getpid())
+        with open(tmp, "w") as f:
+            json.dump({"at": time.time(), "channel": channel,
+                       "version": version, "tag": tag, "etag": etag}, f)
+        os.replace(tmp, p)
+    except Exception:
+        pass  # best effort; worst case another process re-probes
+
+
+def _try_probe_lock():
+    """Single-flight guard so N concurrent processes with an expired shared
+    cache don't all probe at once. Returns (acquired, lock_path). acquired is
+    False ONLY when another probe holds a FRESH lock (< _PROBE_LOCK_STALE s);
+    any other failure returns (True, None) so we probe anyway rather than go
+    blind on a broken state dir."""
+    lock = os.path.join(_state_dir(), "latest-release.lock")
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True, lock
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(lock) > _PROBE_LOCK_STALE:
+                os.unlink(lock)  # stale: holder died mid-probe
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return True, lock
+        except Exception:
+            pass
+        return False, None
+    except Exception:
+        return True, None
+
 _RELEASES_LATEST_URL = "https://github.com/m13v/s4l/releases/latest"
 _RELEASES_LATEST_API = "https://api.github.com/repos/m13v/s4l/releases/latest"
 # Staging resolves the newest release OVERALL from the releases LIST, since
@@ -367,56 +442,64 @@ def _latest_from_github_redirect():
         return None
 
 
-# In-process conditional-request state. Long-lived processes (the menu bar) send
-# If-None-Match on every probe and get free 304s; short-lived shell-outs pay one
-# 200 per process, which is rare enough to stay far under quota.
-_api_state = {"etag": None, "latest": None}
+# Conditional-request state lives in the SHARED cache file (latest-release.json)
+# so the ETag survives process boundaries: short-lived shell-outs used to pay a
+# full 200 per process; now every probe sends If-None-Match and gets a free 304
+# between releases.
+def _curl_conditional(url, etag):
+    """GET url with optional If-None-Match. Returns (status, new_etag, body)."""
+    args = ["/usr/bin/curl", "-sS", "-m", "10",
+            "-H", "Accept: application/vnd.github+json"]
+    if etag:
+        args += ["-H", "If-None-Match: %s" % etag]
+    args += ["-w", "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}", url]
+    res = subprocess.run(args, capture_output=True, text=True, timeout=12)
+    status, new_etag, body = 0, None, []
+    for line in (res.stdout or "").splitlines():
+        if line.startswith("__CURL_STATUS__:"):
+            status = int(line.split(":", 1)[1].strip() or 0)
+        elif line.startswith("__CURL_ETAG__:"):
+            new_etag = line.split(":", 1)[1].strip() or None
+        else:
+            body.append(line)
+    return status, new_etag, "\n".join(body)
 
 
-def _latest_from_github_api():
+def _latest_from_github_api(etag=None, cached=None):
+    """Stable probe (releases/latest). Returns (version, etag). On 304 serves
+    the caller-supplied cached version with the same etag; If-None-Match is only
+    sent when there IS a cached value to serve."""
     try:
-        args = ["/usr/bin/curl", "-sS", "-m", "10",
-                "-H", "Accept: application/vnd.github+json"]
-        if _api_state["etag"]:
-            args += ["-H", "If-None-Match: %s" % _api_state["etag"]]
-        args += ["-w", "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}",
-                 _RELEASES_LATEST_API]
-        res = subprocess.run(args, capture_output=True, text=True, timeout=12)
-        status, etag, body = 0, None, []
-        for line in (res.stdout or "").splitlines():
-            if line.startswith("__CURL_STATUS__:"):
-                status = int(line.split(":", 1)[1].strip() or 0)
-            elif line.startswith("__CURL_ETAG__:"):
-                etag = line.split(":", 1)[1].strip() or None
-            else:
-                body.append(line)
+        status, new_etag, body = _curl_conditional(
+            _RELEASES_LATEST_API, etag if cached else None)
         if status == 304:
-            return _api_state["latest"]
+            return cached, etag
         if status != 200:
-            return None
-        tag = (json.loads("\n".join(body)) or {}).get("tag_name")
-        v = _parse_semverish(tag.lstrip("v").strip()) if isinstance(tag, str) else None
-        if v:
-            _api_state.update(etag=etag, latest=v)
-        return v
-    except Exception:
-        return None
-
-
-def _latest_from_github_list_staging():
-    """Staging channel: newest release OVERALL (prereleases included) from the
-    releases LIST endpoint. Returns (version, tag) or (None, None). Drafts are
-    skipped. 'Newest' is by the rc-aware key so 1.6.193 outranks 1.6.193-rc.N and
-    rc.2 outranks rc.1."""
-    try:
-        res = subprocess.run(
-            ["/usr/bin/curl", "-sS", "-m", "10",
-             "-H", "Accept: application/vnd.github+json",
-             _RELEASES_LIST_API],
-            capture_output=True, text=True, timeout=12)
-        rels = json.loads(res.stdout or "[]")
-        if not isinstance(rels, list):
             return None, None
+        tag = (json.loads(body) or {}).get("tag_name")
+        v = _parse_semverish(tag.lstrip("v").strip()) if isinstance(tag, str) else None
+        return (v, new_etag) if v else (None, None)
+    except Exception:
+        return None, None
+
+
+def _latest_from_github_list_staging(etag=None, cached=None):
+    """Staging channel: newest release OVERALL (prereleases included) from the
+    releases LIST endpoint. Returns (version, tag, etag) or (None, None, None).
+    Drafts are skipped. 'Newest' is by the rc-aware key so 1.6.193 outranks
+    1.6.193-rc.N and rc.2 outranks rc.1. On 304 serves the caller-supplied
+    cached (version, tag) with the same etag."""
+    try:
+        cached_v, cached_tag = cached if isinstance(cached, tuple) else (None, None)
+        status, new_etag, body = _curl_conditional(
+            _RELEASES_LIST_API, etag if (cached_v and cached_tag) else None)
+        if status == 304:
+            return cached_v, cached_tag, etag
+        if status != 200:
+            return None, None, None
+        rels = json.loads(body or "[]")
+        if not isinstance(rels, list):
+            return None, None, None
         best_v, best_tag, best_key = None, None, None
         for r in rels:
             if not isinstance(r, dict) or r.get("draft"):
@@ -430,9 +513,11 @@ def _latest_from_github_list_staging():
             k = _ver_key(v)
             if best_key is None or k > best_key:
                 best_v, best_tag, best_key = v, tag, k
-        return best_v, best_tag
+        if best_v is None:
+            return None, None, None
+        return best_v, best_tag, new_etag
     except Exception:
-        return None, None
+        return None, None, None
 
 
 def _latest_from_npm():
@@ -460,31 +545,64 @@ def _resolve_version() -> str:
 def _latest_published(channel=None):
     """(version, tag) for the newest release on this box's channel. The tag is
     what the staging download URL is built from; stable callers can ignore it and
-    use releases/latest/download. Cached with the channel so a mid-process
-    channel flip re-probes instead of serving the other channel's cached value."""
+    use releases/latest/download. Two cache layers, both keyed by channel so a
+    mid-process flip re-probes instead of serving the other channel's value:
+      1. in-process _ver_cache (55s) — spares the file read on tight tick loops;
+      2. shared latest-release.json (_SHARED_TTL) — spares the NETWORK probe
+         across ALL processes on the box.
+    Failures (latest=None) are cached in both, like version.ts: a tick loop
+    re-probing an unreachable/rate-limited GitHub every few seconds would burn
+    the unauthenticated API quota (60/h per IP) and lock itself out for good."""
     if channel is None:
         channel = _channel()
     now = time.time()
-    # Cache failures (latest=None) too, like version.ts: a menu-bar tick loop
-    # re-probing an unreachable/rate-limited GitHub every few seconds would burn
-    # the unauthenticated API quota (60/h per IP) and lock itself out for good.
     if (_ver_cache["checked"] and _ver_cache["channel"] == channel
             and now - _ver_cache["at"] < _VER_TTL):
         return _ver_cache["latest"], _ver_cache["tag"]
-    if channel == "staging":
-        latest, tag = _latest_from_github_list_staging()
-        # Fallback to the stable probes if the list endpoint fails, so a staging
-        # box degrades to "at least track stable" rather than going blind.
-        if latest is None:
-            latest = _latest_from_github_api() or _latest_from_github_redirect()
+    shared = _read_shared_cache(channel)
+    if shared and now - shared["at"] < _SHARED_TTL:
+        _ver_cache.update(at=now, latest=shared["version"], tag=shared["tag"],
+                          channel=channel, checked=True)
+        return shared["version"], shared["tag"]
+    acquired, lock = _try_probe_lock()
+    if not acquired:
+        # Another process is probing right now; serve the stale shared value
+        # (or None) instead of doubling the request. Short in-process TTL means
+        # we pick up its fresh result within a minute.
+        latest = shared["version"] if shared else None
+        tag = shared["tag"] if shared else None
+        _ver_cache.update(at=now, latest=latest, tag=tag, channel=channel, checked=True)
+        return latest, tag
+    etag = shared["etag"] if shared else None
+    try:
+        if channel == "staging":
+            latest, tag, new_etag = _latest_from_github_list_staging(
+                etag, (shared["version"], shared["tag"]) if shared else None)
+            # Fallback to the stable probes if the list endpoint fails, so a
+            # staging box degrades to "at least track stable" than going blind.
+            # new_etag stays None: a releases/latest etag must never be replayed
+            # against the LIST endpoint on the next staging probe.
+            if latest is None:
+                latest, _ = _latest_from_github_api()
+                new_etag = None
+                if latest is None:
+                    latest = _latest_from_github_redirect()
+                tag = ("v" + latest) if latest else None
+        else:
+            latest, new_etag = _latest_from_github_api(
+                etag, shared["version"] if shared else None)
+            if latest is None:
+                latest, new_etag = _latest_from_github_redirect(), None
+            if latest is None:
+                latest = _latest_from_npm()
             tag = ("v" + latest) if latest else None
-    else:
-        latest = _latest_from_github_api()
-        if latest is None:
-            latest = _latest_from_github_redirect()
-        if latest is None:
-            latest = _latest_from_npm()
-        tag = ("v" + latest) if latest else None
+        _write_shared_cache(channel, latest, tag, new_etag)
+    finally:
+        if lock:
+            try:
+                os.unlink(lock)
+            except Exception:
+                pass
     _ver_cache.update(at=now, latest=latest, tag=tag, channel=channel, checked=True)
     return latest, tag
 
