@@ -463,6 +463,14 @@ REVIEW_UNATTENDED_SENTRY_SECONDS = 3600.0
 REVIEW_SNOOZE_SECONDS = float(os.environ.get("S4L_REVIEW_SNOOZE_S", "3600"))
 SNOOZE_FILE = os.path.join(st.state_dir(), "review-snooze.json")
 
+# Reveal cadence (2026-07-13): how often FRESH draft cards may pop, independent
+# of how often the pipeline drafts (mode.json `reveal_cadence_secs`, default 1h,
+# 0 = as soon as ready). Only fresh presentations are paced: an already-open
+# card still grows live via extend_active, snooze still parks everything, and
+# the menu's "Review N pending drafts" always bypasses. The last-presented
+# epoch is persisted so a menubar restart mid-interval doesn't re-pop early.
+REVEAL_STAMP_FILE = os.path.join(st.state_dir(), "review-last-presented.json")
+
 
 def _label_elapsed_secs(label):
     """Parse the trailing duration the producer encodes in a drafting activity
@@ -547,6 +555,9 @@ class S4LMenuBar(rumps.App):
         # (0 = not snoozed). Loaded from disk so a menubar restart mid-snooze
         # doesn't re-pop the card the user just put away.
         self._review_snooze_until = self._read_snooze_until()
+        # Reveal cadence: when the last fresh card presentation happened (epoch,
+        # 0 = never). Loaded from disk so a restart mid-interval doesn't re-pop.
+        self._last_presented_at = self._read_last_presented()
         # Unattended-review watchdog state (_maybe_heal_review).
         self._review_heal_at = 0.0
         self._review_unattended_notified = False
@@ -1126,6 +1137,40 @@ class S4LMenuBar(rumps.App):
     def _on_split_preset(self, share, _sender=None):
         """Menu callback shim: rumps passes the clicked MenuItem last."""
         self._set_split(share)
+
+    # Reveal-cadence presets (seconds between fresh card pop-ups; 0 = as soon
+    # as drafts are ready). Manual mode.json edits can set any value; the
+    # checkmark then lands on an exact match or none, same as the lane split.
+    REVEAL_CADENCE_PRESETS = (
+        (0, "Immediately"),
+        (1800, "Every 30 minutes"),
+        (3600, "Every hour"),
+        (14400, "Every 4 hours"),
+    )
+
+    def _cadence_label(self, secs=None):
+        """Human label for a cadence value, for menu copy."""
+        if secs is None:
+            secs = st.read_reveal_cadence()
+        for preset, label in self.REVEAL_CADENCE_PRESETS:
+            if round(secs) == preset:
+                return label
+        m = round(secs / 60)
+        return f"Every {m} min" if m else "Immediately"
+
+    def _on_cadence_preset(self, secs, _sender=None):
+        """Menu callback shim: rumps passes the clicked MenuItem last."""
+        written = st.write_reveal_cadence(secs)
+        self._notify(
+            "S4L draft cards",
+            f"New draft cards will show: {self._cadence_label(written).lower()}",
+        )
+        self._sig = None
+        try:
+            self._tick(None)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] cadence rebuild failed: {e}\n")
+            sys.stderr.flush()
 
     def _set_split(self, share):
         """Set the personal-brand share (pure local mode.json write, same
@@ -2722,6 +2767,37 @@ class S4LMenuBar(rumps.App):
                     )
         except Exception:
             pass
+
+    def _read_last_presented(self):
+        try:
+            with open(REVEAL_STAMP_FILE) as f:
+                return float((json.load(f) or {}).get("at") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _stamp_presented(self):
+        """Record a fresh card presentation, mirrored to disk (restart-safe).
+        Starts the next reveal-cadence interval."""
+        self._last_presented_at = time.time()
+        try:
+            with open(REVEAL_STAMP_FILE, "w") as f:
+                json.dump({"at": self._last_presented_at}, f)
+        except Exception:
+            pass
+
+    def _reveal_hold_until(self, pending_count):
+        """Epoch until which the reveal cadence is actually holding fresh cards
+        back (0.0 = no hold). A hold only exists while there is something to
+        hold: pending drafts, no review in flight, and not snoozed (the snooze
+        label and gate take precedence)."""
+        if pending_count <= 0 or self._review_active:
+            return 0.0
+        now = time.time()
+        if now < self._review_snooze_until:
+            return 0.0
+        cadence = st.read_reveal_cadence()
+        until = self._last_presented_at + cadence
+        return until if (cadence > 0 and now < until) else 0.0
 
     def _review_now(self, _=None):
         """Menu: bring the pending draft cards up right now. Clears any snooze;
