@@ -337,9 +337,9 @@ UPDATE_PROMPT = "Update the S4L plugin to the latest version."
 # Re-arm goes through the HOST create_scheduled_task path (the same one onboarding
 # uses) — it registers the routines under whatever account is logged in and shows
 # up in Routines. The host tool only runs inside an agent chat, so the menu bar
-# hands Claude this prompt (auto-typed, clipboard+paste fallback). We do NOT write
-# scheduled-tasks.json directly — that can't reliably target a just-switched-into
-# account, which is exactly the bug it caused.
+# hands Claude this prompt (auto-typed, clipboard+paste fallback). The automatic
+# fix can now direct-write after resolving lastActiveOrg; keep this host path for
+# Keychain denial, missing/stale cookie, and other resolution failures.
 REARM_PROMPT = (
     "Set up the S4L draft autopilot schedule for this Claude account. "
     "If queue_setup is available, call it; then for s4l-worker call the host tool "
@@ -786,8 +786,8 @@ class S4LMenuBar(rumps.App):
         bridge is panel-only), so the reliable path here is: copy the prompt to the
         clipboard, open Claude, and tell the user to paste it. (The dashboard
         widget's button does this in one click via app.sendMessage — no paste.) We
-        do NOT auto-type (focus/timing flaky) and do NOT write the registry directly
-        (can't reliably target a just-switched-into account).
+        do NOT auto-type (focus/timing flaky). This remains the fallback when the
+        automatic direct-write path cannot resolve/decrypt the active org cookie.
 
         The click itself is captured (mirroring _diagnose_fix) — previously this
         button had NO telemetry at all, so a past incident (Karol, 2026-07-07)
@@ -810,15 +810,15 @@ class S4LMenuBar(rumps.App):
 
     def _finish_schedule_setup(self, _=None):
         """One-click fix for schedule_state == 'missing' when
-        scheduled_task_selfheal.can_create_for_active_account() confirms a
-        session directory already exists for the active account (2026-07-08):
-        quit Claude, create the registration via a direct file write (the
-        same heal() the update flow uses — see its module docstring for why
-        this is equivalent to what create_scheduled_task would produce), then
-        relaunch. Primary action for this case now instead of re-arm: no
-        clipboard paste, no chat turn required. Re-arm remains the fallback
-        for the rarer case where no session directory exists yet for the
-        active account (see _build_menu) — fix 5 never fabricates one.
+        scheduled_task_selfheal.can_create_for_active_account() confirms an
+        existing session directory OR the active-org cookie needed to make
+        the exact account/org directory: quit Claude, create the registration
+        via a direct file write (the same heal() the update flow uses — see
+        its module docstring for why this is equivalent to what
+        create_scheduled_task would produce), then relaunch. Primary action
+        for this case now instead of re-arm: no clipboard paste or chat turn.
+        Re-arm remains the fallback when the cookie is unavailable or macOS
+        denies its Safe Storage Keychain read.
 
         No confirm dialog: the restart is already disclosed in the menu item
         label itself ("...(restarts Claude)", _build_menu) — a modal repeating
@@ -3331,13 +3331,12 @@ class S4LMenuBar(rumps.App):
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
-                # Prefer the automatic fix (2026-07-08): if the active account
-                # already has a session directory, _finish_schedule_setup can
-                # create the registration directly (heal() fix 5) with no
-                # clipboard paste needed. Fall back to re-arm only when fix 5
-                # has nowhere to write (no session dir yet for this account —
-                # it never fabricates one), since that's the one case where
-                # only the live create_scheduled_task host tool can help.
+                # Prefer the automatic fix: an existing session directory OR
+                # lastActiveOrg cookie lets _finish_schedule_setup target the
+                # active account exactly (heal() fix 5), with no clipboard
+                # paste. Fall back to the live create_scheduled_task host tool
+                # when neither source is available; decryption denial after a
+                # click is also caught by the post-restart verification.
                 can_selfheal = False
                 try:
                     import scheduled_task_selfheal
