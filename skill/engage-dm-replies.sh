@@ -302,12 +302,25 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 
 ### Step C. If \`reply_channel\` is \`dm\` or \`both\`: deliver the DM
 
+**NO CAMPAIGN SUFFIX ON HUMAN REPLIES.** A row in this queue is a HUMAN answering
+an escalation (often an AI-callout), so the campaign suffix (e.g. ' written with
+ai') must NEVER be coin-flipped onto it — it re-burns the exact lead the human is
+trying to recover (2026-07-13: the suffix landed on the hand-approved ngeloxyz
+recovery DM and helped kill the thread). When sending via the python CLIs, ALWAYS
+prefix the env opt-out:
+\`\`\`bash
+S4L_SKIP_CAMPAIGN_SUFFIX=1 python3 scripts/twitter_browser.py send-dm THREAD_URL "MESSAGE" DM_ID
+S4L_SKIP_CAMPAIGN_SUFFIX=1 python3 scripts/reddit_browser.py send-dm CHAT_URL "MESSAGE" DM_ID
+\`\`\`
+This applies ONLY inside Phase 0 (human replies). Auto-replies in the later phases
+keep the normal campaign behavior — do NOT carry this env var forward.
+
 1. Craft a natural DM based on the human's instructions and the conversation context.
 2. Navigate to the conversation on the correct platform using \`chat_url\` (or find the conversation with their_author).
    - **Reddit Chat** (mcp__reddit-harness__bh_run tool, CDP-driven real Chrome on port 9557)
    - **LinkedIn Messages** (mcp__linkedin-harness__bh_run tool, CDP-driven real Chrome on port 9556)
    - **X/Twitter DMs** (mcp__twitter-harness__bh_run tool), if encrypted DM passcode dialog appears, enter: $TWITTER_DM_PASSCODE
-3. Type and send the crafted DM.
+3. Type and send the crafted DM (with the suffix opt-out env var when using the python send-dm CLIs, per the rule above).
 4. Log the outbound message (log what you ACTUALLY SENT, not the human's instructions). Pass --verified ONLY when the browser tool returned verified=true. If verification failed, log nothing and let the next cycle retry; never pass --verified speculatively:
    \`\`\`bash
    cd ~/social-autoposter && python3 scripts/dm_conversation.py log-outbound --dm-id DM_ID --content "THE_CRAFTED_DM_YOU_SENT" --verified
