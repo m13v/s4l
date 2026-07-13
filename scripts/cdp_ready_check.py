@@ -33,7 +33,12 @@ def main() -> int:
     except Exception:
         import urllib.request
         try:
-            urllib.request.urlopen(f"{url}/json/version", timeout=3)
+            # ProxyHandler({}): loopback CDP must never route through a proxy.
+            # macOS system proxy settings leak into urllib's default opener, and
+            # a box-wide forwarder 403s 127.0.0.1 probes (2026-07-13 root cause
+            # of the "wedged Chrome" misdiagnosis).
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            opener.open(f"{url}/json/version", timeout=3)
             print(json.dumps({"ready": True, "mode": "http-only"}))
             return 0
         except Exception as e:
