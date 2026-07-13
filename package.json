@@ -1,6 +1,6 @@
 {
   "name": "social-autoposter",
-  "version": "1.7.4-rc.32",
+  "version": "1.7.4-rc.33",
   "description": "Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Install as a Claude Code agent skill.",
   "bin": {
     "social-autoposter": "bin/cli.js",
@@ -57,6 +57,7 @@
     "!scripts/_serp_report.py",
     "!scripts/_serp_vs_gsc_report.py",
     "!scripts/_test_since_hook.py",
+    "!scripts/_lock_preempt_test.py",
     "!scripts/add_deploy_metadata.py",
     "!scripts/add_nightowl_to_config.py",
     "!scripts/amplitude_user_lookup.py",
