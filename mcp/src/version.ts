@@ -230,39 +230,45 @@ async function latestFromGithubRedirect(): Promise<string | null> {
   }
 }
 
-// In-process conditional-request state: long-lived processes send If-None-Match
-// on every probe and get free 304s; each new release costs a single 200.
-const apiState: { etag: string | null; latest: string | null } = { etag: null, latest: null };
+// Conditional-request state lives in the SHARED cache file (latest-release.json)
+// so the ETag survives process boundaries: short-lived MCP respawns used to pay
+// a full 200 per process; now every probe sends If-None-Match and gets a free
+// 304 between releases.
+async function curlConditional(
+  url: string,
+  etag: string | null
+): Promise<{ status: number; etag: string | null; body: string }> {
+  const args = ["-sS", "-m", "10", "-H", "Accept: application/vnd.github+json"];
+  if (etag) args.push("-H", `If-None-Match: ${etag}`);
+  args.push("-w", "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}", url);
+  const res = await run("curl", args, { timeoutMs: 12000, noTee: true });
+  let status = 0;
+  let newEtag: string | null = null;
+  const body: string[] = [];
+  for (const line of (res.stdout || "").split("\n")) {
+    if (line.startsWith("__CURL_STATUS__:")) status = parseInt(line.slice(16).trim(), 10) || 0;
+    else if (line.startsWith("__CURL_ETAG__:")) newEtag = line.slice(14).trim() || null;
+    else body.push(line);
+  }
+  return { status, etag: newEtag, body: body.join("\n") };
+}
 
-async function latestFromGithubApi(): Promise<string | null> {
+// Stable probe (releases/latest). On 304 serves the caller-supplied cached
+// version with the same etag; If-None-Match is only sent when there IS a
+// cached value to serve.
+async function latestFromGithubApi(
+  etag: string | null = null,
+  cached: string | null = null
+): Promise<{ version: string | null; etag: string | null }> {
   try {
-    const args = ["-sS", "-m", "10", "-H", "Accept: application/vnd.github+json"];
-    if (apiState.etag) args.push("-H", `If-None-Match: ${apiState.etag}`);
-    args.push(
-      "-w",
-      "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}",
-      RELEASES_LATEST_API
-    );
-    const res = await run("curl", args, { timeoutMs: 12000, noTee: true });
-    let status = 0;
-    let etag: string | null = null;
-    const body: string[] = [];
-    for (const line of (res.stdout || "").split("\n")) {
-      if (line.startsWith("__CURL_STATUS__:")) status = parseInt(line.slice(16).trim(), 10) || 0;
-      else if (line.startsWith("__CURL_ETAG__:")) etag = line.slice(14).trim() || null;
-      else body.push(line);
-    }
-    if (status === 304) return apiState.latest;
-    if (status !== 200) return null;
-    const tag = (JSON.parse(body.join("\n")) as { tag_name?: unknown }).tag_name;
+    const r = await curlConditional(RELEASES_LATEST_API, cached ? etag : null);
+    if (r.status === 304) return { version: cached, etag };
+    if (r.status !== 200) return { version: null, etag: null };
+    const tag = (JSON.parse(r.body) as { tag_name?: unknown }).tag_name;
     const v = typeof tag === "string" ? parseSemverish(tag.replace(/^v/, "").trim()) : null;
-    if (v) {
-      apiState.etag = etag;
-      apiState.latest = v;
-    }
-    return v;
+    return v ? { version: v, etag: r.etag } : { version: null, etag: null };
   } catch {
-    return null;
+    return { version: null, etag: null };
   }
 }
 
@@ -278,27 +284,31 @@ async function latestFromNpm(): Promise<string | null> {
 
 // Staging channel: newest release OVERALL (prereleases included) from the
 // releases LIST, since releases/latest excludes prereleases. Drafts are skipped;
-// "newest" is by the rc-aware verKey. Returns {version, tag} or null.
-async function latestFromGithubListStaging(): Promise<{ version: string; tag: string } | null> {
+// "newest" is by the rc-aware verKey. On 304 serves the caller-supplied cached
+// {version, tag} with the same etag. Returns {version, tag, etag} or null.
+async function latestFromGithubListStaging(
+  etag: string | null = null,
+  cached: { version: string | null; tag: string | null } | null = null
+): Promise<{ version: string; tag: string; etag: string | null } | null> {
   try {
-    const res = await run(
-      "curl",
-      ["-sS", "-m", "10", "-H", "Accept: application/vnd.github+json", RELEASES_LIST_API],
-      { timeoutMs: 12000, noTee: true }
-    );
-    const rels = JSON.parse(res.stdout || "[]");
+    const haveCached = !!(cached && cached.version && cached.tag);
+    const r = await curlConditional(RELEASES_LIST_API, haveCached ? etag : null);
+    if (r.status === 304 && haveCached)
+      return { version: cached!.version!, tag: cached!.tag!, etag };
+    if (r.status !== 200) return null;
+    const rels = JSON.parse(r.body || "[]");
     if (!Array.isArray(rels)) return null;
     let best: { version: string; tag: string; key: number[] } | null = null;
-    for (const r of rels) {
-      if (!r || typeof r !== "object" || r.draft) continue;
-      const tag = (r as { tag_name?: unknown }).tag_name;
+    for (const rel of rels) {
+      if (!rel || typeof rel !== "object" || rel.draft) continue;
+      const tag = (rel as { tag_name?: unknown }).tag_name;
       if (typeof tag !== "string") continue;
       const v = parseSemverish(tag.replace(/^v/, "").trim());
       if (!v) continue;
       const key = verKey(v);
       if (best == null || cmpKey(key, best.key) > 0) best = { version: v, tag, key };
     }
-    return best ? { version: best.version, tag: best.tag } : null;
+    return best ? { version: best.version, tag: best.tag, etag: r.etag } : null;
   } catch {
     return null;
   }
@@ -325,24 +335,64 @@ async function resolveLatest(): Promise<{
   const now = Date.now();
   if (cache && cache.channel === channel && now - cache.at < TTL_MS)
     return { version: cache.latest, tag: cache.tag, channel };
+  // Level 2: shared cross-process cache file (see SharedCache above).
+  const shared = readSharedCache(channel);
+  if (shared && now / 1000 - shared.at < SHARED_TTL_S) {
+    cache = { at: now, latest: shared.version, tag: shared.tag, channel };
+    return { version: shared.version, tag: shared.tag, channel };
+  }
+  const { acquired, lock } = tryProbeLock();
+  if (!acquired) {
+    // Another process is probing right now; serve the stale shared value (or
+    // null) instead of doubling the request. The short in-process TTL means we
+    // pick up its fresh result within a minute.
+    const v = shared?.version ?? null;
+    const t = shared?.tag ?? null;
+    cache = { at: now, latest: v, tag: t, channel };
+    return { version: v, tag: t, channel };
+  }
   let version: string | null = null;
   let tag: string | null = null;
-  if (channel === "staging") {
-    const s = await latestFromGithubListStaging();
-    if (s) {
-      version = s.version;
-      tag = s.tag;
+  let etag: string | null = null;
+  try {
+    if (channel === "staging") {
+      const s = await latestFromGithubListStaging(
+        shared?.etag ?? null,
+        shared ? { version: shared.version, tag: shared.tag } : null
+      );
+      if (s) {
+        version = s.version;
+        tag = s.tag;
+        etag = s.etag;
+      } else {
+        // Degrade to the stable probes so a staging box tracks at least stable
+        // rather than going blind when the list endpoint fails. etag stays
+        // null: a releases/latest etag must never be replayed against the
+        // LIST endpoint on the next staging probe.
+        version =
+          (await latestFromGithubApi()).version ?? (await latestFromGithubRedirect());
+        tag = version ? `v${version}` : null;
+      }
     } else {
-      // Degrade to the stable probes so a staging box tracks at least stable
-      // rather than going blind when the list endpoint fails.
-      version = (await latestFromGithubApi()) ?? (await latestFromGithubRedirect());
+      const r = await latestFromGithubApi(shared?.etag ?? null, shared?.version ?? null);
+      version = r.version;
+      etag = r.etag;
+      if (version == null) {
+        version = await latestFromGithubRedirect();
+        etag = null;
+      }
+      if (version == null) version = await latestFromNpm();
       tag = version ? `v${version}` : null;
     }
-  } else {
-    version = await latestFromGithubApi();
-    if (version == null) version = await latestFromGithubRedirect();
-    if (version == null) version = await latestFromNpm();
-    tag = version ? `v${version}` : null;
+    writeSharedCache({ at: now / 1000, channel, version, tag, etag });
+  } finally {
+    if (lock) {
+      try {
+        fs.unlinkSync(lock);
+      } catch {
+        /* already gone */
+      }
+    }
   }
   cache = { at: now, latest: version, tag, channel };
   return { version, tag, channel };
