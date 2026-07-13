@@ -138,7 +138,7 @@ cleanup_harness_tabs() {
     if ! $_probe 2>/dev/null; then
         sleep 1
         if ! $_probe 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] cleanup_harness_tabs: SKIPPED (harness CDP /json/version unreachable after 10s+retry)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cleanup_harness_tabs: SKIPPED (harness CDP /json/version unreachable after 10s+retry)" >&2
             return 0
         fi
     fi
@@ -202,13 +202,13 @@ ensure_twitter_browser_for_backend() {
             # 180s per downstream attach against a wedged browser.
             local _ext_verdict
             if ! _ext_verdict=$(_bh_cdp_ready "$_ext_url"); then
-                echo "[$(date +%H:%M:%S)] ERROR: external Chrome at ${_ext_url} is WEDGED (/json/version answers but the CDP handshake never completes). Host must restart it (AppMaker /opt/startup.sh, etc)." >&2
+                echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: external Chrome at ${_ext_url} is WEDGED (/json/version answers but the CDP handshake never completes). Host must restart it (AppMaker /opt/startup.sh, etc)." >&2
                 echo "twitter_cdp_wedge: detected url=${_ext_url} action=none-external" >&2
                 _bh_record_cdp_health external_wedged "$_ext_verdict"
                 return 1
             fi
             _bh_record_cdp_health ok-external "$_ext_verdict"
-            echo "[$(date +%H:%M:%S)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
             # Restore the Twitter login if the sandbox was substituted. AppMaker
             # Hobby-tier sandboxes have a 1h TTL; on substitution /root is reseeded
             # from /etc/skel-root and the harness profile (cookies) is wiped. This
@@ -217,7 +217,7 @@ ensure_twitter_browser_for_backend() {
             python3 "$_BH_REPO_DIR/scripts/restore_twitter_session.py" 2>&1 | sed 's/^/[restore] /' >&2 || true
             return 0
         fi
-        echo "[$(date +%H:%M:%S)] ERROR: TWITTER_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host (AppMaker /opt/startup.sh, etc)." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: TWITTER_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host (AppMaker /opt/startup.sh, etc)." >&2
         return 1
     fi
     # Probe + launch harness Chrome on port 9555 if needed. Two-stage probe:
@@ -229,12 +229,12 @@ ensure_twitter_browser_for_backend() {
     local _bh_prof_dir="$HOME/.claude/browser-profiles/browser-harness"
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
         _need_launch=1; _launch_reason="http_down"
-        echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Harness Chrome down on port 9555, launching..." >&2
     else
         local _ready_verdict
         if ! _ready_verdict=$(_bh_cdp_ready "$_BH_DEFAULT_URL"); then
             _need_launch=1; _launch_reason="cdp_wedge"
-            echo "[$(date +%H:%M:%S)] Harness Chrome WEDGED on port 9555 (/json/version answers but the CDP handshake never completes: ${_ready_verdict:-no verdict}); killing and relaunching..." >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Harness Chrome WEDGED on port 9555 (/json/version answers but the CDP handshake never completes: ${_ready_verdict:-no verdict}); killing and relaunching..." >&2
             # Machine-greppable marker (same stderr-marker convention as
             # twitter_access_gate; bin/server.js parses these).
             echo "twitter_cdp_wedge: detected url=$_BH_DEFAULT_URL action=restart" >&2
@@ -260,7 +260,7 @@ ensure_twitter_browser_for_backend() {
         local _chrome_bin
         _chrome_bin=$(_resolve_chrome_bin)
         if [ -z "$_chrome_bin" ]; then
-            echo "[$(date +%H:%M:%S)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
             return 1
         fi
         # On Linux + no display, run headless. On root, add --no-sandbox.
@@ -302,7 +302,7 @@ ensure_twitter_browser_for_backend() {
         local _stale_pids
         _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
         if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
             kill $_stale_pids 2>/dev/null || true
             sleep 2
             _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
@@ -335,7 +335,7 @@ os.execv(sys.argv[1], sys.argv[1:])' \
             sleep 1
         done
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] ERROR: harness Chrome failed to start within 12s" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: harness Chrome failed to start within 12s" >&2
             _bh_record_cdp_health launch_failed null
             return 1
         fi
@@ -344,13 +344,13 @@ os.execv(sys.argv[1], sys.argv[1:])' \
         # the cycle loudly, not feed 180s hangs downstream.
         local _post_verdict
         if ! _post_verdict=$(_bh_cdp_ready "$_BH_DEFAULT_URL"); then
-            echo "[$(date +%H:%M:%S)] ERROR: harness Chrome answers HTTP after relaunch but the CDP handshake is STILL failing: ${_post_verdict:-no verdict}" >&2
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: harness Chrome answers HTTP after relaunch but the CDP handshake is STILL failing: ${_post_verdict:-no verdict}" >&2
             echo "twitter_cdp_wedge: detected url=$_BH_DEFAULT_URL action=relaunch_failed" >&2
             _bh_record_cdp_health relaunch_failed "$_post_verdict"
             return 1
         fi
         _bh_record_cdp_health relaunched "$_post_verdict"
-        echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Harness Chrome up on port 9555" >&2
     else
         _bh_record_cdp_health ok "${_ready_verdict:-null}"
     fi
@@ -392,7 +392,7 @@ defer_if_foreign_for_backend() {
 _sa_harness_log() {
     # Use the caller's log() FUNCTION when present; `declare -F` matches only a
     # shell function, never the macOS /usr/bin/log binary (command -v would).
-    if declare -F log >/dev/null 2>&1; then log "$*"; else echo "[$(date +%H:%M:%S)] $*" >&2; fi
+    if declare -F log >/dev/null 2>&1; then log "$*"; else echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; fi
 }
 _sa_resolve_uv() {
     local c
