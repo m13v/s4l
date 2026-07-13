@@ -1,12 +1,13 @@
 # S4L rename plan (SAPS_* and "social-autoposter" retirement)
 
-Status 2026-07-06: **Tier 1 shipped**; Tier 3 partially executed — GitHub repo
+Status 2026-07-13: **Tiers 1 and 2 shipped**; Tier 3 partially executed — GitHub repo
 renamed to m13v/s4l (redirects live), repo dir renamed `~/social-autoposter` ->
 `~/s4l` with a compat symlink at the old path (locked files, plists, external
 tools all resolve through it; verified launchd + auto-commit + dashboard after
-the move). scripts/saps_mode.py + saps_activity.py renamed to s4l_* with shims
-for the locked cycle script. Tier 2 (SAPS_* env) still needs an explicit
-unlock go from Matthew; npm name / launchd labels / manifest name unchanged.
+the move). The old-name helper shims were removed after verifying that every
+current caller uses the `s4l_*` paths. The legacy env bridge and scheduled-task
+ID matchers remain for pre-rename installs; npm name / launchd labels / manifest
+name remain unchanged.
 
 Branding rule (standing, per Matthew 2026-07-02): anything a user can SEE
 carries the S4L brand. The internal "saps" prefix and the "social-autoposter"
@@ -36,12 +37,13 @@ ONLY remaining "saps" references in the tree are legacy-NEUTRALIZERS, kept on
 purpose while pre-rename artifacts exist in the field:
   - entry-script SAPS_->S4L_ env mirror blocks (old baked plists keep working)
   - env scrubbers (menubar launch filter, s4l_box_update env -u)
-  - filename shims scripts/saps_mode.py + saps_activity.py (the chflags-locked
-    run-twitter-cycle.sh references those paths)
   - legacy scheduled-task-id matchers (saps-worker / saps-phase1-query /
     saps-phase2b-draft / saps-no-resume-cwd) in reapers/scrubbers/snapshots
+  - reset/uninstall cleanup that removes obsolete `saps-*` task artifacts
   - this plan doc
-Drop the mirrors/shims/matchers once fleet heartbeats show no pre-2026-07
+The old-name file shims were removed on 2026-07-13: the locked cycle never
+invoked them, and the unlocked wrapper had already moved to the `s4l_*` paths.
+Drop the mirrors and task matchers once fleet heartbeats show no pre-2026-07
 artifacts remain.
 
 ## Tier 2 original design (historical)
