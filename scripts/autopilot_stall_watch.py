@@ -59,6 +59,25 @@ RUNNING_STALL_SECONDS = 1200
 # At StartInterval 120 that is ~6 min of continuous stall.
 ALERT_AFTER = 3
 
+# --- Host-sleep awareness (2026-07-13, Sentry S4L-4B) ------------------------
+# launchd does NOT fire StartInterval jobs while the host is suspended, so the
+# wall-clock gap between consecutive ticks of THIS watchdog is a reliable sleep
+# detector: a gap of 3+ intervals means the box was asleep (or powered off),
+# not stalled. S4L-4B (Nhat's MacBook Air, 2026-07-11): laptop slept mid-cycle,
+# one producer enqueue timeout latched, no cycle ran to clear it, and the page
+# fired with pending=0/running=0 and a bogus "account change?" cause while the
+# telemetry showed 9 samples in a 2h window (40-min gaps). Laptops that sleep
+# between cycles would re-trigger that page forever.
+TICK_INTERVAL_SECONDS = 120  # keep in sync with launchd StartInterval
+SLEEP_GAP_SECONDS = TICK_INTERVAL_SECONDS * 3  # missed >=3 ticks -> host slept
+# For this long after a detected sleep gap, pre-existing latch/age signals are
+# treated as sleep-tainted: they must be corroborated by actual queued work
+# (pending/running > 0) or the outcome-level batches_stuck backstop to page.
+SLEEP_GAP_RECENT_SECONDS = 1800
+# A worker-task transcript modified this recently proves the routines are
+# firing, which rules out the "orphaned routines / account change" cause.
+WORKER_RECENT_SECONDS = 1800
+
 # A box counts as configured when ANY complete worker set has its SKILL.md on
 # disk: the universal type-blind worker, its short-lived staging predecessor, or
 # the legacy per-type pair. Keep in sync with WORKER_TASK_SETS in
@@ -140,6 +159,46 @@ def _recent_rate_limit(window: int = 1200) -> bool:
     except Exception:
         pass
     return False
+
+
+def _worker_ran_recently(window: int = WORKER_RECENT_SECONDS) -> bool:
+    """True if any s4l-worker scheduled-task transcript was written in the last
+    `window` seconds — direct on-disk proof the worker routines are firing, so
+    a stall can NOT be the orphaned-routines / account-change shape. Same
+    transcript bucket _recent_rate_limit reads."""
+    try:
+        now = time.time()
+        for f in glob.glob(os.path.expanduser("~/.claude/projects/*s4l-worker*/*.jsonl")):
+            try:
+                if (now - os.path.getmtime(f)) <= window:
+                    return True
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _api_reachable(timeout: float = 3.0) -> bool:
+    """True if the S4L API host answers HTTP at all. ANY HTTP status counts as
+    reachable (a 4xx/5xx still proves the network path is up); only a socket /
+    URL error means offline. Used to hold the Sentry page while the box has no
+    network — an offline box is a different, self-healing condition, and the
+    page would be misleading (plus the event can't ship anyway). The stall
+    episode keeps counting, so if it's still stalled when connectivity returns,
+    the page fires then."""
+    import urllib.error
+    import urllib.request
+
+    base = os.environ.get("AUTOPOSTER_API_BASE", "https://s4l.ai").rstrip("/")
+    try:
+        req = urllib.request.Request(base, method="HEAD")
+        urllib.request.urlopen(req, timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True  # server answered; network is up
+    except Exception:
+        return False
 
 
 BATCH_PROGRESSION_MIN_BATCHES = 5
