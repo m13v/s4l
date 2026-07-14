@@ -1186,11 +1186,15 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
                 history_line = "\n    " + _hb.replace("\n", "\n    ")
         except Exception:
             pass
+        digest_block = ""
+        if digests and c.get("thread_url") in digests:
+            _d = digests[c["thread_url"]]
+            digest_block = "\n    THREAD CONTENT:\n      " + _d.replace("\n", "\n      ")
         candidate_lines.append(
             f"  - {c['thread_url']}{delta_info}\n"
             f"    title: {c.get('thread_title', '')}\n"
             f"    suggested style: {c.get('engagement_style', '')}"
-            f"{history_line}"
+            f"{history_line}{digest_block}"
         )
     candidates_block = "\n".join(candidate_lines)
 
@@ -1228,13 +1232,8 @@ OMIT THESE (clear no-bridge cases only):
 - Project: study tool. Thread where you've ALREADY commented under any of our accounts (`already_posted=true` or our usernames in the comment list): obvious astroturfing. OMIT.
 - Any thread where you'd be embarrassed to have your comment shown next to a {project.get('name', 'this project')} link in the same Reddit thread.
 
-## Tools (via Bash)
-- Fetch thread: python3 {REDDIT_TOOLS} fetch "THREAD_URL"
-- Do NOT run any searches. The threads are already chosen.
-
-## CRITICAL Bash rules
-- NEVER use run_in_background=true. All commands foreground.
-- Fetch each thread once to read OP and top comments for context. Use the fetched content to apply the SELECTION GATE.
+## THREAD CONTENT (pre-fetched)
+Each candidate above carries a THREAD CONTENT block (OP + top comments), already fetched for you. You have NO tools this session: do NOT fetch, search, or browse anything. Apply the SELECTION GATE using the inlined content only. If a candidate is somehow missing its THREAD CONTENT block, OMIT it.
 
 ## CRITICAL CONTENT RULES (apply only to threads that pass the gate)
 - Go BIMODAL on length: 1 punchy sentence (<100 chars) OR 4-5 sentences of real substance. Avoid 2-3 sentence middle-ground.
@@ -1256,15 +1255,19 @@ OMIT THESE (clear no-bridge cases only):
 {get_voice_relationship_rule()}
 
 ## OUTPUT FORMAT
-For each thread that PASSES the SELECTION GATE, output one JSON object per line:
-{{"action": "post", "thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "{(style_assignment or {}).get('style') or 'style_name'}", "search_topic": "the seed concept", "new_style": null}}
+Return ONE JSON object with two arrays (a JSON schema is enforced on this session):
 
-For threads that FAIL the gate, simply omit the post JSON above. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads).
+{{"posts": [...], "rejects": [...]}}
 
-## OPTIONAL: proposed_excludes (self-improving denylist)
-When you OMIT a thread because of a recurring CLASS of false-positive (the SUB itself surfaces wrong-audience threads, not just this one thread), you MAY emit a second JSON line for that thread:
+Each posts[] entry is one thread that PASSES the SELECTION GATE:
+{{"thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "{(style_assignment or {}).get('style') or 'style_name'}", "search_topic": "the seed concept", "new_style": null}}
 
-{{"action": "reject", "thread_url": "SAME_URL_AS_GIVEN", "reason": "short reason", "proposed_excludes": ["subreddit:bestofredditorupdates"]}}
+For threads that FAIL the gate, simply leave them out of posts. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads). When nothing passes, return {{"posts": [], "rejects": []}}.
+
+## OPTIONAL: rejects[] (self-improving denylist)
+When you OMIT a thread because of a recurring CLASS of false-positive (the SUB itself surfaces wrong-audience threads, not just this one thread), you MAY add a rejects[] entry for that thread:
+
+{{"thread_url": "SAME_URL_AS_GIVEN", "reason": "short reason", "proposed_excludes": ["subreddit:bestofredditorupdates"]}}
 
 Rules:
 - proposed_excludes entries MUST use the typed form `subreddit:<slug>` (lowercase, no `r/` prefix). Future shape: `keyword:<word>` is accepted but unused today.
@@ -1284,7 +1287,7 @@ Examples of WRONG proposals (do not emit):
 - Reject a specific r/nursing thread because OP is venting → DO NOT exclude r/nursing (it's our target audience; just omit this thread)
 - Reject one r/anki thread that's off-topic → DO NOT exclude r/anki (core ICP)
 
-Output DONE after all JSONs (both post and reject lines, in any order). Do NOT narrate. Fetch, gate, draft-or-reject, output JSONs, DONE.
+Do NOT narrate. Gate, draft-or-reject, return the single JSON object.
 """
 
 
