@@ -17,7 +17,15 @@ from pathlib import Path
 
 REPO = Path("/Users/matthewdi/social-autoposter")
 LOG_RUN_PY = REPO / "scripts" / "log_run.py"
-SKILL_PATH_MARKER = "/social-autoposter/skill/"
+# Both homes of skill/*.sh: the operator repo AND the installed-app package.
+# The single operator-repo marker left every kicker-driven cycle (which runs
+# from ~/.social-autoposter-mcp/repo/package/skill/) invisible to this
+# watchdog — a scan stuck on a half-wedged Chrome sat 23+ minutes at zero
+# progress with nothing entitled to kill it (2026-07-13).
+SKILL_PATH_MARKERS = (
+    "/social-autoposter/skill/",
+    "/.social-autoposter-mcp/repo/package/skill/",
+)
 MAX_AGE_SEC = 45 * 60
 
 # --- L2: browser-lock liveness (2026-07-13) ----------------------------------
@@ -212,12 +220,12 @@ def list_skill_shell_processes():
             ppid = int(ppid_s)
         except ValueError:
             continue
-        if SKILL_PATH_MARKER not in command:
+        if not any(m in command for m in SKILL_PATH_MARKERS):
             continue
         script_name = None
         tokens = command.split()
         for tok in tokens:
-            if tok.endswith(".sh") and SKILL_PATH_MARKER in tok:
+            if tok.endswith(".sh") and any(m in tok for m in SKILL_PATH_MARKERS):
                 script_name = os.path.basename(tok)
                 break
         if not script_name:
