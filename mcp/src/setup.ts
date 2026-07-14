@@ -20,12 +20,96 @@ const STATE_DIR =
   process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 
-// The pipeline reads projects[] from config.json. Override for tests / custom
-// installs; defaults to the (dynamically resolved) repo's config.json. Resolved
-// per call, not a load-time const, because a bare .mcpb install materializes the
-// repo after boot and setup must write config.json into THAT repo.
+// Canonical home of config.json (2026-07-13): the STATE DIR, not the package.
+// Config is user data; the package is replaceable app payload. Nothing that
+// replaces the package (updates, re-materialize, stray-checkout heal) can
+// touch the state dir, which ends the recurring operator-Mac config splits.
+export function stateConfigPath(): string {
+  return path.join(STATE_DIR, "config.json");
+}
+
+// The pipeline reads projects[] from config.json. Resolution order:
+//   1. $S4L_CONFIG_PATH  — explicit override (tests / unusual installs)
+//   2. the state-dir config, whenever it exists (canonical since 2026-07-13;
+//      ensureConfigInStateDir() migrates legacy installs on boot)
+//   3. legacy $repo/config.json — pre-migration installs and fresh setups
+//      (the first boot after setup migrates the file up to the state dir)
+// The result is realpath-resolved: atomic rename-style writers would
+// otherwise REPLACE a symlink with a plain file instead of writing through
+// it (the 2026-07-11/13 operator config splits). realpath of a plain file is
+// itself, so customer installs see no change. Resolved per call, not a
+// load-time const, because a bare .mcpb install materializes the repo after
+// boot and setup must write config.json into THAT repo.
 export function configPath(): string {
-  return process.env.S4L_CONFIG_PATH || path.join(repoDir(), "config.json");
+  const p =
+    process.env.S4L_CONFIG_PATH ||
+    (fs.existsSync(stateConfigPath()) ? stateConfigPath() : path.join(repoDir(), "config.json"));
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p; // not created yet: return the intended path unresolved
+  }
+}
+
+// One-time (idempotent) migration to the state-dir home, run at server boot.
+// Cases:
+//   - no state config, legacy is a REAL file  -> move it up, leave a symlink
+//     behind so direct-path readers (shell jq, third-party scripts, older
+//     package lanes) keep working through the old location.
+//   - no state config, legacy is a symlink    -> leave it alone (an operator
+//     arrangement points somewhere deliberate; never shadow it).
+//   - state config exists, legacy is a REAL file -> a pre-migration lane
+//     wrote after the move (or a legacy split): park it as a timestamped
+//     .bak next to the package copy and re-link. State wins; the backup
+//     preserves whatever diverged for manual inspection.
+//   - state config exists, legacy missing/wrong link -> (re)create the link.
+// Best-effort, never throws; the resolver works with or without it.
+export function ensureConfigInStateDir(): string {
+  try {
+    if (process.env.S4L_CONFIG_PATH) return "skip: S4L_CONFIG_PATH override";
+    const state = stateConfigPath();
+    const legacy = path.join(repoDir(), "config.json");
+    if (state === legacy) return "skip: state and legacy resolve identically";
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    let legacyStat: fs.Stats | null = null;
+    try {
+      legacyStat = fs.lstatSync(legacy);
+    } catch {
+      /* absent */
+    }
+    if (!fs.existsSync(state)) {
+      if (legacyStat?.isFile()) {
+        fs.renameSync(legacy, state);
+        fs.symlinkSync(state, legacy);
+        return `migrated ${legacy} -> ${state} (symlink left behind)`;
+      }
+      return "no state config yet; nothing to migrate";
+    }
+    if (legacyStat?.isSymbolicLink()) {
+      try {
+        if (fs.realpathSync(legacy) === fs.realpathSync(state)) return "ok";
+      } catch {
+        /* dangling link: fall through and repoint */
+      }
+      fs.unlinkSync(legacy);
+      fs.symlinkSync(state, legacy);
+      return "repointed legacy symlink at state config";
+    }
+    if (legacyStat?.isFile()) {
+      const bak = `${legacy}.pre-statedir-${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
+      fs.renameSync(legacy, bak);
+      fs.symlinkSync(state, legacy);
+      console.error(
+        `[setup] config divergence: ${legacy} was a real file while the state config exists; ` +
+          `parked it at ${bak} and re-linked. State config wins.`
+      );
+      return `divergence parked at ${bak}`;
+    }
+    fs.symlinkSync(state, legacy);
+    return "created legacy symlink at state config";
+  } catch (e) {
+    return `ensureConfigInStateDir error: ${(e as Error)?.message || e}`;
+  }
 }
 
 // Fields the X drafting prompts genuinely consume. Required ones must all be
