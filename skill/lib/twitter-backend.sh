@@ -233,8 +233,30 @@ ensure_twitter_browser_for_backend() {
     else
         local _ready_verdict
         if ! _ready_verdict=$(_bh_cdp_ready "$_BH_DEFAULT_URL"); then
-            _need_launch=1; _launch_reason="cdp_wedge"
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Harness Chrome WEDGED on port 9555 (/json/version answers but the CDP handshake never completes: ${_ready_verdict:-no verdict}); killing and relaunching..." >&2
+            # TWO-STRIKE gate (2026-07-13): one failed handshake is NOT proof of
+            # a wedge. Under heavy system load (observed at loadavg ~18) a
+            # perfectly healthy Chrome blows the 8s Playwright attach budget,
+            # and a single-failure kill produced 3 false wedge-kills in one day
+            # on the operator Mac — each one a relaunch flash plus an "Aw,
+            # Snap" corpse tab from the SIGKILLed renderer. First failure:
+            # stamp a strike file and proceed WITHOUT killing (a truly wedged
+            # Chrome makes the cycle's own pre-flight fail loudly right after,
+            # so nothing silently hangs). Second consecutive failure within 30
+            # minutes: genuinely wedged, kill + relaunch. Any successful check
+            # clears the strike.
+            local _strike="/tmp/s4l_cdp_wedge_strike_9555"
+            if [ -z "$(find "$_strike" -mmin -30 2>/dev/null)" ]; then
+                touch "$_strike"
+                echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Harness Chrome failed the CDP handshake check (${_ready_verdict:-no verdict}); first strike — NOT killing (loaded-machine tolerance). Second consecutive failure within 30m triggers the wedge heal." >&2
+                echo "twitter_cdp_wedge: detected url=$_BH_DEFAULT_URL action=first_strike" >&2
+                _bh_record_cdp_health wedge_first_strike "$_ready_verdict"
+                # Fall through WITHOUT killing: session restore + tab cleanup
+                # below still run, and a truly wedged Chrome fails the cycle's
+                # own pre-flight loudly right after.
+            else
+                rm -f "$_strike" 2>/dev/null || true
+                _need_launch=1; _launch_reason="cdp_wedge"
+                echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Harness Chrome WEDGED on port 9555 (second consecutive handshake failure: ${_ready_verdict:-no verdict}); killing and relaunching..." >&2
             # Machine-greppable marker (same stderr-marker convention as
             # twitter_access_gate; bin/server.js parses these).
             echo "twitter_cdp_wedge: detected url=$_BH_DEFAULT_URL action=restart" >&2
