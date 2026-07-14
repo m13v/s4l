@@ -186,22 +186,32 @@ def find_twitter_cdp_port():
     returns the first port whose /json index lists at least one x.com or
     twitter.com tab (preferring logged-in tabs over login pages). Used only
     as a fallback when TWITTER_CDP_URL isn't exported by the caller.
+
+    Since the park-on-exit mitigation (2026-07-14) the harness tab sits on
+    about:blank between runs, so "has an x.com tab" no longer identifies the
+    harness. A responding port whose cmdline carries the browser-harness
+    profile dir is kept as a last-resort fallback (never a different
+    platform's harness Chrome).
     """
     try:
         ps_out = subprocess.check_output(
             ["ps", "aux"], text=True, stderr=subprocess.DEVNULL
         )
         ports = set()
+        harness_ports = set()
         for line in ps_out.splitlines():
             if "chromium" not in line.lower() and "chrome" not in line.lower():
                 continue
             m = re.search(r"remote-debugging-port=(\d+)", line)
             if m:
                 ports.add(int(m.group(1)))
+                if "browser-profiles/browser-harness" in line:
+                    harness_ports.add(int(m.group(1)))
 
         import urllib.request
 
         best_port = None
+        harness_fallback = None
         for port in sorted(ports):
             try:
                 resp = urllib.request.urlopen(
@@ -214,6 +224,11 @@ def find_twitter_cdp_port():
                     if "x.com" in p.get("url", "") or "twitter.com" in p.get("url", "")
                 ]
                 if not twitter_urls:
+                    # Responding harness Chrome with its tab parked on
+                    # about:blank: usable, but only if nothing shows a live
+                    # x.com tab.
+                    if port in harness_ports and harness_fallback is None:
+                        harness_fallback = port
                     continue
                 # Prefer ports with logged-in pages (home, chat, notifications)
                 logged_in = any(
@@ -227,7 +242,7 @@ def find_twitter_cdp_port():
                     best_port = port
             except Exception:
                 continue
-        return best_port
+        return best_port if best_port is not None else harness_fallback
     except Exception:
         pass
     return None
