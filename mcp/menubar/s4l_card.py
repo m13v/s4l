@@ -1884,6 +1884,7 @@ class _ReviewController(NSObject):
                 # decision can be shipped to /api/v1/review-events without
                 # re-reading the plan.
                 "candidate_id": d.get("candidate_id"),
+                "platform": d.get("platform"),
                 "project": d.get("project"),
                 "thread_url": d.get("thread_url"),
                 "thread_author": d.get("thread_author"),
