@@ -223,12 +223,20 @@ export async function sendHeartbeat(reason: string): Promise<void> {
 // browser profiles/cookies, locks, panel-endpoint.json.
 
 // Mirrors setup.ts configPath(). Re-derived here (not imported) so setup.ts can
-// import sendStateSnapshot from this module without a cycle.
+// import sendStateSnapshot from this module without a cycle. Same resolution
+// order: explicit override, then the state-dir config (canonical since
+// 2026-07-13) whenever it exists, then the legacy in-repo path; realpath so a
+// symlinked legacy location reads the same bytes writers target.
 function snapshotConfigPath(): string {
-  return (
+  const stateCfg = path.join(snapshotStateDir(), "config.json");
+  const p =
     process.env.S4L_CONFIG_PATH ||
-    path.join(repoDir(), "config.json")
-  );
+    (fs.existsSync(stateCfg) ? stateCfg : path.join(repoDir(), "config.json"));
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
 }
 
 // Mirrors index.ts s4lStateDir().
