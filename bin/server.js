@@ -20910,7 +20910,9 @@ async function loadPostingVolume() {
     if (total) total.textContent = rows.length ? (rows.length + ' active install' + (rows.length === 1 ? '' : 's')) : '';
     if (!rows.length) { body.innerHTML = '<div class="style-stats-empty">No installs with twitter activity in the last 7 days.</div>'; return; }
     const fmtRate = v => (v === null || v === undefined || isNaN(v)) ? '?' : ('~' + (v >= 10 ? Math.round(v) : v) + '/day');
-    const modeLabel = { high: 'High', medium: 'Medium', low: 'Low' };
+    // User-facing names (2026-07-14): internal values stay high|medium|low
+    // (DB CHECK + API enum); only the labels are branded.
+    const modeLabel = { high: 'Aggressive', medium: 'Steady', low: 'Chill' };
     const html = rows.map(r => {
       const who = escapeHtml(r.hostname || r.install_id.slice(0, 8)) + (r.git_email ? ' <span style="color:var(--text-muted)">' + escapeHtml(r.git_email) + '</span>' : '');
       const seen = r.last_seen_at ? new Date(r.last_seen_at).toISOString().slice(0, 10) : '?';
@@ -20920,9 +20922,9 @@ async function loadPostingVolume() {
         return '<option value="' + m + '"' + sel + '>' + label + '</option>';
       }).join('');
       const chips =
-        '<span class="style-stats-pill">high ' + fmtRate(r.est_per_day.high) + '</span> ' +
-        '<span class="style-stats-pill">med ' + fmtRate(r.est_per_day.medium) + '</span> ' +
-        '<span class="style-stats-pill">low ' + fmtRate(r.est_per_day.low) + '</span>';
+        '<span class="style-stats-pill">aggressive ' + fmtRate(r.est_per_day.high) + '</span> ' +
+        '<span class="style-stats-pill">steady ' + fmtRate(r.est_per_day.medium) + '</span> ' +
+        '<span class="style-stats-pill">chill ' + fmtRate(r.est_per_day.low) + '</span>';
       return '<div class="per-project-row" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border);">' +
         '<span class="per-project-label" style="min-width:220px">' + who + '</span>' +
         '<select data-install="' + escapeHtml(r.install_id) + '" class="posting-volume-select">' + opts + '</select>' +
