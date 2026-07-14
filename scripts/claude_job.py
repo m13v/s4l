@@ -71,6 +71,11 @@ TAG_TO_TYPE = {
     # twitter_gen_links.py's Phase 2b-gen step, which already tolerates the
     # queue worker's cadence — see scripts/link_tail.py).
     "twitter-link-tail": "twitter-link-tail",
+    # Reddit draft phase (queue-native since 2026-07-14): post_reddit.py's
+    # draft turn became pure text->JSON (thread content is pre-fetched in
+    # Python and inlined; no Bash tools), mirroring the twitter Phase 2b
+    # tool-free conversion, so it rides the same universal worker.
+    "post-reddit-draft": "reddit-draft",
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
@@ -83,6 +88,7 @@ TYPE_TO_ACTIVITY = {
     "invent-topic": ("learning", "new topic"),
     "invent-queries": ("learning", "new queries"),
     "twitter-link-tail": ("drafting", "link bridge"),
+    "reddit-draft": ("drafting", "reddit draft"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
@@ -113,6 +119,18 @@ TYPE_TO_WORKER_NOTES = {
         "\"your one-line answer\"), not as an object like {\"text\": \"...\"} "
         "and not wrapped in any other keys. The caller unwraps a plain string "
         "result directly; wrapping it in an object will corrupt the reply."
+    ),
+    "reddit-draft": (
+        "WORKER EXECUTION NOTES (queue metadata; follow while executing the "
+        "prompt below): every Reddit thread's content is already inlined in "
+        "the prompt — do NOT fetch anything, do NOT run searches, no tools "
+        "are needed. Apply the prompt's SELECTION GATE to each candidate, "
+        "draft comments for the ones that pass, and submit ONE result object "
+        "matching the schema: {\"posts\": [...], \"rejects\": [...]}. A "
+        "candidate that fails the gate is simply absent from posts (add a "
+        "rejects entry only for the structural false-positive cases the "
+        "prompt describes). Batches are small; draft them in one pass and "
+        "submit promptly."
     ),
 }
 
