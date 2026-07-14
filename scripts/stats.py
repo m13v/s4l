@@ -36,24 +36,30 @@ from http_api import api_get, api_post, api_patch, load_env
 def _http_list_reddit_active_posts():
     """Walk /api/v1/posts in pages and return rows for the Reddit refresh job.
 
-    The /api/v1/posts GET caps a single page at 500. Sort by id ASC so we can
-    page deterministically; we re-issue with an increasing id cursor until the
-    server returns a short page. We need scan_no_change_count, posted_at,
-    engagement_updated_at, deletion_detect_count, upvotes, comments_count.
+    The /api/v1/posts GET caps a single page at 500. 2026-07-14 fix: the old
+    version broke after the FIRST page on the (long-stale) assumption that the
+    active-post count was "well under 500" — with ~12k active reddit rows that
+    silently pinned Step 2 to the oldest 500 rows forever, so recent posts
+    never got deletion-detected. The API has no id cursor, but `since` filters
+    posted_at >= X, so we page by an ascending posted_at cursor: `since` is
+    inclusive, the boundary row re-appears on the next page and is deduped via
+    seen_ids. We need scan_no_change_count, posted_at, engagement_updated_at,
+    deletion_detect_count, upvotes, comments_count.
     """
     out = []
     seen_ids = set()
-    cursor_since = None  # unused for id-asc paging
-    last_seen_id = 0
+    cursor = None  # ISO posted_at of the newest row seen so far
     while True:
         query = {
             "platform": "reddit",
             "status": "active",
             "has_our_url": "true",
-            "order_by": "id",
+            "order_by": "posted_at",
             "order_dir": "asc",
             "limit": 500,
         }
+        if cursor:
+            query["since"] = cursor
         resp = api_get("/api/v1/posts", query=query)
         rows = ((resp or {}).get("data") or {}).get("posts") or []
         new_rows = [r for r in rows if r.get("id") and r["id"] not in seen_ids]
@@ -62,12 +68,10 @@ def _http_list_reddit_active_posts():
         for r in new_rows:
             seen_ids.add(r["id"])
             out.append(r)
-            if r["id"] > last_seen_id:
-                last_seen_id = r["id"]
-        # Without a server-side cursor, we get the same first 500 every call.
-        # Break to avoid an infinite loop; the typical Reddit active-post count
-        # is well under 500 so one page covers it.
-        break
+        stamps = [r.get("posted_at") for r in new_rows if r.get("posted_at")]
+        if len(rows) < 500 or not stamps:
+            break
+        cursor = max(stamps)
     return out
 
 
