@@ -2213,6 +2213,14 @@ class S4LMenuBar(rumps.App):
         ):
             label = self._posting_label
         if label:
+            # Menu bar stays CONCISE (user rule 2026-07-14): strip the trailing
+            # elapsed-duration token the producer encodes in the label ("draft
+            # 2m", "draft ⧖18m") from the TITLE only. The full label (with the
+            # duration the stall detector's _label_elapsed_secs parses) still
+            # lives in activity.json — this is display-side trimming, never a
+            # change to the data.
+            import re as _re
+            label = _re.sub(r"\s*⧖?\s*\d+\s*[sm]\s*$", "", str(label)).strip() or label
             # The update arrow must stay visible even while a tool runs, so the
             # "update available" signal is never masked by activity. _tick skips the
             # title repaint while the spinner owns it, so the arrow is injected here.
