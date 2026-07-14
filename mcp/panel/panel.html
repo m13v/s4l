@@ -108,6 +108,21 @@
           </div>
           <input type="range" id="split-slider" min="0" max="100" step="5" value="50" aria-label="Personal brand share of cycles (percent)" />
         </div>
+        <!-- Posting volume: server-side per-install throttle (virality bar).
+             Stored on s4l.ai (installations.posting_mode), read/written via the
+             posting_volume tool; est/day labels are computed per install. -->
+        <div class="lane" id="posting-volume-row">
+          <div class="lane-text">
+            <div class="lane-name">Posting volume</div>
+            <div class="lane-desc" id="posting-volume-desc">How many drafts per day the cycle produces.</div>
+          </div>
+          <select id="posting-volume-select" aria-label="Posting volume">
+            <option value="">Default</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
         <div class="lane-note" id="mode-sub"></div>
       </section>
 
