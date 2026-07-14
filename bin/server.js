@@ -10376,15 +10376,6 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading…</div>
     </div>
   </details>
-  <details class="style-stats-section" id="posting-volume">
-    <summary>
-      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span>Posting Volume</span>
-      <span class="style-stats-total" id="posting-volume-total"></span>
-    </summary>
-    <div id="posting-volume-body">
-      <div class="style-stats-empty">Loading\u2026</div>
-    </div>
-  </details>
   <details class="style-stats-section" id="deploy-health">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span>Deploy Health</span>
@@ -10565,6 +10556,15 @@ const HTML = `<!DOCTYPE html>
       <span class="style-stats-total" id="subreddit-stats-total"></span>
     </summary>
     <div id="subreddit-stats-body">
+      <div class="style-stats-empty">Loading\u2026</div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="posting-volume">
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25b6</span>Posting Volume</span>
+      <span class="style-stats-total" id="posting-volume-total"></span>
+    </summary>
+    <div id="posting-volume-body">
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
