@@ -54,6 +54,12 @@ fi
 # endpoint. Default 9556 (Mac harness Chrome, separate port from Twitter's 9555).
 export LINKEDIN_CDP_URL="${LINKEDIN_CDP_URL:-http://127.0.0.1:9556}"
 
+# Repo root for helper scripts. Honors S4L_REPO_DIR (managed installs run from
+# ~/.social-autoposter-mcp/repo/package, NOT ~/social-autoposter); a $HOME
+# hardcode here silently no-ops on customer boxes (same bug twitter-backend.sh
+# fixed; see its header comment).
+_BH_REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 # Resolve a Playwright-capable Python for the browser-path SERP search
 # (discover_linkedin_candidates.py CDP-attaches to the harness Chrome via
 # playwright.sync_api). The agent's bare `python3` resolves to whatever is
@@ -160,7 +166,7 @@ cleanup_harness_tabs() {
     fi
     # Reuse the same cleanup script as Twitter; it just iterates /json on the
     # default port. Pass the port via env so a single script can serve both.
-    BH_CLEANUP_PORT=9556 python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
+    BH_CLEANUP_PORT=9556 python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
 # ===== Cross-pipeline whole-run lock (2026-05-30) =====
@@ -342,7 +348,7 @@ ensure_linkedin_browser_for_backend() {
             --remote-debugging-port=9556 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
             --no-first-run --no-default-browser-check \
-            --disable-features=ChromeWhatsNewUI \
+            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
             --disable-backgrounding-occluded-windows \
             --disable-renderer-backgrounding \
             --disable-background-timer-throttling \
@@ -388,7 +394,7 @@ _linkedin_session_detect_gate() {
     # `|| _rc=$?` so a nonzero exit (e.g. 2 = logged out) is "handled" and does
     # not trip a caller's `set -e` before we inspect the code ourselves.
     local _rc=0
-    "$_py" "$HOME/social-autoposter/scripts/linkedin_killswitch.py" detect-gate \
+    "$_py" "$_BH_REPO_DIR/scripts/linkedin_killswitch.py" detect-gate \
         --cdp-url "${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" >&2 || _rc=$?
     if [ "$_rc" = "2" ]; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] detect-gate tripped the LinkedIn killswitch; aborting this fire" >&2
