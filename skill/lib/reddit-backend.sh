@@ -203,14 +203,20 @@ ensure_reddit_browser_for_backend() {
             [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
             rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
         fi
-        "$_chrome_bin" \
+        # Spawn via the SHARED launcher (skill/lib/browser-launch.sh): clean-
+        # exit stamp (no Aw-Snap restore), `open -n -g` on macOS (no focus
+        # steal, out of this job's pgroup), setsid exec fallback elsewhere.
+        # This backend previously used a bare exec and had NONE of those
+        # protections (2026-07-13 consolidation).
+        # shellcheck disable=SC1091
+        source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/browser-launch.sh"
+        launch_harness_chrome "$_chrome_bin" "$_prof_dir" \
             --remote-debugging-port=9557 \
             --user-data-dir="$HOME/.claude/browser-profiles/reddit-harness" \
             --no-first-run --no-default-browser-check \
             --disable-features=ChromeWhatsNewUI \
             "${_extra[@]}" \
-            about:blank >/dev/null 2>&1 &
-        disown
+            about:blank
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null && break
             sleep 1
