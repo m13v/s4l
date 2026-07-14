@@ -1150,6 +1150,17 @@ class S4LMenuBar(rumps.App):
         (14400, "Every 4 hours"),
     )
 
+    # Posting volume (2026-07-13): server-side per-install throttle for the
+    # twitter cycle's virality bar. None = driver default. The labels carry
+    # ballpark rates; exact per-install estimates live on the dashboard's
+    # Posting Volume section (Stats tab).
+    POSTING_MODE_PRESETS = (
+        (None, "Default (cycle setting)"),
+        ("high", "High (100+ posts/day)"),
+        ("medium", "Medium (~30 posts/day)"),
+        ("low", "Low (~5 posts/day)"),
+    )
+
     def _cadence_label(self, secs=None):
         """Human label for a cadence value, for menu copy."""
         if secs is None:
@@ -1172,6 +1183,36 @@ class S4LMenuBar(rumps.App):
             self._tick(None)
         except Exception as e:
             sys.stderr.write(f"[s4l-menubar] cadence rebuild failed: {e}\n")
+            sys.stderr.flush()
+
+    def _posting_mode_label(self, mode):
+        """Menu copy for a posting-volume mode value."""
+        for preset, label in self.POSTING_MODE_PRESETS:
+            if preset == mode:
+                return label
+        return "Default (cycle setting)"
+
+    def _on_posting_mode_preset(self, mode, _sender=None):
+        """Set the server-side posting-volume mode (network POST; a click may
+        take a beat). Failure keeps the old value and tells the user."""
+        try:
+            stored = st.write_posting_mode(mode)
+            self._notify(
+                "S4L posting volume",
+                f"Posting volume: {self._posting_mode_label(stored)}. Applies from the next cycle.",
+            )
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] posting-mode write failed: {e}\n")
+            sys.stderr.flush()
+            self._notify(
+                "S4L posting volume",
+                "Could not reach s4l.ai to change posting volume; try again.",
+            )
+        self._sig = None
+        try:
+            self._tick(None)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] posting-mode rebuild failed: {e}\n")
             sys.stderr.flush()
 
     def _set_split(self, share):
@@ -3526,6 +3567,23 @@ class S4LMenuBar(rumps.App):
             it.state = 1 if round(cadence) == preset else 0
             cadence_menu.add(it)
         items.append(cadence_menu)
+
+        # Posting volume: server-side per-install throttle (virality bar).
+        # read_posting_mode() is cached and non-blocking; until the first
+        # refresh lands the submenu shows Default checked, then corrects on
+        # the next rebuild.
+        pv_mode = st.read_posting_mode()
+        pv_menu = rumps.MenuItem(
+            f"Posting volume: {self._posting_mode_label(pv_mode).split(' (')[0].lower()}"
+        )
+        for preset, label in self.POSTING_MODE_PRESETS:
+            it = rumps.MenuItem(
+                label,
+                callback=functools.partial(self._on_posting_mode_preset, preset),
+            )
+            it.state = 1 if preset == pv_mode else 0
+            pv_menu.add(it)
+        items.append(pv_menu)
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
