@@ -137,8 +137,15 @@ def classify_one(row, criteria, project_names):
         ),
     ])
 
+    # Route through run_claude.sh (2026-07-14) for session cost accounting;
+    # tag icp-precheck is unmapped in TAG_TO_TYPE so this stays a direct
+    # claude -p. The haiku pin is deliberate cost engineering for bulk
+    # classification (NOT the global-default drift the no-hardcoded-model
+    # rule targets); env-overridable so a central flip stays possible.
+    _model = os.environ.get("S4L_CLASSIFY_MODEL") or "claude-haiku-4-5-20251001"
+    _run_claude_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_claude.sh")
     result = subprocess.run(
-        ["claude", "-p", "--model", "claude-haiku-4-5-20251001"],
+        ["bash", _run_claude_sh, "icp-precheck", "-p", "--model", _model],
         input=prompt,
         capture_output=True,
         text=True,
