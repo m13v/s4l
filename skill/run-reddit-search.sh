@@ -206,6 +206,26 @@ trap '_sa_emit_run_summary_oneshot; _sa_release_lease_oneshot; _sa_release_locks
 BATCH_ID="rdcycle-$(date +%Y%m%d-%H%M%S)"
 log "Cycle batch_id=$BATCH_ID"
 
+# --- Draft-only mode (2026-07-14, mirrors run-draft-and-publish.sh) ---------
+# The ONE mode flag (scripts/s4l_mode.py draft-only, stdout 1/0) now governs
+# Reddit exactly like the X cycle: when ON, both lanes stop after the draft
+# phase and merge their drafted decisions into the menu-bar review cards
+# (merge_review_queue.py --reddit-plan); posting then happens one approved
+# card at a time via the plugin's post_drafts tool, which reconstructs a
+# one-decision plan and reuses `post_reddit.py --phase post` unchanged. When
+# OFF (operator opt-out), the lanes post autonomously below as always.
+# Fail-safe default is 1 (draft-only) — same posture as the X wrapper.
+DRAFT_ONLY_FLAG="$(python3 "$REPO_DIR/scripts/s4l_mode.py" draft-only 2>/dev/null || echo 1)"
+log "Draft-only flag: $DRAFT_ONLY_FLAG"
+
+# Merge a drafted plan into the review cards (draft-only lanes). $1 = plan
+# file, $2 = lane label. merge_review_queue consumes (deletes) the plan file.
+_merge_reddit_drafts_to_cards() {
+    local _plan_file="$1" _lane="$2"
+    log "$_lane lane: draft-only ON; merging drafted decision(s) into review cards (no autonomous post)."
+    python3 "$REPO_DIR/scripts/merge_review_queue.py" --reddit-plan "$_plan_file" 2>&1 | tee -a "$LOG_FILE" || true
+}
+
 # Export the same id as SA_CYCLE_ID so every Claude session spawned downstream
 # (post_reddit.py → run_claude(), run_claude.sh → claude -p, log_claude_session.py)
 # stamps claude_sessions.cycle_id with this cycle. Without this, concurrent
@@ -343,6 +363,10 @@ fi
 # entire batch (~30 min for 10 rows) while peers sat blocked. The pre-flight
 # at the top of this script already did the one-shot ensure_browser_healthy
 # work; per-row acquires inside Python handle the rest.
+if [ "$HAS_SALVAGE" = "1" ] && [ "$DRAFT_ONLY_FLAG" = "1" ]; then
+    _merge_reddit_drafts_to_cards "$SALVAGE_DRAFT_FILE" "Salvage"
+    HAS_SALVAGE=0
+fi
 if [ "$HAS_SALVAGE" = "1" ]; then
     log "Salvage lane: posting $SALVAGE_COUNT candidate(s) (per-row reddit-browser lease)..."
 
@@ -466,6 +490,10 @@ fi
 # Same per-row lease pattern as the salvage block above (see comment there for
 # rationale). The lease is acquired/released around each post_via_cdp call
 # inside `_post_iteration`, NOT around the whole --phase post invocation.
+if [ "$HAS_DISCOVER" = "1" ] && [ "$DRAFT_ONLY_FLAG" = "1" ]; then
+    _merge_reddit_drafts_to_cards "$DISCOVER_DRAFT_FILE" "Discover"
+    HAS_DISCOVER=0
+fi
 if [ "$HAS_DISCOVER" = "1" ]; then
     log "Discover lane: posting $SURVIVORS survivor(s) (per-row reddit-browser lease)..."
 
