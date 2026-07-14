@@ -123,6 +123,47 @@ def _thread_url(c: dict) -> str:
     return ""
 
 
+def _reddit_plan_to_candidates(plan: dict) -> list:
+    """Adapt a post_reddit.py draft-phase plan into review-queue card entries.
+
+    The reddit plan shape is {project_name, batch_id, decisions: [...]}, where
+    each decision is the full post-ready dict (_draft_iteration's merged
+    candidate: thread_url, text, engagement_style, ripen data, campaign
+    fields). The card carries the twitter-shaped display fields the menu bar
+    knows how to render, PLUS the verbatim decision + plan metadata under
+    reddit_* keys so an approval can reconstruct a one-decision plan and hand
+    it to `post_reddit.py --phase post` unchanged (locks, URL wrapping,
+    campaign suffixes, and log_post all stay in the one battle-tested poster).
+    """
+    out = []
+    for d in plan.get("decisions") or []:
+        if not isinstance(d, dict) or not d.get("text") or not d.get("thread_url"):
+            continue
+        out.append({
+            "platform": "reddit",
+            "candidate_id": d.get("id") or d.get("candidate_id"),
+            "candidate_url": d.get("thread_url"),
+            "thread_url": d.get("thread_url"),
+            "thread_author": d.get("thread_author"),
+            "thread_text": d.get("thread_title") or "",
+            "matched_project": plan.get("project_name"),
+            "reply_text": d.get("text"),
+            "engagement_style": d.get("engagement_style"),
+            "assigned_style": d.get("engagement_style"),
+            "search_topic": d.get("search_topic"),
+            "reddit_batch_id": plan.get("batch_id"),
+            "reddit_decision": d,
+            "reddit_plan_meta": {
+                k: plan.get(k)
+                for k in ("project_name", "batch_id", "style_assignment",
+                          "generation_trace_path", "session_id",
+                          "draft_session_id")
+                if plan.get(k) is not None
+            },
+        })
+    return out
+
+
 # Discovery-time author/engagement fields stamped onto each plan candidate so the
 # approval card can show them. All already captured on the twitter_candidates row
 # by the discovery pipeline (and refreshed at T1); no scrape happens here.
@@ -174,6 +215,10 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
         if not c.get("posted")
         and not c.get("terminal")
         and not c.get("approved")
+        # The bulk lookup is /api/v1/twitter-candidates; reddit cards would
+        # never match a row there, so skip them (their freshness gating stays
+        # with the reddit pipeline's own salvage/expiry lanes).
+        and c.get("platform") != "reddit"
         and _thread_url(c)
     ]
     if not pending:
@@ -216,16 +261,21 @@ def main() -> int:
         "--plan-from-marker",
         help="text containing a DRAFT_ONLY_PLAN=<path> marker (e.g. cycle stdout)",
     )
+    ap.add_argument(
+        "--reddit-plan",
+        help="path to a post_reddit.py draft-phase plan (decisions[] shape); "
+        "adapted into reddit cards instead of the twitter candidates[] shape",
+    )
     ap.add_argument("--project", default=None, help="project name for the review-request marker")
     ns = ap.parse_args()
 
-    src = ns.plan
+    src = ns.plan or ns.reddit_plan
     if not src and ns.plan_from_marker:
         m = re.search(r"DRAFT_ONLY_PLAN=(\S+\.json)", ns.plan_from_marker)
         if m:
             src = m.group(1)
     if not src:
-        print("[merge_review_queue] no source plan (need --plan or a DRAFT_ONLY_PLAN marker)", file=sys.stderr)
+        print("[merge_review_queue] no source plan (need --plan, --reddit-plan or a DRAFT_ONLY_PLAN marker)", file=sys.stderr)
         return 2
     if not os.path.exists(src):
         print(f"[merge_review_queue] source plan not found: {src}", file=sys.stderr)
@@ -238,7 +288,10 @@ def main() -> int:
         print(f"[merge_review_queue] could not read source plan: {e}", file=sys.stderr)
         return 2
 
-    new_cands = batch.get("candidates") or []
+    if ns.reddit_plan:
+        new_cands = _reddit_plan_to_candidates(batch)
+    else:
+        new_cands = batch.get("candidates") or []
     if not new_cands:
         print("[merge_review_queue] source plan has 0 candidates; nothing to merge", file=sys.stderr)
         return 0
