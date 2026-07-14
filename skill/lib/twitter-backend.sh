@@ -334,64 +334,21 @@ ensure_twitter_browser_for_backend() {
             [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
             rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
         fi
-        # Mark the profile's last exit as clean BEFORE launching. A SIGKILLed
-        # Chrome (wedge heal, stall abort) records exit_type=Crashed, and the
-        # next launch then session-restores the dead session's tab, which
-        # renders as a lingering "Aw, Snap" corpse the user keeps seeing
-        # (2026-07-13, twice). With the profile marked clean, Chrome opens
-        # ONLY our startup URL. Best-effort: a missing/corrupt Preferences
-        # file just skips.
-        "${S4L_PYTHON:-python3}" -c 'import json, os, sys
-p = os.path.join(sys.argv[1], "Default", "Preferences")
-try:
-    d = json.load(open(p))
-except Exception:
-    raise SystemExit(0)
-prof = d.setdefault("profile", {})
-prof["exit_type"] = "Normal"
-prof["exited_cleanly"] = True
-json.dump(d, open(p, "w"))' "$_prof_dir" 2>/dev/null || true
-        # Launch flags shared by both spawn paths below.
-        local _launch_args=(
-            --remote-debugging-port=9555
-            --user-data-dir="$HOME/.claude/browser-profiles/browser-harness"
-            --no-first-run --no-default-browser-check
-            --password-store=basic --use-mock-keychain
-            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion
-            --disable-backgrounding-occluded-windows
-            "${_extra[@]}"
+        # Spawn via the SHARED launcher (skill/lib/browser-launch.sh): clean-
+        # exit stamp (no Aw-Snap restore), `open -n -g` on macOS (no focus
+        # steal, out of this job's pgroup), setsid exec fallback elsewhere.
+        # Do NOT hand-roll launch logic per backend.
+        # shellcheck disable=SC1091
+        source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/browser-launch.sh"
+        launch_harness_chrome "$_chrome_bin" "$_prof_dir" \
+            --remote-debugging-port=9555 \
+            --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
+            --no-first-run --no-default-browser-check \
+            --password-store=basic --use-mock-keychain \
+            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
+            --disable-backgrounding-occluded-windows \
+            "${_extra[@]}" \
             "${BH_LAUNCH_URL:-https://x.com}"
-        )
-        # macOS + .app-bundled Chrome: launch via `open -n -g` so the window
-        # NEVER steals the user's focus. A directly-exec'd Chrome always
-        # activates itself on launch — every legitimate relaunch (wedge heal,
-        # user quit, crash) popped a window over the user's work (the
-        # foreground-telemetry `cause:launched` events, 2026-07-13). -n forces
-        # a NEW instance (the user's personal Chrome may already be running;
-        # without -n LaunchServices would just poke it and drop our --args),
-        # -g launches WITHOUT activation. LaunchServices also parents the
-        # process outside this launchd job's process group, which independently
-        # covers the 2026-07-12 pgroup-reaping bug the setsid fallback fixes.
-        local _app_bundle=""
-        case "$_chrome_bin" in
-            *.app/Contents/MacOS/*) _app_bundle="${_chrome_bin%%/Contents/MacOS/*}" ;;
-        esac
-        if [ "$(uname -s)" = "Darwin" ] && [ -n "$_app_bundle" ] && [ -d "$_app_bundle" ]; then
-            open -n -g -a "$_app_bundle" --args "${_launch_args[@]}" >/dev/null 2>&1 || true
-        else
-            # Fallback (Linux, bare chromium binaries): direct exec in a NEW
-            # SESSION. os.setsid: Chrome must escape THIS job's process group —
-            # launchd SIGKILLs a transient job's whole process group the moment
-            # the shell exits (no AbandonProcessGroup), and `disown` does not
-            # change the pgid, so a plainly-backgrounded Chrome died on every
-            # cycle completion and the NEXT cycle's relaunch stole the user's
-            # focus (2026-07-12 root cause).
-            "${S4L_PYTHON:-python3}" -c 'import os,sys
-os.setsid()
-os.execv(sys.argv[1], sys.argv[1:])' \
-                "$_chrome_bin" "${_launch_args[@]}" >/dev/null 2>&1 &
-            disown
-        fi
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null && break
             sleep 1
