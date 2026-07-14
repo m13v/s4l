@@ -710,6 +710,77 @@ def _arm_self_liveness_watchdog():
     threading.Thread(target=_loop, daemon=True).start()
 
 
+# PARK-ON-EXIT (2026-07-14, Chrome 150 crash-storm mitigation). Root cause of
+# the 07-12..07-14 stalls: Chrome 150 (live at the 07-12 reboot) crashes the
+# x.com renderer with a deliberate internal CHECK abort roughly hourly while
+# the tab sits unthrottled on x.com between pipeline runs, and a crashed
+# renderer precedes most whole-browser CDP wedges by minutes (see Crashpad
+# dump ↔ cdp_wedge correlation, memory
+# insights_chrome150_renderer_crash_wedge_2026_07_14). Parking every
+# x.com/twitter.com tab on about:blank when the last browser-using python
+# process exits removes the heavy SPA from the idle window entirely. Raw
+# CDP over HTTP+websocket with hard 3s timeouts, NEVER Playwright: at atexit
+# the Playwright loop may be gone, and against an already-wedged browser this
+# must fail fast, not hang the exit. Callers are unaffected: the documented
+# get_browser_and_page contract is "caller should navigate it", and
+# find_twitter_cdp_port keeps a harness-profile fallback for the parked case.
+_PARK_REGISTERED = False
+
+
+def _park_twitter_tabs():
+    try:
+        import urllib.request
+
+        base = (
+            os.environ.get("TWITTER_CDP_URL", "").strip()
+            or "http://127.0.0.1:9555"
+        ).rstrip("/")
+        resp = urllib.request.urlopen(base + "/json/list", timeout=3)
+        targets = json.loads(resp.read())
+        for t in targets:
+            url = t.get("url", "")
+            if t.get("type") != "page":
+                continue
+            if "x.com" not in url and "twitter.com" not in url:
+                continue
+            ws_url = t.get("webSocketDebuggerUrl")
+            if not ws_url:
+                continue
+            try:
+                import websocket
+
+                ws = websocket.create_connection(ws_url, timeout=3)
+                try:
+                    ws.send(json.dumps({
+                        "id": 1,
+                        "method": "Page.navigate",
+                        "params": {"url": "about:blank"},
+                    }))
+                    ws.recv()
+                finally:
+                    ws.close()
+                print(
+                    f"[twitter_browser] parked tab on about:blank (was {url[:80]})",
+                    file=sys.stderr,
+                )
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _register_park_on_exit():
+    """Arm parking once per process, only for processes that actually used the
+    browser. Registered AFTER the module-level _release_browser_lock atexit,
+    so it runs BEFORE it (LIFO): park while still holding the python lock,
+    then release. S4L_NO_TAB_PARK=1 is the escape hatch."""
+    global _PARK_REGISTERED
+    if _PARK_REGISTERED or os.environ.get("S4L_NO_TAB_PARK"):
+        return
+    _PARK_REGISTERED = True
+    atexit.register(_park_twitter_tabs)
+
+
 def get_browser_and_page(playwright):
     """Instrumented entry point: attach via _get_browser_and_page_raw, then
     (L1) set default per-op/navigation timeouts so no page call can hang
@@ -728,6 +799,7 @@ def get_browser_and_page(playwright):
     except Exception:
         pass
     _arm_self_liveness_watchdog()
+    _register_park_on_exit()
     return browser, page, is_cdp
 
 
