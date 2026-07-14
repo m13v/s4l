@@ -1085,6 +1085,54 @@ function expiredStampOverridable(c: PlanCandidate): boolean {
   );
 }
 
+function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: PlanCandidate[]) {
+  // Merge posted/terminal stamps into a FRESH read of the store instead of
+  // rewriting the whole plan from the copy taken minutes ago. The old
+  // whole-file write was last-writer-wins: while a batch posted, the menubar
+  // (decision re-stamps) and any peer drain also wrote the store, and
+  // whichever run finished last erased the others' posted flags (2026-07-06:
+  // card 344877 posted at 00:29Z ended `posted=None,
+  // terminal=duplicate_thread_pre_post` after a later run's stale write).
+  // Merge rules: `posted` is sticky and wins over terminal; `terminal` never
+  // overwrites a fresh `posted=true`. Fallback: candidates without a
+  // candidate_id can't be matched into the fresh copy, so keep the legacy
+  // whole-plan write for those older plans.
+  try {
+    const mergeable = stamped.every(
+      (c) => c.candidate_id !== undefined && c.candidate_id !== null
+    );
+    const fresh = mergeable ? readPlan(batchId) : null;
+    if (fresh && Array.isArray(fresh.candidates)) {
+      const freshById = new Map<string, PlanCandidate>();
+      fresh.candidates.forEach((c: PlanCandidate) => {
+        if (c.candidate_id !== undefined && c.candidate_id !== null)
+          freshById.set(String(c.candidate_id), c);
+      });
+      for (const c of stamped) {
+        const f = freshById.get(String(c.candidate_id));
+        if (!f) continue;
+        if (c.posted === true) {
+          f.posted = true;
+          f.terminal = false;
+          if (c.our_url) f.our_url = c.our_url;
+        } else if (c.terminal === true && f.posted !== true) {
+          f.terminal = true;
+          f.terminal_reason = c.terminal_reason;
+        }
+      }
+      writePlan(batchId, fresh);
+    } else {
+      writePlan(batchId, plan);
+    }
+  } catch {
+    try {
+      writePlan(batchId, plan);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
 async function postApproved(batchId: string, plan: Plan) {
   // Drain serialization (2026-07-06 incident). Every call drains the WHOLE
   // approved backlog, so overlapping drains are pure waste and actively harmful:
@@ -1155,6 +1203,110 @@ async function postApproved(batchId: string, plan: Plan) {
     }
   }
   if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
+
+  // ---- Reddit cards (2026-07-14): drain them FIRST, independently ----------
+  // A reddit card carries the verbatim draft decision (reddit_decision) plus
+  // plan metadata (reddit_plan_meta), so approval reconstructs a one-decision
+  // plan and reuses `post_reddit.py --phase post` unchanged — per-row
+  // reddit-browser lease, URL wrapping, campaign suffixes, and log_post all
+  // stay in the one battle-tested poster. The twitter handle preflight and
+  // twitter-browser lock ceremony below are twitter-only, so reddit must not
+  // be gated on them (and an all-reddit batch returns before any of it).
+  const approvedReddit = approved.filter(
+    (c: PlanCandidate) => (c as Record<string, unknown>).platform === "reddit"
+  );
+  const approvedTwitter = approved.filter(
+    (c: PlanCandidate) => (c as Record<string, unknown>).platform !== "reddit"
+  );
+  let redditPosted = 0;
+  let redditFailed = 0;
+  if (approvedReddit.length) {
+    for (const c of approvedReddit) {
+      const cc = c as unknown as Record<string, unknown>;
+      const dec = cc.reddit_decision as Record<string, unknown> | undefined;
+      const meta = (cc.reddit_plan_meta || {}) as Record<string, unknown>;
+      if (!dec) {
+        c.terminal = true;
+        c.terminal_reason = "reddit_decision_missing";
+        redditFailed++;
+        continue;
+      }
+      const miniPlan = {
+        project_name: meta.project_name || cc.matched_project,
+        batch_id: cc.reddit_batch_id || meta.batch_id || "reddit-mcp-approval",
+        phase: "draft",
+        decisions: [dec],
+        style_assignment: meta.style_assignment || {},
+        generation_trace_path: meta.generation_trace_path,
+        session_id: meta.session_id || meta.draft_session_id,
+      };
+      const tmpPlan = path.join(
+        process.env.S4L_TMP_DIR || "/tmp",
+        `reddit_mcp_post_${Date.now()}_${Math.floor(Math.random() * 1e6)}.json`
+      );
+      let r: { code: number; stdout: string; stderr: string };
+      try {
+        fs.writeFileSync(tmpPlan, JSON.stringify(miniPlan));
+        r = await runPython("scripts/post_reddit.py", ["--phase", "post", "--in", tmpPlan], {
+          timeoutMs: 900_000,
+          env: {
+            REDDIT_CDP_URL: process.env.REDDIT_CDP_URL || "http://127.0.0.1:9557",
+            // Reviewed posts never get the active-campaign suffix (same rule
+            // as the twitter manual-approval path below).
+            S4L_SKIP_CAMPAIGN_SUFFIX: "1",
+          },
+          onLine: (line: string) => {
+            const t = line.replace(/\s+$/, "");
+            if (t.trim()) console.error(`[post-reddit] ${t}`);
+          },
+        });
+      } catch (err) {
+        r = { code: -1, stdout: "", stderr: String(err) };
+      } finally {
+        try {
+          fs.unlinkSync(tmpPlan);
+        } catch {
+          /* best effort */
+        }
+      }
+      // post_reddit.py's summary marker: `[post_reddit] phase=post ... posted=N failed=M`
+      const out = `${r.stdout}\n${r.stderr}`;
+      const postedN = Number((/posted=(\d+)/.exec(out) || [])[1] || 0);
+      if (r.code === 0 && postedN > 0) {
+        c.posted = true;
+        c.terminal = false;
+        const urlMatch = /(https:\/\/(?:old\.|www\.)?reddit\.com\/r\/\S+)/.exec(
+          (/\[post_reddit\][^\n]*posted[^\n]*/i.exec(out) || [""])[0]
+        );
+        if (urlMatch) (c as Record<string, unknown>).our_url = urlMatch[1];
+        redditPosted++;
+      } else {
+        // Leave the approval sticky (approved && !posted && !terminal) so the
+        // next post_drafts call retries, mirroring twitter's failed-drain
+        // semantics; only stamp terminal on a conclusive CDP refusal.
+        const cdpReason = (/\[post_reddit\] CDP FAILED: ([a-z_]+)/.exec(out) || [])[1];
+        if (cdpReason && ["thread_locked", "thread_archived", "thread_not_found", "blocked_by_author"].includes(cdpReason)) {
+          c.terminal = true;
+          c.terminal_reason = `reddit_${cdpReason}`;
+        }
+        redditFailed++;
+      }
+    }
+    logPostEvent(
+      `postApproved_reddit batch=${batchId} attempted=${approvedReddit.length} posted=${redditPosted} failed=${redditFailed}`
+    );
+  }
+  if (approvedTwitter.length === 0) {
+    // All-reddit batch: persist the stamps and return without touching the
+    // twitter preflight/lock path.
+    if (approvedReddit.length) mergeApprovedStampsIntoStore(batchId, plan, approvedReddit);
+    return {
+      attempted: approvedReddit.length,
+      posted: redditPosted,
+      exit_code: redditFailed ? 1 : 0,
+      summary: `reddit: posted=${redditPosted} failed=${redditFailed}`,
+    };
+  }
   // PREFLIGHT: posting needs a configured @handle, or twitter_browser.py refuses
   // EVERY reply with no_account_configured and the whole batch skips — invisibly.
   // If onboarding never persisted it, self-heal from the live session; if even that
@@ -1207,7 +1359,7 @@ async function postApproved(batchId: string, plan: Plan) {
     };
   }
   const approvedBatch = `${batchId}_approved`;
-  writePlan(approvedBatch, { ...plan, candidates: approved });
+  writePlan(approvedBatch, { ...plan, candidates: approvedTwitter });
   // S4L_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
   // never get the active-campaign suffix (e.g. " written with ai") appended.
   // twitter_browser.py's reply handler reads this env (inherited through
@@ -1220,7 +1372,7 @@ async function postApproved(batchId: string, plan: Plan) {
         const failure = {
           posted: 0,
           skipped: 0,
-          failed: approved.length,
+          failed: approvedTwitter.length,
           failure_reasons: "browser_bootstrap_failed",
           skip_reasons: "",
         };
@@ -1239,7 +1391,7 @@ async function postApproved(batchId: string, plan: Plan) {
           // (Karol 2026-07-09: 0/131 posted, exit=-1). 60s/card headroom covers
           // slow candidates; the 2h cap bounds a hung poster (the browser-lock
           // expiry and per-reply subprocess timeouts still fire underneath).
-          timeoutMs: Math.min(7_200_000, Math.max(900_000, approved.length * 60_000)),
+          timeoutMs: Math.min(7_200_000, Math.max(900_000, approvedTwitter.length * 60_000)),
           env: ({
             S4L_SKIP_CAMPAIGN_SUFFIX: "1",
             // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
@@ -1377,51 +1529,10 @@ async function postApproved(batchId: string, plan: Plan) {
     for (const c of approved) c.posted = true;
     touchedPlan = true;
   }
-  if (touchedPlan) {
-    try {
-      // Merge our stamps into a FRESH read of the store instead of rewriting the
-      // whole plan from the copy we took minutes ago. The old whole-file write
-      // was last-writer-wins: while this batch posted, the menubar (decision
-      // re-stamps) and any peer drain also wrote the store, and whichever run
-      // finished last erased the others' posted flags (2026-07-06: card 344877
-      // posted at 00:29Z ended `posted=None, terminal=duplicate_thread_pre_post`
-      // after a later run's stale write). Merge rules: `posted` is sticky and
-      // wins over terminal; `terminal` never overwrites a fresh `posted=true`.
-      // Fallback: candidates without a candidate_id can't be matched into the
-      // fresh copy, so keep the legacy whole-plan write for those older plans.
-      const mergeable = approved.every(
-        (c) => c.candidate_id !== undefined && c.candidate_id !== null
-      );
-      const fresh = mergeable ? readPlan(batchId) : null;
-      if (fresh && Array.isArray(fresh.candidates)) {
-        const freshById = new Map<string, PlanCandidate>();
-        fresh.candidates.forEach((c: PlanCandidate) => {
-          if (c.candidate_id !== undefined && c.candidate_id !== null)
-            freshById.set(String(c.candidate_id), c);
-        });
-        for (const c of approved) {
-          const f = freshById.get(String(c.candidate_id));
-          if (!f) continue;
-          if (c.posted === true) {
-            f.posted = true;
-            f.terminal = false;
-            if (c.our_url) f.our_url = c.our_url;
-          } else if (c.terminal === true && f.posted !== true) {
-            f.terminal = true;
-            f.terminal_reason = c.terminal_reason;
-          }
-        }
-        writePlan(batchId, fresh);
-      } else {
-        writePlan(batchId, plan);
-      }
-    } catch {
-      try {
-        writePlan(batchId, plan);
-      } catch {
-        /* best effort */
-      }
-    }
+  // Reddit stamps (set in the reddit drain above) merge alongside the twitter
+  // ones: `approved` here spans both platforms.
+  if (touchedPlan || redditPosted || redditFailed) {
+    mergeApprovedStampsIntoStore(batchId, plan, approved);
   }
   // Post failures are HANDLED in the pipeline (it returns a count, never throws),
   // so they never reach Sentry on their own. Capture an explicit event whenever
