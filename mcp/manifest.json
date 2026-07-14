@@ -50,7 +50,7 @@
     },
     {
       "name": "posting_volume",
-      "description": "Read or set posting volume (high / medium / low)"
+      "description": "Read or set posting volume (Aggressive / Steady / Chill)"
     },
     {
       "name": "pause_s4l",
