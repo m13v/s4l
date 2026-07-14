@@ -2732,6 +2732,19 @@ def _anchor_repost_from_tweets(tweets, anchor_tweet_id):
 
 
 def scrape_thread_media(thread_url, scroll_count=1):
+    """Deadline wrapper: media capture relays CDP to the harness Chrome, and
+    against a half-wedged browser or dead renderer a single evaluate can hang
+    FOREVER (2026-07-13: hung 34+ min at candidate 24/92 holding the browser
+    lock; only the watchdog's 90-min lock-liveness net would have reaped it).
+    stall_guard aborts the process fast, stamps the wedge strike, and lets the
+    cycle-entry heal chain converge. Shared implementation — see
+    scripts/stall_guard.py; do NOT re-implement per step."""
+    from stall_guard import stall_guard
+    with stall_guard("thread_media", thread_url):
+        return _scrape_thread_media_inner(thread_url, scroll_count)
+
+
+def _scrape_thread_media_inner(thread_url, scroll_count=1):
     """Navigate to a tweet's permalink and return the media of the anchor tweet.
 
     Deterministic, model-free media capture for the MAIN posting cycle: the
