@@ -5642,6 +5642,102 @@ async function handleApi(req, res) {
     }).catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/installations/posting-mode
+  // Per-install posting-volume control (2026-07-13). Lists installs with
+  // twitter-candidate activity in the trailing 7 days, their stored
+  // posting_mode (high|medium|low|null = driver default), and a per-mode
+  // estimated posts/day: batches whose top candidate clears the mode's pool
+  // percentile, divided by 7 (matches the cycle's top-1-vs-bar mechanism).
+  // Mode -> percentile mapping lives in the website API
+  // (src/lib/api/posting-mode.ts); the numbers here are display-only.
+  // Scope is enforced IN SQL: admin sees all installs, a CLIENT_MODE user
+  // sees only installs whose git_email matches their login email.
+  if (p === '/api/installations/posting-mode' && req.method === 'GET') {
+    return (async () => {
+      const isAdmin = !!(req.user && req.user.admin);
+      const email = req.user && req.user.email ? String(req.user.email) : '';
+      if (!isAdmin && !email) return json(res, { rows: [] });
+      const rows = await pq(
+        "WITH pool AS ( " +
+        '  SELECT install_id::text AS iid, batch_id, virality_score AS v ' +
+        '  FROM twitter_candidates ' +
+        "  WHERE discovered_at > NOW() - INTERVAL '7 days' " +
+        '    AND virality_score IS NOT NULL AND install_id IS NOT NULL ' +
+        '), thr AS ( ' +
+        '  SELECT iid, ' +
+        '    percentile_cont(0.9)   WITHIN GROUP (ORDER BY v) AS t_high, ' +
+        '    percentile_cont(0.97)  WITHIN GROUP (ORDER BY v) AS t_medium, ' +
+        '    percentile_cont(0.995) WITHIN GROUP (ORDER BY v) AS t_low, ' +
+        '    COUNT(*)::int AS pool_n ' +
+        '  FROM pool GROUP BY iid ' +
+        '), bmax AS ( ' +
+        '  SELECT iid, batch_id, MAX(v) AS mx FROM pool GROUP BY iid, batch_id ' +
+        '), est AS ( ' +
+        '  SELECT b.iid, COUNT(*)::int AS batch_n, ' +
+        '    COUNT(*) FILTER (WHERE b.mx >= t.t_high)::int   AS pass_high, ' +
+        '    COUNT(*) FILTER (WHERE b.mx >= t.t_medium)::int AS pass_medium, ' +
+        '    COUNT(*) FILTER (WHERE b.mx >= t.t_low)::int    AS pass_low ' +
+        '  FROM bmax b JOIN thr t ON t.iid = b.iid ' +
+        '  GROUP BY b.iid ' +
+        ') ' +
+        'SELECT i.install_id, i.hostname, i.git_email, i.app_version, ' +
+        '  i.last_seen_at, i.posting_mode, t.pool_n, e.batch_n, ' +
+        '  e.pass_high, e.pass_medium, e.pass_low ' +
+        'FROM installations i ' +
+        'JOIN thr t ON t.iid = i.install_id ' +
+        'JOIN est e ON e.iid = i.install_id ' +
+        'WHERE ($1::text IS NULL OR lower(i.git_email) = lower($1)) ' +
+        'ORDER BY i.last_seen_at DESC NULLS LAST LIMIT 100',
+        [isAdmin ? null : email],
+      );
+      const out = (rows || []).map(r => ({
+        install_id: r.install_id,
+        hostname: r.hostname,
+        git_email: r.git_email,
+        app_version: r.app_version,
+        last_seen_at: r.last_seen_at,
+        mode: r.posting_mode || null,
+        batch_count: Number(r.batch_n) || 0,
+        pool_count: Number(r.pool_n) || 0,
+        est_per_day: {
+          high: Math.round((Number(r.pass_high) / 7) * 10) / 10,
+          medium: Math.round((Number(r.pass_medium) / 7) * 10) / 10,
+          low: Math.round((Number(r.pass_low) / 7) * 10) / 10,
+        },
+      }));
+      return json(res, { rows: out, can_edit: true });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // POST /api/installations/posting-mode
+  // Body: { install_id, mode: 'high'|'medium'|'low'|null }. null clears the
+  // mode (driver default applies). Same SQL-enforced scope as the GET: a
+  // non-admin can only flip installs whose git_email matches their login.
+  if (p === '/api/installations/posting-mode' && req.method === 'POST') {
+    return readBody(req).then(async raw => {
+      let body;
+      try { body = JSON.parse(raw || '{}'); }
+      catch { return json(res, { error: 'invalid JSON' }, 400); }
+      const installId = String(body.install_id || '').trim();
+      const mode = body.mode === null || body.mode === undefined || body.mode === '' ? null : String(body.mode);
+      if (!installId) return json(res, { error: 'install_id required' }, 400);
+      if (mode !== null && !['high', 'medium', 'low'].includes(mode)) {
+        return json(res, { error: 'mode must be high | medium | low | null' }, 400);
+      }
+      const isAdmin = !!(req.user && req.user.admin);
+      const email = req.user && req.user.email ? String(req.user.email) : '';
+      if (!isAdmin && !email) return json(res, { error: 'forbidden' }, 403);
+      const rows = await pq(
+        'UPDATE installations SET posting_mode = $1 ' +
+        'WHERE install_id = $2 AND ($3::text IS NULL OR lower(git_email) = lower($3)) ' +
+        'RETURNING install_id, posting_mode',
+        [mode, installId, isAdmin ? null : email],
+      );
+      if (!rows || !rows.length) return json(res, { error: 'install not found or not yours' }, 404);
+      return json(res, { install_id: rows[0].install_id, mode: rows[0].posting_mode || null });
+    }).catch(e => json(res, { error: e.message }, 500));
+  }
+
   // PATCH /api/blocklist/:platform/:handle
   // DELETE /api/blocklist/:platform/:handle
   // installation_id provided via query string (?installation_id=...) since
@@ -10278,6 +10374,15 @@ const HTML = `<!DOCTYPE html>
     </summary>
     <div id="project-status-body">
       <div class="style-stats-empty">Loading…</div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="posting-volume">
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span>Posting Volume</span>
+      <span class="style-stats-total" id="posting-volume-total"></span>
+    </summary>
+    <div id="posting-volume-body">
+      <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
   <details class="style-stats-section" id="deploy-health">
@@ -20785,6 +20890,79 @@ _saInstallDeleteListener();
   el.addEventListener('toggle', () => {
     try { window.posthog && window.posthog.capture('section_toggle', { section: 'subreddit-stats', open: !!el.open }); } catch (er) {}
     if (el.open) loadSubredditStats();
+  });
+})();
+
+// Posting Volume (2026-07-13): per-install 3-mode throttle for the twitter
+// cycle's virality bar. Modes are displayed as estimated posts/day (computed
+// per install from its own trailing-7d pool); the percentile mapping is
+// server-side. Setting a mode takes effect on the install's next cycle.
+async function loadPostingVolume() {
+  if (saAuthNotReady()) return;
+  const body = document.getElementById('posting-volume-body');
+  const total = document.getElementById('posting-volume-total');
+  if (!body) return;
+  try {
+    const res = await fetch('/api/installations/posting-mode');
+    const data = await res.json();
+    if (data.error) { body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(String(data.error)) + '</div>'; return; }
+    const rows = data.rows || [];
+    if (total) total.textContent = rows.length ? (rows.length + ' active install' + (rows.length === 1 ? '' : 's')) : '';
+    if (!rows.length) { body.innerHTML = '<div class="style-stats-empty">No installs with twitter activity in the last 7 days.</div>'; return; }
+    const fmtRate = v => (v === null || v === undefined || isNaN(v)) ? '?' : ('~' + (v >= 10 ? Math.round(v) : v) + '/day');
+    const modeLabel = { high: 'High', medium: 'Medium', low: 'Low' };
+    const html = rows.map(r => {
+      const who = escapeHtml(r.hostname || r.install_id.slice(0, 8)) + (r.git_email ? ' <span style="color:var(--text-muted)">' + escapeHtml(r.git_email) + '</span>' : '');
+      const seen = r.last_seen_at ? new Date(r.last_seen_at).toISOString().slice(0, 10) : '?';
+      const opts = ['', 'high', 'medium', 'low'].map(m => {
+        const label = m === '' ? 'Default (cycle setting)' : (modeLabel[m] + ' ' + fmtRate(r.est_per_day[m]));
+        const sel = (r.mode || '') === m ? ' selected' : '';
+        return '<option value="' + m + '"' + sel + '>' + label + '</option>';
+      }).join('');
+      const chips =
+        '<span class="style-stats-pill">high ' + fmtRate(r.est_per_day.high) + '</span> ' +
+        '<span class="style-stats-pill">med ' + fmtRate(r.est_per_day.medium) + '</span> ' +
+        '<span class="style-stats-pill">low ' + fmtRate(r.est_per_day.low) + '</span>';
+      return '<div class="per-project-row" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border);">' +
+        '<span class="per-project-label" style="min-width:220px">' + who + '</span>' +
+        '<select data-install="' + escapeHtml(r.install_id) + '" class="posting-volume-select">' + opts + '</select>' +
+        '<span style="font-size:12px;color:var(--text-muted)">' + chips + ' · seen ' + seen + '</span>' +
+        '</div>';
+    }).join('');
+    body.innerHTML = '<div style="padding:4px 0 8px;font-size:12px;color:var(--text-muted)">Estimates replay each install’s last 7 days of cycles against its own candidate pool; a mode takes effect on the next cycle.</div>' + html;
+    body.querySelectorAll('.posting-volume-select').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const installId = sel.getAttribute('data-install');
+        const mode = sel.value || null;
+        sel.disabled = true;
+        try {
+          const r2 = await fetch('/api/installations/posting-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ install_id: installId, mode }),
+          });
+          const d2 = await r2.json();
+          if (d2.error) alert('Failed: ' + d2.error);
+          try { window.posthog && window.posthog.capture('posting_volume_change', { mode: mode || 'default' }); } catch (er) {}
+        } catch (e) {
+          alert('Failed: ' + (e && e.message || e));
+        } finally {
+          sel.disabled = false;
+          loadPostingVolume();
+        }
+      });
+    });
+  } catch (e) {
+    body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(String(e && e.message || e)) + '</div>';
+  }
+}
+
+(function wirePostingVolume() {
+  const el = document.getElementById('posting-volume');
+  if (!el) return;
+  el.addEventListener('toggle', () => {
+    try { window.posthog && window.posthog.capture('section_toggle', { section: 'posting-volume', open: !!el.open }); } catch (er) {}
+    if (el.open) loadPostingVolume();
   });
 })();
 
