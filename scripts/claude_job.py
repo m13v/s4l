@@ -88,7 +88,10 @@ TYPE_TO_ACTIVITY = {
     "invent-topic": ("learning", "new topic"),
     "invent-queries": ("learning", "new queries"),
     "twitter-link-tail": ("drafting", "link bridge"),
-    "reddit-draft": ("drafting", "reddit draft"),
+    # Same bare "draft" label as twitter-prep ON PURPOSE: the menu bar title
+    # must stay concise (user rule 2026-07-14); the platform shows on the
+    # review card itself, not in the tray.
+    "reddit-draft": ("drafting", "draft"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
