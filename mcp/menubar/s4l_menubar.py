@@ -1153,12 +1153,14 @@ class S4LMenuBar(rumps.App):
     # Posting volume (2026-07-13): server-side per-install throttle for the
     # twitter cycle's virality bar. None = driver default. The labels carry
     # ballpark rates; exact per-install estimates live on the dashboard's
-    # Posting Volume section (Stats tab).
+    # Posting Volume section (Stats tab). Internal values stay high|medium|low
+    # (DB CHECK + API enum); Aggressive/Steady/Chill are display names only
+    # (renamed 2026-07-14 per user).
     POSTING_MODE_PRESETS = (
         (None, "Default (cycle setting)"),
-        ("high", "High (100+ posts/day)"),
-        ("medium", "Medium (~30 posts/day)"),
-        ("low", "Low (~5 posts/day)"),
+        ("high", "Aggressive (100+ posts/day)"),
+        ("medium", "Steady (~30 posts/day)"),
+        ("low", "Chill (~5 posts/day)"),
     )
 
     def _cadence_label(self, secs=None):
