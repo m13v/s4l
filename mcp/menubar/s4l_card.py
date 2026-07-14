@@ -1180,23 +1180,43 @@ class _ReviewController(NSObject):
             age_label.setAlignment_(NSTextAlignmentRight)
             content.addSubview_(age_label)
             right_x -= age_w + 4
-        handle_w = right_x - (M + 78) - 4
+        # Platform mark (brand identification, inline with the author row):
+        # Reddit's orange "r/" vs X's glyph, so a mixed-platform review queue
+        # reads at a glance which network each card posts to.
+        _plat = (d.get("platform") or "twitter").lower()
+        _mark = "r/" if _plat == "reddit" else "\U0001d54f"
+        _mark_w = 18
+        _mark_label = _label(
+            NSMakeRect(M + 78, H - 70, _mark_w, 18), _mark, size=12, bold=True
+        )
+        if _plat == "reddit":
+            try:
+                # Reddit orangered (#FF4500); best effort, falls back to the
+                # default label color on any AppKit hiccup.
+                _mark_label.setTextColor_(
+                    NSColor.colorWithSRGBRed_green_blue_alpha_(1.0, 0.27, 0.0, 1.0)
+                )
+            except Exception:
+                pass
+        content.addSubview_(_mark_label)
+        _author_x = M + 78 + _mark_w
+        handle_w = right_x - _author_x - 4
         if handle:
             # Size the link to its text so the follower count can sit right
             # after the handle instead of at a fixed column.
-            text = f"@{handle}"
+            text = f"u/{handle}" if _plat == "reddit" else f"@{handle}"
             measured = NSAttributedString.alloc().initWithString_attributes_(
                 text, {NSFontAttributeName: _font(12, True)}
             ).size().width
             link_w = min(int(measured) + 8, handle_w)
             _prof_url = (
                 f"https://www.reddit.com/user/{handle}"
-                if (d.get("platform") == "reddit")
+                if _plat == "reddit"
                 else f"https://x.com/{handle}"
             )
             self._add_link(
                 content,
-                NSMakeRect(M + 78, H - 70, link_w, 18),
+                NSMakeRect(_author_x, H - 70, link_w, 18),
                 text,
                 _prof_url,
                 bold=True,
@@ -1207,7 +1227,7 @@ class _ReviewController(NSObject):
             if followers and fol_w > 20:
                 content.addSubview_(
                     _label(
-                        NSMakeRect(M + 78 + link_w, H - 70, fol_w, 18),
+                        NSMakeRect(_author_x + link_w, H - 70, fol_w, 18),
                         f"· {followers}",
                         size=11,
                         muted=True,
@@ -1215,7 +1235,7 @@ class _ReviewController(NSObject):
                 )
         else:
             content.addSubview_(
-                _label(NSMakeRect(M + 78, H - 70, handle_w, 18), "thread", size=12, bold=True, muted=True)
+                _label(NSMakeRect(_author_x, H - 70, handle_w, 18), "thread", size=12, bold=True, muted=True)
             )
         # Non-English drafts: the prep step stamps display-only English
         # translations (thread_text_en / reply_text_en) on the candidate. The
