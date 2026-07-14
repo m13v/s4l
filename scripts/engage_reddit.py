@@ -583,9 +583,15 @@ def run_claude(prompt, timeout=300, session_id=None):
     import time as _time
     import select
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_create": 0, "cost_usd": 0.0}
-    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
-    if session_id:
-        cmd += ["--session-id", session_id]
+    # Route through run_claude.sh (2026-07-14) for session cost accounting +
+    # the dead-man's-switch quota handling every shell pipeline already gets.
+    # Tag engage-reddit is NOT in claude_job.py TAG_TO_TYPE, so this stays a
+    # direct claude -p (stream-json passes through the wrapper's tee).
+    # --session-id must NOT be passed here: the wrapper adds the flag itself
+    # and honors a caller-set CLAUDE_SESSION_ID env (set below), so passing
+    # it here too would hand claude a duplicate flag.
+    _run_claude_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_claude.sh")
+    cmd = ["bash", _run_claude_sh, "engage-reddit", "-p", "--output-format", "stream-json", "--verbose"]
     # --bare removed: it blocks OAuth auth which we need
     cmd += ["--tools", "Bash,Read"]
     env = os.environ.copy()
