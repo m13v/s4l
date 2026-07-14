@@ -701,6 +701,7 @@ def build_summary() -> dict[str, Any]:
         "twitter_cycle": twitter_cycle_status(),
         "draft_publish": draft_publish_wrapper_status(),
         "chrome_relaunches": chrome_relaunch_status(),
+        "chrome_crashpad": chrome_crashpad_status(),
         "cdp_health": cdp_health_status(),
         "process_count": len(rows),
         "mem": {
@@ -951,6 +952,50 @@ def chrome_relaunch_status() -> dict[str, Any] | None:
                 counts["24h"] += 1
             last_line = ln
         return {"count_1h": counts["1h"], "count_24h": counts["24h"], "last": last_line}
+    except Exception:
+        return None
+
+
+def chrome_crashpad_status() -> dict[str, Any] | None:
+    """Chrome crash-dump rate from the GLOBAL Crashpad database.
+
+    macOS Chrome writes all crash dumps (any --user-data-dir) to
+    ~/Library/Application Support/Google/Chrome/Crashpad/completed, NOT the
+    profile-local Crashpad dir. Baseline on a healthy box is ~1 dump/week;
+    the 2026-07-12 Chrome 150 regression produced 11-31/day of renderer
+    CHECK-aborts from the harness profile, and each crash preceded a CDP
+    websocket wedge by minutes (memory
+    insights_chrome150_renderer_crash_wedge_2026_07_14). Carrying the counts
+    plus the running Chrome version on the heartbeat makes the NEXT silent
+    Chrome-update regression visible in hours instead of days of stalls."""
+    try:
+        d = (
+            Path.home()
+            / "Library/Application Support/Google/Chrome/Crashpad/completed"
+        )
+        if not d.is_dir():
+            return None
+        now = time.time()
+        count_24h = 0
+        total = 0
+        newest = 0.0
+        for f in d.iterdir():
+            if f.suffix != ".dmp":
+                continue
+            total += 1
+            try:
+                mt = f.stat().st_mtime
+            except OSError:
+                continue
+            if now - mt <= 86400:
+                count_24h += 1
+            newest = max(newest, mt)
+        out: dict[str, Any] = {"count_24h": count_24h, "total": total}
+        if newest:
+            out["last_dump_at"] = dt.datetime.fromtimestamp(
+                newest, dt.timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return out
     except Exception:
         return None
 
