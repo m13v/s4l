@@ -188,10 +188,10 @@ def find_twitter_cdp_port():
     as a fallback when TWITTER_CDP_URL isn't exported by the caller.
 
     Since the park-on-exit mitigation (2026-07-14) the harness tab sits on
-    about:blank between runs, so "has an x.com tab" no longer identifies the
-    harness. A responding port whose cmdline carries the browser-harness
-    profile dir is kept as a last-resort fallback (never a different
-    platform's harness Chrome).
+    x.com/robots.txt between runs, which still matches the x.com scan above.
+    A responding port whose cmdline carries the browser-harness profile dir
+    is kept as a last-resort fallback for the tab-somehow-closed case (never
+    a different platform's harness Chrome).
     """
     try:
         ps_out = subprocess.check_output(
@@ -717,13 +717,22 @@ def _arm_self_liveness_watchdog():
 # renderer precedes most whole-browser CDP wedges by minutes (see Crashpad
 # dump ↔ cdp_wedge correlation, memory
 # insights_chrome150_renderer_crash_wedge_2026_07_14). Parking every
-# x.com/twitter.com tab on about:blank when the last browser-using python
-# process exits removes the heavy SPA from the idle window entirely. Raw
-# CDP over HTTP+websocket with hard 3s timeouts, NEVER Playwright: at atexit
-# the Playwright loop may be gone, and against an already-wedged browser this
-# must fail fast, not hang the exit. Callers are unaffected: the documented
-# get_browser_and_page contract is "caller should navigate it", and
-# find_twitter_cdp_port keeps a harness-profile fallback for the parked case.
+# x.com/twitter.com tab when the last browser-using python process exits
+# removes the heavy SPA from the idle window entirely. Raw CDP over
+# HTTP+websocket with hard 3s timeouts, NEVER Playwright: at atexit the
+# Playwright loop may be gone, and against an already-wedged browser this
+# must fail fast, not hang the exit.
+#
+# PARK TARGET IS x.com/robots.txt, NOT about:blank (user rule 2026-07-14:
+# always REUSE the tab; creating tabs risks focus steal). The bh harness's
+# list_tabs() treats "about:" as INTERNAL and hides it, so an about:blank
+# park made twitter_scan._navigate see zero real tabs and open a NEW tab
+# every cycle. robots.txt is a static ~100-byte text document (no SPA, no
+# JS, nothing to leak or crash) whose URL still matches every reuse
+# heuristic: harness list_tabs (plain https), the x.com-tab preference in
+# _get_browser_and_page_raw, and find_twitter_cdp_port discovery. The
+# harness-profile discovery fallback stays as a belt for a closed tab.
+_PARK_URL = "https://x.com/robots.txt"
 _PARK_REGISTERED = False
 
 
@@ -743,6 +752,8 @@ def _park_twitter_tabs():
                 continue
             if "x.com" not in url and "twitter.com" not in url:
                 continue
+            if url.split("?", 1)[0].rstrip("/").endswith("/robots.txt"):
+                continue  # already parked
             ws_url = t.get("webSocketDebuggerUrl")
             if not ws_url:
                 continue
@@ -759,13 +770,13 @@ def _park_twitter_tabs():
                     ws.send(json.dumps({
                         "id": 1,
                         "method": "Page.navigate",
-                        "params": {"url": "about:blank"},
+                        "params": {"url": _PARK_URL},
                     }))
                     ws.recv()
                 finally:
                     ws.close()
                 print(
-                    f"[twitter_browser] parked tab on about:blank (was {url[:80]})",
+                    f"[twitter_browser] parked tab on {_PARK_URL} (was {url[:80]})",
                     file=sys.stderr,
                 )
             except Exception:
