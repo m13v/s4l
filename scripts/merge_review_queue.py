@@ -135,13 +135,24 @@ def _reddit_plan_to_candidates(plan: dict) -> list:
     it to `post_reddit.py --phase post` unchanged (locks, URL wrapping,
     campaign suffixes, and log_post all stay in the one battle-tested poster).
     """
+    import hashlib
+
     out = []
     for d in plan.get("decisions") or []:
         if not isinstance(d, dict) or not d.get("text") or not d.get("thread_url"):
             continue
+        # candidate_id gets an "rd-" prefix ON PURPOSE: bare integer ids here
+        # would collide with twitter_candidates ids in every id-keyed flow
+        # (review-events row flips, bulk-discard PATCH /twitter-candidates/
+        # by-id) and silently retire the WRONG twitter row. The prefixed id
+        # still satisfies index.ts's merge-by-candidate_id stamping (ids are
+        # compared as strings), while the twitter-table flips 404 harmlessly.
+        _rid = d.get("id") or d.get("candidate_id")
+        if not _rid:
+            _rid = hashlib.sha1(d["thread_url"].encode()).hexdigest()[:10]
         out.append({
             "platform": "reddit",
-            "candidate_id": d.get("id") or d.get("candidate_id"),
+            "candidate_id": f"rd-{_rid}",
             "candidate_url": d.get("thread_url"),
             "thread_url": d.get("thread_url"),
             "thread_author": d.get("thread_author"),
