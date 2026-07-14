@@ -749,7 +749,12 @@ def _park_twitter_tabs():
             try:
                 import websocket
 
-                ws = websocket.create_connection(ws_url, timeout=3)
+                # suppress_origin: Chrome 111+ rejects CDP websocket clients
+                # that send an Origin header not in --remote-allow-origins
+                # (same pattern as restore_twitter_session.py).
+                ws = websocket.create_connection(
+                    ws_url, timeout=3, suppress_origin=True
+                )
                 try:
                     ws.send(json.dumps({
                         "id": 1,
