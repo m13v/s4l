@@ -55,6 +55,8 @@ import json
 import os
 import pathlib
 import re
+import sys
+import threading
 import time
 import urllib.parse
 
@@ -245,6 +247,40 @@ def _navigate(url: str) -> None:
         new_tab(url)
 
 
+# Per-query stall guard (2026-07-13). The daemon helpers (goto_url/js) relay
+# CDP through the harness daemon; against a half-wedged Chrome those calls can
+# hang far past any useful budget, and one stuck query froze a Phase 1 scan at
+# "scan 0 · 23m" while holding the browser lock — the entry wedge check can't
+# help because the NEXT cycle can't start until this one dies. Self-heal from
+# inside instead: if a single scan() call exceeds the deadline, print a loud
+# marker, stamp the wedge strike file (so the next cycle's two-strike gate in
+# twitter-backend.sh converges to a kill+relaunch if Chrome is still sick),
+# and hard-exit the scan process so the cycle fails fast and releases the
+# lock. A healthy query completes in well under a minute; 240s is generous.
+_SCAN_QUERY_DEADLINE_S = float(os.environ.get("S4L_SCAN_QUERY_DEADLINE_S", "240"))
+_WEDGE_STRIKE_FILE = "/tmp/s4l_cdp_wedge_strike_9555"  # matches twitter-backend.sh
+
+
+def _arm_stall_guard(query: str):
+    def _fire():
+        sys.stderr.write(
+            f"[twitter_scan] SCAN_STALL_ABORT query={query!r} "
+            f"deadline={_SCAN_QUERY_DEADLINE_S:.0f}s — CDP call hung (wedged "
+            "Chrome); stamping wedge strike and aborting the scan process\n"
+        )
+        sys.stderr.flush()
+        try:
+            pathlib.Path(_WEDGE_STRIKE_FILE).touch()
+        except OSError:
+            pass
+        os._exit(75)  # EX_TEMPFAIL: cycle fails fast, lock + slot free up
+
+    t = threading.Timer(_SCAN_QUERY_DEADLINE_S, _fire)
+    t.daemon = True
+    t.start()
+    return t
+
+
 def scan(
     query: str,
     project: str,
@@ -257,6 +293,21 @@ def scan(
     ###TWEETS_BEGIN###/###TWEETS_END### sentinels for the scan model to relay
     into StructuredOutput; also returns the kept list so direct callers (tests,
     future shell-driven invocations) can consume it without parsing stdout."""
+    _stall_guard = _arm_stall_guard(query)
+    try:
+        return _scan_inner(query, project, search_topic, freshness_hours, skip_ids, settle_seconds)
+    finally:
+        _stall_guard.cancel()
+
+
+def _scan_inner(
+    query: str,
+    project: str,
+    search_topic: str,
+    freshness_hours: int = 6,
+    skip_ids=None,
+    settle_seconds: float = 4.0,
+) -> list:
     skip = {str(s) for s in (skip_ids or [])}
     url = _build_url(query, int(freshness_hours))
     _navigate(url)
