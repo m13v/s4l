@@ -645,11 +645,62 @@ def _touch_browser_heartbeat(*_args):
         pass
 
 
+# L3: CHOKE-POINT self-liveness watchdog (2026-07-14). The per-call-site
+# stall_guard wrappers proved to be coverage-by-enumeration: the batch media
+# path (scrape_many_thread_media) was missed and hung 31+ min on a crashed
+# renderer with only the external watchdog's 90-min net under it. This layer
+# is enforcement at the ONE entry every Playwright browser op flows through:
+# if THIS process has produced zero browser activity (no heartbeat touches —
+# no attach, no page network traffic) for the deadline while holding the
+# browser, it is hung; print a marker, stamp the wedge strike, and self-abort
+# so the lock and cycle slot free up. Applies to every current and FUTURE
+# call site automatically. Write path excluded by ROLE (S4L_LOCK_ROLE=post):
+# aborting mid-post risks a posted-but-unrecorded reply (double-post on
+# retry), so posting keeps its own timeouts + the external nets.
+_SELF_WATCHDOG_ARMED = False
+
+
+def _arm_self_liveness_watchdog():
+    global _SELF_WATCHDOG_ARMED
+    if _SELF_WATCHDOG_ARMED or LOCK_ROLE == "post":
+        return
+    _SELF_WATCHDOG_ARMED = True
+    import threading
+
+    deadline = float(os.environ.get("S4L_BROWSER_OP_DEADLINE_S", "240")) + 60.0
+    interval = max(5.0, min(20.0, deadline / 4.0))
+
+    def _loop():
+        while True:
+            time.sleep(interval)
+            if not _hb_last_touch:
+                continue
+            idle = time.time() - _hb_last_touch
+            if idle > deadline:
+                print(
+                    f"[twitter_browser] SELF_LIVENESS_ABORT role={LOCK_ROLE} "
+                    f"idle={idle:.0f}s deadline={deadline:.0f}s — browser held "
+                    "with zero activity (hung op); stamping wedge strike and "
+                    "aborting so the lock frees",
+                    file=sys.stderr,
+                )
+                try:
+                    # Matches the two-strike gate in skill/lib/twitter-backend.sh.
+                    with open("/tmp/s4l_cdp_wedge_strike_9555", "w") as f:
+                        f.write(str(int(time.time())))
+                except OSError:
+                    pass
+                os._exit(75)  # EX_TEMPFAIL
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def get_browser_and_page(playwright):
     """Instrumented entry point: attach via _get_browser_and_page_raw, then
     (L1) set default per-op/navigation timeouts so no page call can hang
-    forever, and (L2) wire the browser-lock liveness heartbeat. All new code
-    should use THIS, never the raw variant."""
+    forever, (L2) wire the browser-lock liveness heartbeat, and (L3) arm the
+    self-liveness watchdog so a hung op in ANY caller self-aborts. All new
+    code should use THIS, never the raw variant."""
     browser, page, is_cdp = _get_browser_and_page_raw(playwright)
     try:
         page.set_default_timeout(BROWSER_OP_TIMEOUT_MS)
@@ -661,6 +712,7 @@ def get_browser_and_page(playwright):
         page.on("request", _touch_browser_heartbeat)
     except Exception:
         pass
+    _arm_self_liveness_watchdog()
     return browser, page, is_cdp
 
 
