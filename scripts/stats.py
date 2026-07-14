@@ -441,6 +441,26 @@ def fetch_reddit_json(url, user_agent, max_retries=2, timeout=15):
     (success AND error) into _reddit_rate_state so the caller can pace.
     On 429, honors Retry-After (capped to 120s) and retries.
     """
+    # 2026-07-14 transport fix: Reddit started 403-blocking plain urllib on
+    # *.json (2026-05-28), which silently killed this scan (every poll came
+    # back as an HTML block page -> 'empty'/'error', zero rows patched since).
+    # Route through the logged-in harness browser first, the same transport
+    # reddit_tools._do_request has used since 2026-05-29 (the replies pass in
+    # this file already goes through it via batch_fetch_info and kept working).
+    # urllib below stays as the fallback; REDDIT_FETCH_BACKEND=urllib forces it.
+    if os.environ.get("REDDIT_FETCH_BACKEND", "harness").lower() != "urllib":
+        try:
+            from reddit_browser_fetch import browser_get_json
+            body, code = browser_get_json(url)
+            if code == 200 and body:
+                try:
+                    return ("ok", json.loads(body))
+                except Exception:
+                    pass  # non-JSON body -> fall through to urllib
+            elif code == 404:
+                return ("not_found", None)
+        except Exception:
+            pass
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     for attempt in range(max_retries + 1):
         try:
