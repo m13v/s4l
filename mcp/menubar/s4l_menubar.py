@@ -1151,13 +1151,14 @@ class S4LMenuBar(rumps.App):
     )
 
     # Posting volume (2026-07-13): server-side per-install throttle for the
-    # twitter cycle's virality bar. None = driver default. The labels carry
-    # ballpark rates; exact per-install estimates live on the dashboard's
-    # Posting Volume section (Stats tab). Internal values stay high|medium|low
-    # (DB CHECK + API enum); Aggressive/Steady/Chill are display names only
-    # (renamed 2026-07-14 per user).
+    # twitter cycle's virality bar. The labels carry ballpark rates; exact
+    # per-install estimates live on the dashboard's Posting Volume section
+    # (Stats tab). Internal values stay high|medium|low (DB CHECK + API enum);
+    # Aggressive/Steady/Chill are display names only (renamed 2026-07-14).
+    # There is NO separate "default" state (removed 2026-07-14 per user): an
+    # install that never chose resolves to Steady server-side, so the menu
+    # shows Steady checked.
     POSTING_MODE_PRESETS = (
-        (None, "Default (cycle setting)"),
         ("high", "Aggressive (100+ posts/day)"),
         ("medium", "Steady (~30 posts/day)"),
         ("low", "Chill (~5 posts/day)"),
@@ -1188,11 +1189,11 @@ class S4LMenuBar(rumps.App):
             sys.stderr.flush()
 
     def _posting_mode_label(self, mode):
-        """Menu copy for a posting-volume mode value."""
+        """Menu copy for a posting-volume mode value (unknown/unset = Steady)."""
         for preset, label in self.POSTING_MODE_PRESETS:
             if preset == mode:
                 return label
-        return "Default (cycle setting)"
+        return "Steady (~30 posts/day)"
 
     def _on_posting_mode_preset(self, mode, _sender=None):
         """Set the server-side posting-volume mode (network POST; a click may
@@ -3579,10 +3580,10 @@ class S4LMenuBar(rumps.App):
         items.append(cadence_menu)
 
         # Posting volume: server-side per-install throttle (virality bar).
-        # read_posting_mode() is cached and non-blocking; until the first
-        # refresh lands the submenu shows Default checked, then corrects on
-        # the next rebuild.
-        pv_mode = st.read_posting_mode()
+        # read_posting_mode() is cached and non-blocking; unknown/unset shows
+        # as Steady (the server resolves unset the same way), corrected on the
+        # rebuild after the first refresh lands.
+        pv_mode = st.read_posting_mode() or "medium"
         pv_menu = rumps.MenuItem(
             f"Posting volume: {self._posting_mode_label(pv_mode).split(' (')[0].lower()}"
         )
