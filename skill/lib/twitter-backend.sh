@@ -334,6 +334,23 @@ ensure_twitter_browser_for_backend() {
             [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
             rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
         fi
+        # Mark the profile's last exit as clean BEFORE launching. A SIGKILLed
+        # Chrome (wedge heal, stall abort) records exit_type=Crashed, and the
+        # next launch then session-restores the dead session's tab, which
+        # renders as a lingering "Aw, Snap" corpse the user keeps seeing
+        # (2026-07-13, twice). With the profile marked clean, Chrome opens
+        # ONLY our startup URL. Best-effort: a missing/corrupt Preferences
+        # file just skips.
+        "${S4L_PYTHON:-python3}" -c 'import json, os, sys
+p = os.path.join(sys.argv[1], "Default", "Preferences")
+try:
+    d = json.load(open(p))
+except Exception:
+    raise SystemExit(0)
+prof = d.setdefault("profile", {})
+prof["exit_type"] = "Normal"
+prof["exited_cleanly"] = True
+json.dump(d, open(p, "w"))' "$_prof_dir" 2>/dev/null || true
         # Launch flags shared by both spawn paths below.
         local _launch_args=(
             --remote-debugging-port=9555
