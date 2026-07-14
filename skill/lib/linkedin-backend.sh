@@ -333,6 +333,19 @@ ensure_linkedin_browser_for_backend() {
         # The occlusion/backgrounding flags matter: the window sits offscreen,
         # and without them Chrome stops laying out SPA-rendered content, so
         # every element measures 0x0 and clicks become impossible (2026-07-03).
+        # Mark the profile's last exit as clean BEFORE launching, so a
+        # SIGKILLed Chrome doesn't session-restore a crashed "Aw, Snap" tab on
+        # relaunch (same fix + rationale as twitter-backend.sh, 2026-07-13).
+        "${S4L_PYTHON:-python3}" -c 'import json, os, sys
+p = os.path.join(sys.argv[1], "Default", "Preferences")
+try:
+    d = json.load(open(p))
+except Exception:
+    raise SystemExit(0)
+prof = d.setdefault("profile", {})
+prof["exit_type"] = "Normal"
+prof["exited_cleanly"] = True
+json.dump(d, open(p, "w"))' "$_prof_dir" 2>/dev/null || true
         # Launch flags shared by both spawn paths below.
         local _li_launch_args=(
             --remote-debugging-port=9556
