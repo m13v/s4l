@@ -3071,31 +3071,36 @@ tool(
 tool(
   "posting_volume",
   {
-    title: "Read or set posting volume (high / medium / low)",
+    title: "Read or set posting volume (Aggressive / Steady / Chill)",
     description:
       "Read or set this install's posting-volume mode, the quality bar that decides how many drafts " +
-      "per day the twitter cycle produces. Three modes: high (~100+ posts/day), medium (~30/day), " +
-      "low (~5/day, only the very best candidates); 'default' clears the override so the cycle's " +
-      "built-in setting applies. action:'get' returns the current mode plus per-mode estimated " +
-      "posts/day computed from this install's own recent candidate pool (show those numbers when " +
-      "the user is choosing). Use when the user asks to post more, post less, slow down, raise the " +
-      "quality bar, or change posting volume. Takes effect on the next cycle; in draft-review mode " +
-      "it equally paces how many review cards appear.",
+      "per day the twitter cycle produces. Three modes, shown to users as Aggressive (~100+ posts/day), " +
+      "Steady (~30/day), and Chill (~5/day, only the very best candidates); 'default' clears the " +
+      "override so the cycle's built-in setting applies. Internally the modes are high|medium|low and " +
+      "both spellings are accepted. action:'get' returns the current mode plus per-mode estimated " +
+      "posts/day computed from this install's own recent candidate pool (show those numbers with the " +
+      "Aggressive/Steady/Chill names when the user is choosing). Use when the user asks to post more, " +
+      "post less, slow down, be more aggressive, chill out, raise the quality bar, or change posting " +
+      "volume. Takes effect on the next cycle; in draft-review mode it equally paces how many review " +
+      "cards appear.",
     inputSchema: {
       action: z.enum(["get", "set"]).default("get").describe("get = read mode + rates; set = change it"),
       mode: z
-        .enum(["high", "medium", "low", "default"])
+        .enum(["aggressive", "steady", "chill", "high", "medium", "low", "default"])
         .optional()
-        .describe("Required for action:'set'. 'default' clears the override."),
+        .describe("Required for action:'set'. aggressive=high, steady=medium, chill=low; 'default' clears the override."),
     },
   },
   async (args: any) => {
     const action = args.action || "get";
+    // Friendly display names map onto the stored high|medium|low enum.
+    const ALIAS: Record<string, string> = { aggressive: "high", steady: "medium", chill: "low" };
     if (action === "set") {
       if (!args.mode) {
-        return jsonContent({ error: "mode is required for action:'set' (high|medium|low|default)" });
+        return jsonContent({ error: "mode is required for action:'set' (aggressive|steady|chill|default)" });
       }
-      const r = await runPython("scripts/s4l_posting_mode.py", ["set", String(args.mode)], {
+      const stored = ALIAS[String(args.mode)] || String(args.mode);
+      const r = await runPython("scripts/s4l_posting_mode.py", ["set", stored], {
         timeoutMs: 30_000,
       });
       try {
