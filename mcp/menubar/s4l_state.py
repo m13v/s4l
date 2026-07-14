@@ -1291,6 +1291,78 @@ def write_reveal_cadence(secs):
     return secs
 
 
+# --- Posting volume mode (2026-07-13) ---------------------------------------
+# Server-side per-install throttle for the twitter cycle's virality bar:
+# high|medium|low|None (None = driver default). Source of truth is
+# installations.posting_mode via /api/v1/installations/posting-mode; unlike
+# the lane flags there is NO local mode.json copy, because the whole point is
+# remote adjustability (dashboard and menubar must agree with the server).
+# Reads are cached so the menu rebuild tick never blocks on the network: a
+# stale/missing cache kicks one background refresh and returns the last-known
+# value (None until the first refresh lands; the next rebuild shows the mark).
+POSTING_MODE_TTL_SECS = 600
+_posting_mode_cache = {"mode": None, "known": False, "at": 0.0}
+_posting_mode_lock = threading.Lock()
+
+
+def _scripts_on_path():
+    repo = os.environ.get("S4L_REPO_DIR") or str(Path.home() / "social-autoposter")
+    scripts = os.path.join(repo, "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+
+
+def _refresh_posting_mode():
+    try:
+        _scripts_on_path()
+        from http_api import api_get
+
+        r = api_get("/api/v1/installations/posting-mode")
+        d = (r or {}).get("data") or {}
+        mode = d.get("mode")
+        with _posting_mode_lock:
+            _posting_mode_cache.update(
+                mode=mode if mode in ("high", "medium", "low") else None,
+                known=True,
+                at=time.time(),
+            )
+    except Exception as e:
+        sys.stderr.write(f"[s4l-state] posting-mode refresh failed: {e}\n")
+        with _posting_mode_lock:
+            # Throttle retries to the TTL window; keep last-known value.
+            _posting_mode_cache["at"] = time.time()
+
+
+def read_posting_mode():
+    """Last-known posting mode ('high'|'medium'|'low') or None (default /
+    unknown). Non-blocking: kicks a background refresh when stale."""
+    with _posting_mode_lock:
+        fresh = (time.time() - _posting_mode_cache["at"]) < POSTING_MODE_TTL_SECS
+        mode = _posting_mode_cache["mode"]
+    if not fresh:
+        threading.Thread(target=_refresh_posting_mode, daemon=True).start()
+    return mode
+
+
+def write_posting_mode(mode):
+    """Set (or clear, mode=None) the server-side posting mode. Blocking POST;
+    call from a menu click, not from the rebuild tick. Returns the stored
+    mode on success; raises on network failure so the caller can notify."""
+    _scripts_on_path()
+    from http_api import api_post
+
+    r = api_post("/api/v1/installations/posting-mode", {"mode": mode})
+    d = (r or {}).get("data") or {}
+    stored = d.get("mode")
+    with _posting_mode_lock:
+        _posting_mode_cache.update(
+            mode=stored if stored in ("high", "medium", "low") else None,
+            known=True,
+            at=time.time(),
+        )
+    return stored
+
+
 def write_mode(mode):
     """Legacy single-mode setter: named lane ON, the other OFF (compat)."""
     if mode not in _VALID_MODES:
