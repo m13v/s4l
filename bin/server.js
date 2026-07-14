@@ -5696,7 +5696,8 @@ async function handleApi(req, res) {
         git_email: r.git_email,
         app_version: r.app_version,
         last_seen_at: r.last_seen_at,
-        mode: r.posting_mode || null,
+        // No user-visible "default" state (2026-07-14): unset = Steady.
+        mode: r.posting_mode || 'medium',
         batch_count: Number(r.batch_n) || 0,
         pool_count: Number(r.pool_n) || 0,
         est_per_day: {
@@ -20916,9 +20917,9 @@ async function loadPostingVolume() {
     const html = rows.map(r => {
       const who = escapeHtml(r.hostname || r.install_id.slice(0, 8)) + (r.git_email ? ' <span style="color:var(--text-muted)">' + escapeHtml(r.git_email) + '</span>' : '');
       const seen = r.last_seen_at ? new Date(r.last_seen_at).toISOString().slice(0, 10) : '?';
-      const opts = ['', 'high', 'medium', 'low'].map(m => {
-        const label = m === '' ? 'Default (cycle setting)' : (modeLabel[m] + ' ' + fmtRate(r.est_per_day[m]));
-        const sel = (r.mode || '') === m ? ' selected' : '';
+      const opts = ['high', 'medium', 'low'].map(m => {
+        const label = modeLabel[m] + ' ' + fmtRate(r.est_per_day[m]);
+        const sel = r.mode === m ? ' selected' : '';
         return '<option value="' + m + '"' + sel + '>' + label + '</option>';
       }).join('');
       const chips =
