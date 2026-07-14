@@ -110,7 +110,7 @@ HEALTHY_DRAIN_MAX_SECONDS = 1200
 # (an idle queue has no pending job at all, so a quiet pipeline never trips it).
 STALL_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
 # A job claimed but still sitting in running/ this long: the worker picked it up
-# and then wedged mid-run (the claude -p drafting child died / never spawned).
+# and then wedged mid-run.
 RUNNING_STALL_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
 # The producer's "drafting Nm" label alive this long: the end-to-end clock. This
 # is the only timer that spans claim→die→requeue churn loops, which reset the two
