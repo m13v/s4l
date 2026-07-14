@@ -1189,11 +1189,16 @@ class _ReviewController(NSObject):
                 text, {NSFontAttributeName: _font(12, True)}
             ).size().width
             link_w = min(int(measured) + 8, handle_w)
+            _prof_url = (
+                f"https://www.reddit.com/user/{handle}"
+                if (d.get("platform") == "reddit")
+                else f"https://x.com/{handle}"
+            )
             self._add_link(
                 content,
                 NSMakeRect(M + 78, H - 70, link_w, 18),
                 text,
-                f"https://x.com/{handle}",
+                _prof_url,
                 bold=True,
                 kind="profile_click",
             )
