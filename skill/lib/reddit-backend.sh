@@ -1,6 +1,7 @@
 #!/bin/bash
 # reddit-backend.sh - Reddit pipeline browser bootstrap (reddit-harness,
-# mirrors twitter-backend.sh / linkedin-backend.sh).
+# mirrors twitter-backend.sh / linkedin-backend.sh; the shared machinery
+# lives in skill/lib/harness-common.sh since 2026-07-14).
 #
 # 2026-05-29 migration: Reddit's discovery path (reddit_tools.py) fetched
 # Reddit's *.json via Python urllib, which Reddit began 403ing from residential
@@ -31,8 +32,8 @@
 #
 #   ensure_reddit_browser_for_backend
 #     Call AFTER acquire_lock "reddit-browser". Probes harness Chrome on
-#     port 9557 and launches it idempotently if down, then cleans leftover
-#     tabs from prior runs.
+#     port 9557 and launches it idempotently if down (wedge-aware, focus-safe;
+#     see harness-common.sh), then cleans leftover tabs from prior runs.
 #
 #   defer_if_foreign_for_backend [log_file]
 #     No-op. Harness CDP supports multiple concurrent clients on the same
@@ -53,16 +54,14 @@ fi
 # Twitter's 9555 and LinkedIn's 9556).
 export REDDIT_CDP_URL="${REDDIT_CDP_URL:-http://127.0.0.1:9557}"
 
-# Repo root for helper scripts. Honors S4L_REPO_DIR (managed installs run from
-# ~/.social-autoposter-mcp/repo/package, NOT ~/social-autoposter); a $HOME
-# hardcode here silently no-ops on customer boxes (same bug twitter-backend.sh
-# fixed; see its header comment).
-_BH_REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-
-# Default harness URL - used by ensure_reddit_browser_for_backend +
-# cleanup_harness_tabs to decide whether we own this Chrome (and should
+# Default harness URL - used to decide whether we own this Chrome (and should
 # launch/clean it) or whether it is externally managed (AppMaker, BYO).
 _BH_REDDIT_DEFAULT_URL="http://127.0.0.1:9557"
+
+# Shared engine: _BH_REPO_DIR, hc_ensure_browser, hc_cleanup_tabs,
+# _resolve_chrome_bin, wedge detection, focus-safe launch.
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-common.sh"
 
 BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
 BROWSER BACKEND: reddit-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
@@ -121,127 +120,21 @@ BROWSER_HARNESS_EOF
 )
 
 cleanup_harness_tabs() {
-    # Close every CDP "page" tab except one. Same pattern as twitter/linkedin
-    # backend, scoped to the Reddit harness Chrome on port 9557.
-    #
-    # Health-check gate: 10s timeout + ONE retry; log skips so they are not silent.
-    local _probe="curl -sf --max-time 10 -o /dev/null http://127.0.0.1:9557/json/version"
-    if ! $_probe 2>/dev/null; then
-        sleep 1
-        if ! $_probe 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cleanup_harness_tabs: SKIPPED (reddit-harness CDP /json/version unreachable after 10s+retry)" >&2
-            return 0
-        fi
-    fi
-    BH_CLEANUP_PORT=9557 python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
-}
-
-_resolve_chrome_bin() {
-    # Auto-detect Chrome/Chromium so the same script launches the harness on
-    # macOS dev boxes AND Linux VMs. Override with BH_CHROME_BIN.
-    if [ -n "${BH_CHROME_BIN:-}" ] && [ -x "$BH_CHROME_BIN" ]; then
-        echo "$BH_CHROME_BIN"; return 0
-    fi
-    for _p in \
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-        "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-        "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable" \
-        "/usr/bin/chromium" "/usr/bin/chromium-browser" "/snap/bin/chromium"
-    do
-        if [ -x "$_p" ]; then echo "$_p"; return 0; fi
-    done
-    for _n in google-chrome google-chrome-stable chromium chromium-browser; do
-        _which=$(command -v "$_n" 2>/dev/null) && [ -n "$_which" ] && { echo "$_which"; return 0; }
-    done
-    echo ""; return 1
+    hc_cleanup_tabs 9557 reddit-harness
 }
 
 ensure_reddit_browser_for_backend() {
-    # AppMaker / BYO Chrome: REDDIT_CDP_URL points at something other than our
-    # default harness URL. Don't touch that browser; just probe it and bail.
-    if [ "${REDDIT_CDP_URL:-$_BH_REDDIT_DEFAULT_URL}" != "$_BH_REDDIT_DEFAULT_URL" ]; then
-        local _ext_url="${REDDIT_CDP_URL}"
-        if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
-            return 0
-        fi
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: REDDIT_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
-        return 1
-    fi
-    # Probe + launch harness Chrome on port 9557 if needed.
-    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Reddit harness Chrome down on port 9557, launching..." >&2
-        local _chrome_bin
-        _chrome_bin=$(_resolve_chrome_bin)
-        if [ -z "$_chrome_bin" ]; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
-            return 1
-        fi
-        # On Linux + no display, run headless. On root, add --no-sandbox.
-        local _extra=()
-        case "$(uname -s)" in
-            Linux)
-                _extra+=(--no-sandbox --disable-dev-shm-usage)
-                if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-                    _extra+=(--headless=new --disable-gpu)
-                fi
-                ;;
-            Darwin)
-                # Default position = the Reddit browser's current off-screen
-                # spot (captured 2026-05-29); overridable via BH_REDDIT_WINDOW_POS.
-                _extra+=(--window-position="${BH_REDDIT_WINDOW_POS:-2131,-1032}")
-                _extra+=(--window-size="${BH_REDDIT_WINDOW_SIZE:-911,1016}")
-                ;;
-        esac
-        # Self-heal (2026-06-03): reap any stale Chrome holding THIS profile dir
-        # but not answering CDP on our port, else the relaunch hands off via the
-        # SingletonLock and loops "failed to start within 12s". Exact-dir match
-        # (trailing space) keeps this scoped to reddit-harness only. See
-        # twitter-backend.sh for the regression that motivated this.
-        local _prof_dir="$HOME/.claude/browser-profiles/reddit-harness"
-        local _stale_pids
-        _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
-        if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
-            kill $_stale_pids 2>/dev/null || true
-            sleep 2
-            _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
-            [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
-            rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
-        fi
-        # Spawn via the SHARED launcher (skill/lib/browser-launch.sh): clean-
-        # exit stamp (no Aw-Snap restore), `open -n -g` on macOS (no focus
-        # steal, out of this job's pgroup), setsid exec fallback elsewhere.
-        # This backend previously used a bare exec and had NONE of those
-        # protections (2026-07-13 consolidation).
-        # shellcheck disable=SC1091
-        source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/browser-launch.sh"
-        launch_harness_chrome "$_chrome_bin" "$_prof_dir" \
-            --remote-debugging-port=9557 \
-            --user-data-dir="$HOME/.claude/browser-profiles/reddit-harness" \
-            --no-first-run --no-default-browser-check \
-            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
-            --disable-backgrounding-occluded-windows \
-            "${_extra[@]}" \
-            about:blank
-        for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null && break
-            sleep 1
-        done
-        if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9557/json/version 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: Reddit harness Chrome failed to start within 12s" >&2
-            return 1
-        fi
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Reddit harness Chrome up on port 9557" >&2
-    fi
-    # Always close leftover tabs from prior runs. Safe under acquire_lock
-    # "reddit-browser" serialization.
-    cleanup_harness_tabs
+    HC_PLATFORM=reddit \
+    HC_PORT=9557 \
+    HC_PROFILE_DIR="$HOME/.claude/browser-profiles/reddit-harness" \
+    HC_DEFAULT_URL="$_BH_REDDIT_DEFAULT_URL" \
+    HC_CDP_URL="${REDDIT_CDP_URL:-$_BH_REDDIT_DEFAULT_URL}" \
+    HC_LAUNCH_URL="about:blank" \
+    HC_WINDOW_POS="${BH_REDDIT_WINDOW_POS:-2131,-1032}" \
+    HC_WINDOW_SIZE="${BH_REDDIT_WINDOW_SIZE:-911,1016}" \
+    hc_ensure_browser
 }
 
 defer_if_foreign_for_backend() {
-    # Harness Chrome accepts multiple concurrent CDP clients on the same
-    # reddit-harness profile, so a foreign MCP wrapper cannot cause
-    # SingletonLock contention. Always return 1 (do not defer).
-    return 1
+    hc_defer_if_foreign
 }
