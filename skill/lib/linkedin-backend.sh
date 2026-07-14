@@ -333,52 +333,21 @@ ensure_linkedin_browser_for_backend() {
         # The occlusion/backgrounding flags matter: the window sits offscreen,
         # and without them Chrome stops laying out SPA-rendered content, so
         # every element measures 0x0 and clicks become impossible (2026-07-03).
-        # Mark the profile's last exit as clean BEFORE launching, so a
-        # SIGKILLed Chrome doesn't session-restore a crashed "Aw, Snap" tab on
-        # relaunch (same fix + rationale as twitter-backend.sh, 2026-07-13).
-        "${S4L_PYTHON:-python3}" -c 'import json, os, sys
-p = os.path.join(sys.argv[1], "Default", "Preferences")
-try:
-    d = json.load(open(p))
-except Exception:
-    raise SystemExit(0)
-prof = d.setdefault("profile", {})
-prof["exit_type"] = "Normal"
-prof["exited_cleanly"] = True
-json.dump(d, open(p, "w"))' "$_prof_dir" 2>/dev/null || true
-        # Launch flags shared by both spawn paths below.
-        local _li_launch_args=(
-            --remote-debugging-port=9556
-            --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin"
-            --no-first-run --no-default-browser-check
-            --disable-features=ChromeWhatsNewUI
-            --disable-backgrounding-occluded-windows
-            --disable-renderer-backgrounding
-            --disable-background-timer-throttling
-            "${_extra[@]}"
+        # Spawn via the SHARED launcher (skill/lib/browser-launch.sh) — see
+        # that file for the clean-exit stamp + no-focus-steal + detach
+        # rationale. Do NOT hand-roll launch logic per backend.
+        # shellcheck disable=SC1091
+        source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/browser-launch.sh"
+        launch_harness_chrome "$_chrome_bin" "$_prof_dir" \
+            --remote-debugging-port=9556 \
+            --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
+            --no-first-run --no-default-browser-check \
+            --disable-features=ChromeWhatsNewUI \
+            --disable-backgrounding-occluded-windows \
+            --disable-renderer-backgrounding \
+            --disable-background-timer-throttling \
+            "${_extra[@]}" \
             about:blank
-        )
-        # macOS + .app-bundled Chrome: `open -n -g` launches a NEW instance
-        # WITHOUT stealing the user's focus (a directly-exec'd Chrome always
-        # activates itself), and LaunchServices parents it outside this launchd
-        # job's process group. Same fix + rationale as twitter-backend.sh
-        # (2026-07-13). Fallback: direct exec in a new session — os.setsid so
-        # Chrome escapes the job's process group; launchd SIGKILLs a transient
-        # job's whole pgroup when the shell exits, and `disown` does not change
-        # the pgid (2026-07-12).
-        local _li_app_bundle=""
-        case "$_chrome_bin" in
-            *.app/Contents/MacOS/*) _li_app_bundle="${_chrome_bin%%/Contents/MacOS/*}" ;;
-        esac
-        if [ "$(uname -s)" = "Darwin" ] && [ -n "$_li_app_bundle" ] && [ -d "$_li_app_bundle" ]; then
-            open -n -g -a "$_li_app_bundle" --args "${_li_launch_args[@]}" >/dev/null 2>&1 || true
-        else
-            "${S4L_PYTHON:-python3}" -c 'import os,sys
-os.setsid()
-os.execv(sys.argv[1], sys.argv[1:])' \
-                "$_chrome_bin" "${_li_launch_args[@]}" >/dev/null 2>&1 &
-            disown
-        fi
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null && break
             sleep 1
