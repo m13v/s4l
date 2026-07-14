@@ -1477,8 +1477,76 @@ Do NOT describe what you are doing. Do NOT narrate. Just search, draft, output J
 """
 
 
+def run_claude_structured(prompt, timeout=1200):
+    """Run the draft turn through scripts/run_claude.sh, tag post-reddit-draft.
+
+    The tag is mapped in claude_job.py TAG_TO_TYPE, so run_claude.sh routes it
+    through the file job queue and the s4l-worker scheduled task performs the
+    LLM turn (mapped tags deliberately have NO claude -p fallback: on a box
+    with no live worker the provider times out with exit 79 and this phase
+    skips, exactly like the twitter draft lane when Claude Desktop is closed).
+    run_claude.sh also owns session accounting (claude_sessions cost rows); it
+    honors our pre-set CLAUDE_SESSION_ID so posts keep their attribution.
+
+    Returns (ok, result, usage): result is the parsed structured_output dict
+    (posts/rejects per REDDIT_DRAFT_SCHEMA), or raw text when the envelope
+    carried an unparseable result (caller falls back to the legacy JSONL
+    regex parsers), or an error string when ok is False.
+    """
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0,
+             "cache_create": 0, "cost_usd": 0.0}
+    session_id = str(uuid.uuid4())
+    usage["session_id"] = session_id
+    # Inherited by run_claude.sh (which honors a caller-set session id) and by
+    # the log_post -> reddit_tools.py chain for posts.claude_session_id.
+    os.environ["CLAUDE_SESSION_ID"] = session_id
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)  # claude uses OAuth, not API key
+    cmd = ["bash", RUN_CLAUDE_SH, "post-reddit-draft", "-p",
+           "--output-format", "json", "--json-schema", REDDIT_DRAFT_SCHEMA]
+    try:
+        proc = subprocess.run(cmd, input=prompt, env=env, text=True,
+                              capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "TIMEOUT", usage
+    # run_claude.sh narrates on stderr (queue enqueue, quota stamps); forward
+    # into the run log so cycle debugging keeps its trail.
+    for ln in (proc.stderr or "").splitlines():
+        print(f"[post_reddit] {ln[:300]}", file=sys.stderr, flush=True)
+    text = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        # exit 79 = queue provider timeout (no live worker) — the standard
+        # claude-blocked skip code; the caller records draft_error and the
+        # candidates stay pending for the next cycle.
+        return False, (text[:2000] or f"exit {proc.returncode}"), usage
+    try:
+        envlp, _ = json.JSONDecoder().raw_decode(text)
+    except Exception as e:
+        return False, f"envelope parse error: {e}: {text[:500]}", usage
+    try:
+        usage["cost_usd"] = float(envlp.get("total_cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    so = envlp.get("structured_output")
+    if so is None:
+        so = envlp.get("result")
+    if isinstance(so, str):
+        try:
+            so = json.loads(so)
+        except (json.JSONDecodeError, TypeError):
+            pass  # caller regex-parses the raw text
+    return True, so, usage
+
+
 def run_claude(prompt, timeout=600):
     """Run claude -p in bare mode with Bash tool only (no MCP needed).
+
+    DEPRECATED 2026-07-14: the draft phase (the only caller) moved to
+    run_claude_structured, which routes through run_claude.sh -> the
+    claude_job.py queue (tag post-reddit-draft) so the s4l-worker scheduled
+    task performs the turn. Kept for reference and emergency manual use only;
+    do NOT wire new callers to this (it bypasses session cost accounting and
+    the queue seam).
 
     Streams output in real time to stderr (picked up by tee in the shell wrapper)
     while collecting the full output for JSON parsing.
@@ -2321,8 +2389,29 @@ def _draft_iteration(plan, config, reddit_username):
     # the draft phase (the discover phase loads it for the search step).
     # Pass empty string; the trace audit still captures top_performers
     # and recent_comments, which is the bulk of the few-shot context.
+    # Tool-free turn (2026-07-14): fetch every thread HERE and inline the
+    # digests, so the draft prompt is pure text->JSON and queue-routable.
+    # Dead threads (archived/locked/blocked) are marked permanently failed
+    # now instead of at post time; transient fetch failures stay pending
+    # (dropped from THIS cycle only; Phase 0 salvage retries them).
+    _before_prefetch = len(candidates)
+    digests, dropped = _prefetch_thread_digests(candidates, reddit_username)
+    for _c, _why in dropped:
+        _url = _c.get("thread_url", "")
+        print(f"[post_reddit] prefetch drop {_url}: {_why}")
+        _db_mark_candidate_attempt(_url, reason=f"prefetch_{_why}", permanent=True)
+    candidates = [c for c in candidates if c.get("thread_url") in digests]
+    print(f"[post_reddit] prefetch: {len(candidates)} thread(s) inlined, "
+          f"{len(dropped)} dropped dead, "
+          f"{_before_prefetch - len(candidates) - len(dropped)} transient-skipped")
+    if not candidates:
+        plan = dict(plan)
+        plan["decisions"] = []
+        plan["phase"] = "draft"
+        return plan
+
     prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                                style_assignment=style_assignment)
+                                style_assignment=style_assignment, digests=digests)
 
     # Build the generation_trace audit blob: what Claude is about to see.
     # Captured BEFORE the Claude call so we never end up with a post row
@@ -2354,17 +2443,31 @@ def _draft_iteration(plan, config, reddit_username):
 
     print(f"[post_reddit] Starting draft session for {len(candidates)} thread(s)...")
     start = time.time()
-    ok, output, usage = run_claude(prompt, timeout=600)
+    ok, output, usage = run_claude_structured(prompt, timeout=1200)
     elapsed = time.time() - start
     print(f"[post_reddit] Draft finished in {elapsed:.0f}s (${usage['cost_usd']:.4f})")
 
     if not ok:
-        print(f"[post_reddit] Draft FAILED: {output[:300]}")
+        print(f"[post_reddit] Draft FAILED: {str(output)[:300]}")
         plan["draft_error"] = "claude_failed"
         plan["draft_cost"] = usage["cost_usd"]
         return plan
 
-    drafted = parse_post_decisions(output)
+    if isinstance(output, dict):
+        # Queue/schema path: posts[] mirrors the legacy JSONL post-line shape.
+        drafted = []
+        _seen_urls = set()
+        for _d in output.get("posts") or []:
+            if not isinstance(_d, dict):
+                continue
+            _url = _d.get("thread_url", "")
+            if _d.get("text") and _url and _url not in _seen_urls:
+                _d.setdefault("action", "post")
+                drafted.append(_d)
+                _seen_urls.add(_url)
+    else:
+        # Legacy fallback: the envelope carried free text; regex-parse it.
+        drafted = parse_post_decisions(output or "")
     print(f"[post_reddit] Draft produced {len(drafted)} post(s)")
 
     # 2026-05-11: parse optional action=reject lines and forward any
@@ -2374,7 +2477,10 @@ def _draft_iteration(plan, config, reddit_username):
     # here MUST NOT kill the draft phase; the post pipeline is the critical
     # path. See parse_reject_decisions / _propose_excludes_from_rejects.
     try:
-        rejects = parse_reject_decisions(output)
+        if isinstance(output, dict):
+            rejects = [r for r in (output.get("rejects") or []) if isinstance(r, dict)]
+        else:
+            rejects = parse_reject_decisions(output or "")
         if rejects:
             cand_by_url = {c.get("thread_url"): c for c in candidates if c.get("thread_url")}
             counters = _propose_excludes_from_rejects(
@@ -2426,6 +2532,12 @@ def _draft_iteration(plan, config, reddit_username):
     plan["decisions"] = merged
     plan["draft_cost"] = usage["cost_usd"]
     plan["draft_session_id"] = usage.get("session_id")
+    # Also stamp the key _post_iteration actually reads: in two-phase mode
+    # (draft in process A, post in process B) it re-exports
+    # plan["session_id"] as CLAUDE_SESSION_ID, and this was never set after
+    # discover went programmatic (session attribution silently dropped on
+    # the two-phase path until 2026-07-14).
+    plan["session_id"] = usage.get("session_id")
     plan["phase"] = "draft"
     # Stash the picker assignment so _post_iteration (which runs in a
     # separate process via JSON-serialized plan) can pass it to
