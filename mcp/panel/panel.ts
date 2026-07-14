@@ -721,7 +721,8 @@ splitSlider.addEventListener("change", async () => {
 let postingVolumeLoaded = false;
 function renderPostingVolume(data: any) {
   if (!data || data.error) return;
-  const mode = data.mode || "";
+  // No "default" state: the API resolves unset to Steady (medium).
+  const mode = data.mode || "medium";
   postingVolumeSelect.value = mode;
   const rates: any[] = Array.isArray(data.rates) ? data.rates : [];
   // Display names only; internal values stay high|medium|low (API enum).
@@ -734,9 +735,7 @@ function renderPostingVolume(data: any) {
       opt.textContent = `${label} (~${n >= 10 ? Math.round(n) : n}/day)`;
     }
   }
-  postingVolumeDesc.textContent = mode
-    ? "How many drafts per day the cycle produces. Applies from the next cycle."
-    : "How many drafts per day the cycle produces.";
+  postingVolumeDesc.textContent = "How many drafts per day the cycle produces.";
 }
 async function loadPostingVolume() {
   try {
@@ -748,7 +747,7 @@ async function loadPostingVolume() {
   }
 }
 postingVolumeSelect.addEventListener("change", async () => {
-  const mode = postingVolumeSelect.value || "default";
+  const mode = postingVolumeSelect.value;
   postingVolumeSelect.disabled = true;
   try {
     const res = await call("posting_volume", { action: "set", mode });
@@ -756,11 +755,7 @@ postingVolumeSelect.addEventListener("change", async () => {
       log("Couldn’t change posting volume: " + res.error);
     } else {
       const friendly: Record<string, string> = { high: "Aggressive", medium: "Steady", low: "Chill" };
-      log(
-        mode === "default"
-          ? "Posting volume back to the default cycle setting."
-          : `Posting volume set to ${friendly[mode] || mode}. Applies from the next cycle.`
-      );
+      log(`Posting volume set to ${friendly[mode] || mode}. Applies from the next cycle.`);
     }
     await loadPostingVolume(); // re-sync to server truth either way
   } catch (e: any) {
