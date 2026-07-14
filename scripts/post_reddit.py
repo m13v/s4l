@@ -31,11 +31,45 @@ from http_api import api_get, api_post, api_patch
 from author_history_block import render as _render_author_history
 from project_topics import topics_for_project
 
-REPO_DIR = os.path.expanduser("~/social-autoposter")
+# Honor S4L_REPO_DIR so managed-package installs resolve helper scripts inside
+# the package instead of a nonexistent ~/social-autoposter (the same $HOME
+# hardcode class that silently no-op'd session restore on customer boxes).
+REPO_DIR = os.path.expanduser(os.environ.get("S4L_REPO_DIR") or "~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 REDDIT_BROWSER = os.path.join(REPO_DIR, "scripts", "reddit_browser.py")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 REDDIT_TOOLS = os.path.join(REPO_DIR, "scripts", "reddit_tools.py")
+RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
+
+# JSON schema for the queue-routed draft turn (tag post-reddit-draft ->
+# claude_job.py type reddit-draft). One object, two arrays; posts[] entries
+# mirror the legacy JSONL "action":"post" line fields, rejects[] entries feed
+# _propose_excludes_from_rejects (thread_url + reason + proposed_excludes).
+REDDIT_DRAFT_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "posts": {"type": "array", "items": {"type": "object", "properties": {
+            "thread_url": {"type": "string"},
+            "reply_to_url": {"type": ["string", "null"]},
+            "text": {"type": "string"},
+            "thread_author": {"type": "string"},
+            "thread_title": {"type": "string"},
+            "engagement_style": {"type": "string"},
+            "search_topic": {"type": "string"},
+            "new_style": {"type": ["object", "null"], "properties": {
+                "description": {"type": "string"},
+                "example": {"type": "string"},
+            }},
+        }, "required": ["thread_url", "text", "thread_author",
+                        "thread_title", "engagement_style"]}},
+        "rejects": {"type": "array", "items": {"type": "object", "properties": {
+            "thread_url": {"type": "string"},
+            "reason": {"type": "string"},
+            "proposed_excludes": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["thread_url", "reason"]}},
+    },
+    "required": ["posts", "rejects"],
+})
 
 # Interpreter every child subprocess must run under. A bare PYTHON resolved
 # to the user's system python, which lacks the pipeline deps (Playwright and
@@ -1029,13 +1063,87 @@ no candidate lines, no commentary about thread content (you don't see any).
 """
 
 
+def _truncate(s, n):
+    s = s or ""
+    return s if len(s) <= n else s[:n] + "..."
+
+
+def _prefetch_thread_digests(candidates, reddit_username=None):
+    """Pre-fetch thread content for the draft prompt (2026-07-14).
+
+    The draft turn used to be agentic: Claude ran `reddit_tools.py fetch` via
+    the Bash tool per candidate. Queue routing (claude_job.py, tag
+    post-reddit-draft) only carries pure text->JSON turns, so the fetches now
+    happen HERE, in Python, and the digests are inlined into the prompt —
+    the same tool-free conversion the twitter Phase 2b prep got on 2026-06-26.
+    Same access pattern as before (reddit_tools fetch rides the harness
+    Chrome's CDP, which is multi-client safe), just a different caller.
+
+    Returns (digests, dropped): digests maps thread_url -> digest text for
+    candidates worth drafting; dropped is a list of (candidate, reason) for
+    threads that can no longer be posted to (archived/locked/blocked) so the
+    caller marks them permanently failed. Transient fetch failures land in
+    NEITHER (candidate stays pending; Phase 0 salvage retries next cycle).
+    """
+    digests = {}
+    dropped = []
+    our_name = (reddit_username or "").lower()
+    for c in candidates:
+        url = c.get("thread_url") or ""
+        if not url:
+            continue
+        try:
+            proc = subprocess.run(
+                [PYTHON, REDDIT_TOOLS, "fetch", url],
+                capture_output=True, text=True, timeout=90,
+            )
+            data = json.loads((proc.stdout or "").strip() or "{}")
+        except Exception as e:
+            print(f"[post_reddit] prefetch FAILED (transient) {url}: {e}",
+                  file=sys.stderr, flush=True)
+            continue
+        err = data.get("error")
+        if err:
+            if err in ("thread_archived", "thread_locked", "subreddit_blocked"):
+                dropped.append((c, err))
+            else:
+                print(f"[post_reddit] prefetch error (transient) {url}: {err}",
+                      file=sys.stderr, flush=True)
+            continue
+        thread = data.get("thread") or {}
+        comments = data.get("comments") or []
+        lines = [
+            f"subreddit: {thread.get('subreddit', '')}  score: {thread.get('score', 0)}"
+            f"  comments: {thread.get('num_comments', 0)}",
+            f"OP u/{thread.get('author', '')}: {thread.get('title', '')}",
+        ]
+        selftext = (thread.get("selftext") or "").strip()
+        if selftext:
+            lines.append(_truncate(selftext, 1500))
+        already = False
+        if comments:
+            lines.append("top comments:")
+            for cm in comments[:12]:
+                author = cm.get("author") or ""
+                if our_name and author.lower() == our_name:
+                    already = True
+                body = _truncate((cm.get("body") or "").strip().replace("\n", " "), 280)
+                lines.append(f"  u/{author} ({cm.get('score', 0)}): {body}")
+        if already:
+            lines.append("NOTE: one of OUR accounts already commented in this"
+                         " thread (astroturf OMIT rule applies).")
+        digests[url] = "\n".join(lines)
+    return digests, dropped
+
+
 def build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                       style_assignment=None):
+                       style_assignment=None, digests=None):
     """DRAFT phase: write comments only for ripen-survivors.
 
     `candidates` is the list of decisions that passed the delta gate, each
-    annotated with ripen data (delta_up, delta_comments, composite). Claude
-    fetches each thread, reads context, then writes the best comment.
+    annotated with ripen data (delta_up, delta_comments, composite). Thread
+    content is pre-fetched by _prefetch_thread_digests and inlined per
+    candidate (tool-free turn since 2026-07-14; the model must not fetch).
 
     2026-05-19: `style_assignment` is the pick_style_for_post() result the
     discover phase already wrote into the plan JSON. Forwarding it here so
