@@ -216,6 +216,19 @@ button.section-row-toggle:hover .section-label { color: var(--fg); }
 .lane-note { font-size: 12px; color: var(--muted); }
 .lane-note:empty { display: none; }
 
+/* Posting-volume dropdown: same grayscale weight class as the switches. */
+#posting-volume-select {
+  flex: none;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--fill);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+#posting-volume-select:disabled { opacity: 0.5; cursor: default; }
+
 /* Grayscale switch: track = border tone off / fg on, knob slides. */
 button.switch {
   flex: none;
