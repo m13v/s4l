@@ -1459,7 +1459,7 @@ async function postApproved(batchId: string, plan: Plan) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     fs.writeFileSync(
       path.join(postLogDir, `post-${stamp}.log`),
-      `# post_drafts batch=${batchId} approved=${approved.length} exit=${res.code} ` +
+      `# post_drafts batch=${batchId} approved=${approvedTwitter.length} exit=${res.code} ` +
         `shell_lock=${heldShellLock}\n\n=== stdout ===\n${res.stdout}\n\n=== stderr ===\n${res.stderr}\n`
     );
   } catch {
@@ -1482,7 +1482,7 @@ async function postApproved(batchId: string, plan: Plan) {
     summObj && typeof summObj.posted === "number"
       ? (summObj.posted as number)
       : res.code === 0 && !summObj
-        ? approved.length
+        ? approvedTwitter.length
         : 0;
   // Mark candidates according to the poster's per-candidate outcome. This keeps
   // the review queue honest: posted drafts disappear as posted, terminal skips
@@ -1503,14 +1503,14 @@ async function postApproved(batchId: string, plan: Plan) {
         .filter((r) => r.candidate_id && ["posted", "skipped", "failed"].includes(r.outcome))
     : parsePostCandidateResults(res.stdout);
   const approvedById = new Map<string, PlanCandidate>();
-  approved.forEach((c) => {
+  approvedTwitter.forEach((c) => {
     if (c.candidate_id !== undefined && c.candidate_id !== null)
       approvedById.set(String(c.candidate_id), c);
   });
   let touchedPlan = false;
   if (resultRows.length) {
     resultRows.forEach((r, idx) => {
-      const c = approvedById.get(r.candidate_id) || approved[idx];
+      const c = approvedById.get(r.candidate_id) || approvedTwitter[idx];
       if (!c) return;
       if (r.outcome === "posted") {
         c.posted = true;
@@ -1526,7 +1526,7 @@ async function postApproved(batchId: string, plan: Plan) {
   } else if (realPosted > 0 || (res.code === 0 && !summObj)) {
     // Legacy fallback for older poster output without parseable per-candidate
     // lines. Mark only when we have no finer-grained signal.
-    for (const c of approved) c.posted = true;
+    for (const c of approvedTwitter) c.posted = true;
     touchedPlan = true;
   }
   // Reddit stamps (set in the reddit drain above) merge alongside the twitter
@@ -1552,11 +1552,11 @@ async function postApproved(batchId: string, plan: Plan) {
   const hasRealFailure = res.code !== 0 || Boolean(summObj?.failure_reasons);
   if (hasRealFailure) {
     captureError(
-      new Error(`post_drafts: ${realPosted}/${approved.length} posted (exit=${res.code})`),
+      new Error(`post_drafts: ${realPosted}/${approvedTwitter.length} posted (exit=${res.code})`),
       {
         component: "post",
         exit_code: String(res.code),
-        attempted: String(approved.length),
+        attempted: String(approvedTwitter.length),
         posted: String(realPosted),
         failure_reasons: String((summObj?.failure_reasons as string) || ""),
         skip_reasons: String((summObj?.skip_reasons as string) || ""),
@@ -1568,9 +1568,12 @@ async function postApproved(batchId: string, plan: Plan) {
   void flushLogs();
   return {
     attempted: approved.length,
-    posted: realPosted,
+    posted: realPosted + redditPosted,
     exit_code: res.code,
-    summary,
+    summary:
+      approvedReddit.length > 0
+        ? { twitter: summary, reddit: { posted: redditPosted, failed: redditFailed } }
+        : summary,
     stderr_tail: res.stderr.split("\n").slice(-8).join("\n"),
   };
 }
@@ -2795,6 +2798,31 @@ tool(
       }
       c.approved = false;
       rejected.push(n);
+      // Reddit cards: also retire the reddit_candidates row (permanent
+      // mark_attempt) so Phase 0 salvage never re-pulls and re-drafts a
+      // thread a human just rejected. Twitter gets this for free via the
+      // review-events row flip; reddit's id-keyed flows are deliberately
+      // firewalled (rd- prefixed ids), so this direct by-thread-url PATCH is
+      // the reddit equivalent. Fire-and-forget: a failure leaves the row
+      // pending, which at worst re-drafts one card next cycle.
+      const ccr = c as unknown as Record<string, unknown>;
+      if (ccr.platform === "reddit" && (ccr.thread_url || ccr.candidate_url)) {
+        const rejUrl = String(ccr.thread_url || ccr.candidate_url);
+        void runPython(
+          "-c",
+          [
+            "import sys; sys.path.insert(0, 'scripts')\n" +
+              "from http_api import api_patch\n" +
+              "api_patch('/api/v1/reddit-candidates/by-thread-url', " +
+              "{'thread_url': sys.argv[1], 'action': 'mark_attempt', " +
+              "'reason': 'human_rejected', 'permanent': True}, ok_on_404=True)",
+            rejUrl,
+          ],
+          { timeoutMs: 30_000 }
+        ).catch(() => {
+          /* best effort */
+        });
+      }
     });
 
     // Apply edits first; an edited draft is always posted.
