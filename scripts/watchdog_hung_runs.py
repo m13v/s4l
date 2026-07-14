@@ -37,12 +37,18 @@ MAX_AGE_SEC = 45 * 60
 # whose heartbeat has gone stale means the holder is wedged mid-browser-work
 # (2026-07-13: pid 1380 hung 60+ min in Phase 2b-prep media capture during a
 # network flap, blocking every peer pipeline until the 180-min age cap).
-# Thresholds: WARN at 30 min stale (log-only). KILL at 90 min stale — above
-# the gen phase's documented 60-min worst-case ceiling, so a legit long hold
-# with no python browser invocations can't be false-killed — and ONLY when
-# peers are actually queued waiting (an unwanted lock harms nobody). The
-# 2026-07-12 lock.sh signal fix makes the TERM safe: the holder releases its
-# locks and exits instead of continuing lock-protected work.
+# Thresholds: WARN at 10 min stale (log-only). KILL at 15 min stale, and ONLY
+# when peers are actually queued waiting (an unwanted lock harms nobody).
+# Retuned 2026-07-14 from 30/90 min: the original 90 was sized around a
+# "documented 60-min gen phase ceiling" that run logs disprove (media capture
+# is ~2 min; the long pole is lock WAIT, which doesn't hold the lock), and
+# during the Chrome 150 crash-storm the 90-min heal lost the race against a
+# roughly-hourly wedge cadence, leaving the pipeline down all night
+# (2026-07-13). Heartbeat is touched on attach and every page network event,
+# so any healthy browser hold stays fresh; 15 min of zero activity while
+# peers queue is a wedge. The 2026-07-12 lock.sh signal fix makes the TERM
+# safe: the holder releases its locks and exits instead of continuing
+# lock-protected work.
 # ONLY the heartbeat-instrumented platforms. linkedin-browser holders write no
 # heartbeat (the linkedin pipeline drives Chrome via the bh harness, not a
 # shared python lib), so on pid-file age alone a healthy long linkedin run
@@ -52,9 +58,9 @@ BROWSER_LOCKS_WATCHED = (
     "/tmp/social-autoposter-twitter-browser.lock",
     "/tmp/social-autoposter-reddit-browser.lock",
 )
-HB_WARN_SEC = 30 * 60
-HB_KILL_SEC = 90 * 60
-HB_REWARN_SEC = 30 * 60  # re-log the warning at most this often per holder
+HB_WARN_SEC = 10 * 60
+HB_KILL_SEC = 15 * 60
+HB_REWARN_SEC = 10 * 60  # re-log the warning at most this often per holder
 # Per-script cap overrides for pipelines that legitimately run longer than
 # the 45 min global (stats.py over ~4-5k posts + rate-limit sleeps).
 # Key is (script_file, platform_or_None). Lookup order: (script, platform),
