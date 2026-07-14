@@ -53,6 +53,10 @@
       "description": "Pause or resume S4L"
     },
     {
+      "name": "posting_volume",
+      "description": "Read or set posting volume (high / medium / low)"
+    },
+    {
       "name": "report_diagnosis",
       "description": "Send a diagnosis report to the S4L developers"
     },
