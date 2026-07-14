@@ -3062,6 +3062,57 @@ tool(
   }
 );
 
+// ---- posting_volume: per-install posting-volume mode (virality bar) --------
+// Server-side throttle (2026-07-13): installations.posting_mode maps to a
+// virality-bar percentile on the API (high~0.90, medium~0.97, low~0.995) and
+// OVERRIDES the cycle driver's hardcoded percentile, so a change applies on
+// the next cycle with no client update. 'get' also returns per-mode estimated
+// posts/day replayed from THIS install's trailing-7d candidate pool.
+tool(
+  "posting_volume",
+  {
+    title: "Read or set posting volume (high / medium / low)",
+    description:
+      "Read or set this install's posting-volume mode, the quality bar that decides how many drafts " +
+      "per day the twitter cycle produces. Three modes: high (~100+ posts/day), medium (~30/day), " +
+      "low (~5/day, only the very best candidates); 'default' clears the override so the cycle's " +
+      "built-in setting applies. action:'get' returns the current mode plus per-mode estimated " +
+      "posts/day computed from this install's own recent candidate pool (show those numbers when " +
+      "the user is choosing). Use when the user asks to post more, post less, slow down, raise the " +
+      "quality bar, or change posting volume. Takes effect on the next cycle; in draft-review mode " +
+      "it equally paces how many review cards appear.",
+    inputSchema: {
+      action: z.enum(["get", "set"]).default("get").describe("get = read mode + rates; set = change it"),
+      mode: z
+        .enum(["high", "medium", "low", "default"])
+        .optional()
+        .describe("Required for action:'set'. 'default' clears the override."),
+    },
+  },
+  async (args: any) => {
+    const action = args.action || "get";
+    if (action === "set") {
+      if (!args.mode) {
+        return jsonContent({ error: "mode is required for action:'set' (high|medium|low|default)" });
+      }
+      const r = await runPython("scripts/s4l_posting_mode.py", ["set", String(args.mode)], {
+        timeoutMs: 30_000,
+      });
+      try {
+        return jsonContent(JSON.parse((r.stdout || "").trim()));
+      } catch {
+        return jsonContent({ error: `posting-mode set failed: ${(r.stderr || r.stdout || "").slice(0, 300)}` });
+      }
+    }
+    const r = await runPython("scripts/s4l_posting_mode.py", ["get"], { timeoutMs: 30_000 });
+    try {
+      return jsonContent(JSON.parse((r.stdout || "").trim()));
+    } catch {
+      return jsonContent({ error: `posting-mode get failed: ${(r.stderr || r.stdout || "").slice(0, 300)}` });
+    }
+  }
+);
+
 // ---- pause_s4l: temporarily stop drafting/posting, reversibly --------------
 // The lighter alternative to Quit: unloads only the launchd jobs that scan,
 // draft, and post (plus their support daemons), leaving Claude Desktop, the
