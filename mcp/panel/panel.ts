@@ -713,6 +713,61 @@ splitSlider.addEventListener("change", async () => {
   }
 });
 
+// Posting volume: server-side per-install throttle for the twitter cycle's
+// virality bar (installations.posting_mode on s4l.ai). Loaded ONCE at boot
+// (it is a network GET through the posting_volume tool, so it stays out of
+// the snapshot refresh loop) and re-synced after every change. Option labels
+// pick up this install's own estimated posts/day from the rates payload.
+let postingVolumeLoaded = false;
+function renderPostingVolume(data: any) {
+  if (!data || data.error) return;
+  const mode = data.mode || "";
+  postingVolumeSelect.value = mode;
+  const rates: any[] = Array.isArray(data.rates) ? data.rates : [];
+  for (const r of rates) {
+    const opt = postingVolumeSelect.querySelector(`option[value="${r.mode}"]`) as HTMLOptionElement | null;
+    if (opt && r.est_posts_per_day !== null && r.est_posts_per_day !== undefined) {
+      const n = Number(r.est_posts_per_day);
+      const label = r.mode.charAt(0).toUpperCase() + r.mode.slice(1);
+      opt.textContent = `${label} (~${n >= 10 ? Math.round(n) : n}/day)`;
+    }
+  }
+  postingVolumeDesc.textContent = mode
+    ? "How many drafts per day the cycle produces. Applies from the next cycle."
+    : "How many drafts per day the cycle produces.";
+}
+async function loadPostingVolume() {
+  try {
+    const res = await call("posting_volume", { action: "get" });
+    postingVolumeLoaded = true;
+    renderPostingVolume(res);
+  } catch {
+    /* leave the static labels; a later change still works */
+  }
+}
+postingVolumeSelect.addEventListener("change", async () => {
+  const mode = postingVolumeSelect.value || "default";
+  postingVolumeSelect.disabled = true;
+  try {
+    const res = await call("posting_volume", { action: "set", mode });
+    if (res && res.error) {
+      log("Couldn’t change posting volume: " + res.error);
+    } else {
+      log(
+        mode === "default"
+          ? "Posting volume back to the default cycle setting."
+          : `Posting volume set to ${mode}. Applies from the next cycle.`
+      );
+    }
+    await loadPostingVolume(); // re-sync to server truth either way
+  } catch (e: any) {
+    log("Couldn’t change posting volume: " + (e?.message || e));
+    await loadPostingVolume();
+  } finally {
+    postingVolumeSelect.disabled = false;
+  }
+});
+
 // ---- collapsible sections -------------------------------------------------
 // The header setup dropdown and the "Last 7 days stats" header are the only two
 // expand/collapse controls. Both just flip a local boolean and re-apply it; the
@@ -1199,4 +1254,5 @@ app.connect().then(() => {
   if (ctx) applyHostContext(ctx);
   // Stats load from ontoolresult once the first snapshot confirms the runtime is
   // ready (the pipeline can't run without it), so nothing to do here.
+  if (!postingVolumeLoaded) void loadPostingVolume();
 });
