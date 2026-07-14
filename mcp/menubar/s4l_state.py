@@ -1055,6 +1055,10 @@ def review_drafts(plan, batch="review-queue"):
         out.append(
             {
                 "n": i + 1,  # 1-based, matches post_drafts numbering
+                # Platform tag (reddit cards, 2026-07-14): absent/None means
+                # twitter (every plan written before the field shipped). The
+                # card renders the platform mark and profile link from this.
+                "platform": c.get("platform"),
                 "thread_author": c.get("thread_author"),
                 "thread_text": c.get("thread_text"),
                 "reply_text": c.get("reply_text") or "",
