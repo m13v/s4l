@@ -50,11 +50,36 @@ def main() -> int:
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(url, timeout=timeout_ms)
             n_contexts = len(browser.contexts)
+            # Renderer-liveness sweep (2026-07-14). A tab whose RENDERER
+            # crashed ("Aw, Snap", error code 5) keeps its normal title/url in
+            # every CDP listing and the browser-level handshake stays green,
+            # so it sat visibly dead for 20+ minutes with nothing entitled to
+            # touch it — below the wedge detector (browser-level) and the
+            # stall guard (scan-progress-level). Probe each page with a
+            # trivial evaluate; on failure reload the tab IN PLACE, which
+            # spawns a fresh renderer. No kill, no new window, no focus
+            # change. Best-effort: revival must never fail the readiness
+            # verdict the wedge gate depends on.
+            revived = 0
+            for ctx in browser.contexts:
+                for page in ctx.pages:
+                    try:
+                        page.set_default_timeout(4000)
+                        page.evaluate("1")
+                    except Exception:
+                        try:
+                            page.reload(timeout=15000, wait_until="commit")
+                            revived += 1
+                        except Exception:
+                            pass
             browser.close()
-        print(json.dumps({
+        out = {
             "ready": True, "mode": "cdp", "contexts": n_contexts,
             "elapsed_s": round(time.time() - t0, 2),
-        }))
+        }
+        if revived:
+            out["revived"] = revived
+        print(json.dumps(out))
         return 0
     except Exception as e:
         print(json.dumps({
