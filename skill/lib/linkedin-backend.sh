@@ -1,6 +1,7 @@
 #!/bin/bash
 # linkedin-backend.sh - LinkedIn pipeline browser bootstrap (linkedin-harness,
-# mirrors twitter-backend.sh post the 2026-05-19 Twitter harness migration).
+# mirrors twitter-backend.sh post the 2026-05-19 Twitter harness migration;
+# the shared machinery lives in skill/lib/harness-common.sh since 2026-07-14).
 #
 # Source this AFTER lock.sh, BEFORE any acquire_lock / browser pre-flight /
 # claude -p subprocess calls. Sets these for the caller:
@@ -21,8 +22,10 @@
 #
 #   ensure_linkedin_browser_for_backend
 #     Call AFTER acquire_lock "linkedin-browser". Probes harness Chrome on
-#     port 9556 and launches it idempotently if down, then cleans leftover
-#     tabs from prior runs.
+#     port 9556 and launches it idempotently if down (wedge-aware, focus-safe;
+#     see harness-common.sh), then cleans leftover tabs from prior runs.
+#     Also acquires the cross-pipeline whole-run lock (rc=78 skip code) and
+#     runs the per-run logout detect-gate.
 #
 #   defer_if_foreign_for_backend [log_file]
 #     No-op. Harness CDP supports multiple concurrent clients on the same
@@ -54,12 +57,6 @@ fi
 # endpoint. Default 9556 (Mac harness Chrome, separate port from Twitter's 9555).
 export LINKEDIN_CDP_URL="${LINKEDIN_CDP_URL:-http://127.0.0.1:9556}"
 
-# Repo root for helper scripts. Honors S4L_REPO_DIR (managed installs run from
-# ~/.social-autoposter-mcp/repo/package, NOT ~/social-autoposter); a $HOME
-# hardcode here silently no-ops on customer boxes (same bug twitter-backend.sh
-# fixed; see its header comment).
-_BH_REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-
 # Resolve a Playwright-capable Python for the browser-path SERP search
 # (discover_linkedin_candidates.py CDP-attaches to the harness Chrome via
 # playwright.sync_api). The agent's bare `python3` resolves to whatever is
@@ -83,10 +80,14 @@ if [ -z "${LINKEDIN_DISCOVER_PYTHON:-}" ]; then
     export LINKEDIN_DISCOVER_PYTHON="${LINKEDIN_DISCOVER_PYTHON:-python3}"
 fi
 
-# Default harness URL - used by ensure_linkedin_browser_for_backend +
-# cleanup_harness_tabs to decide whether we own this Chrome (and should
+# Default harness URL - used to decide whether we own this Chrome (and should
 # launch/clean it) or whether it is externally managed (AppMaker, BYO).
 _BH_LINKEDIN_DEFAULT_URL="http://127.0.0.1:9556"
+
+# Shared engine: _BH_REPO_DIR, hc_ensure_browser, hc_cleanup_tabs,
+# _resolve_chrome_bin, wedge detection, focus-safe launch.
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-common.sh"
 
 BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
 BROWSER BACKEND: linkedin-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
@@ -152,21 +153,7 @@ BROWSER_HARNESS_EOF
 )
 
 cleanup_harness_tabs() {
-    # Close every CDP "page" tab except one. Same pattern as twitter-backend,
-    # but scoped to the LinkedIn harness Chrome on port 9556.
-    #
-    # Health-check gate: 10s timeout + ONE retry; log skips so they are not silent.
-    local _probe="curl -sf --max-time 10 -o /dev/null http://127.0.0.1:9556/json/version"
-    if ! $_probe 2>/dev/null; then
-        sleep 1
-        if ! $_probe 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cleanup_harness_tabs: SKIPPED (linkedin-harness CDP /json/version unreachable after 10s+retry)" >&2
-            return 0
-        fi
-    fi
-    # Reuse the same cleanup script as Twitter; it just iterates /json on the
-    # default port. Pass the port via env so a single script can serve both.
-    BH_CLEANUP_PORT=9556 python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
+    hc_cleanup_tabs 9556 linkedin-harness
 }
 
 # ===== Cross-pipeline whole-run lock (2026-05-30) =====
@@ -251,141 +238,21 @@ _acquire_linkedin_pipeline_lock() {
     done
 }
 
-_resolve_chrome_bin() {
-    # Auto-detect Chrome/Chromium so the same script launches the harness on
-    # macOS dev boxes AND Linux VMs. Override with BH_CHROME_BIN.
-    if [ -n "${BH_CHROME_BIN:-}" ] && [ -x "$BH_CHROME_BIN" ]; then
-        echo "$BH_CHROME_BIN"; return 0
-    fi
-    for _p in \
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-        "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-        "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable" \
-        "/usr/bin/chromium" "/usr/bin/chromium-browser" "/snap/bin/chromium"
-    do
-        if [ -x "$_p" ]; then echo "$_p"; return 0; fi
-    done
-    for _n in google-chrome google-chrome-stable chromium chromium-browser; do
-        _which=$(command -v "$_n" 2>/dev/null) && [ -n "$_which" ] && { echo "$_which"; return 0; }
-    done
-    echo ""; return 1
-}
-
-ensure_linkedin_browser_for_backend() {
-    # AppMaker / BYO Chrome: LINKEDIN_CDP_URL points at something other than our
-    # default harness URL. Don't touch that browser; just probe it and bail.
-    if [ "${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" != "$_BH_LINKEDIN_DEFAULT_URL" ]; then
-        local _ext_url="${LINKEDIN_CDP_URL}"
-        if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
-            return 0
-        fi
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: LINKEDIN_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
-        return 1
-    fi
-    # Cross-pipeline whole-run lock: only one LinkedIn browser pipeline drives
-    # the 9556 harness Chrome at a time. Acquired here (the single chokepoint
-    # every browser pipeline calls). Skipped above for externally-managed
-    # (AppMaker/BYO) Chrome, which is not ours to serialize. A held-by-peer
-    # lock returns the reserved skip code 78; propagate it so the CALLER's
-    # parent shell can exit 0 (an exit here would only kill the subshell most
-    # call sites wrap around this function; see the 2026-07-06 incident note
-    # above the lock function).
-    _acquire_linkedin_pipeline_lock || return $?
-    # Probe + launch harness Chrome on port 9556 if needed.
-    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LinkedIn harness Chrome down on port 9556, launching..." >&2
-        # Dated relaunch stamp for central observability (see twitter-backend.sh).
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) port=9556" \
-            >> "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/chrome-relaunch-events.log" 2>/dev/null || true
-        local _chrome_bin
-        _chrome_bin=$(_resolve_chrome_bin)
-        if [ -z "$_chrome_bin" ]; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
-            return 1
-        fi
-        # On Linux + no display, run headless. On root, add --no-sandbox.
-        local _extra=()
-        case "$(uname -s)" in
-            Linux)
-                _extra+=(--no-sandbox --disable-dev-shm-usage)
-                if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-                    _extra+=(--headless=new --disable-gpu)
-                fi
-                ;;
-            Darwin)
-                # Default position captured 2026-05-26 from the user's
-                # secondary monitor; overridable via BH_LINKEDIN_WINDOW_POS.
-                _extra+=(--window-position="${BH_LINKEDIN_WINDOW_POS:-3814,-1050}")
-                _extra+=(--window-size="${BH_LINKEDIN_WINDOW_SIZE:-1024,1013}")
-                ;;
-        esac
-        # Self-heal (2026-06-03): reap any stale Chrome holding THIS profile dir
-        # but not answering CDP on our port, else the relaunch hands off via the
-        # SingletonLock and loops "failed to start within 12s". Exact-dir match
-        # (trailing space) so this never touches the twitter browser-harness
-        # profile. See twitter-backend.sh for the regression that motivated this.
-        local _prof_dir="$HOME/.claude/browser-profiles/browser-harness-linkedin"
-        local _stale_pids
-        _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
-        if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
-            kill $_stale_pids 2>/dev/null || true
-            sleep 2
-            _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
-            [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
-            rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
-        fi
-        # The occlusion/backgrounding flags matter: the window sits offscreen,
-        # and without them Chrome stops laying out SPA-rendered content, so
-        # every element measures 0x0 and clicks become impossible (2026-07-03).
-        # Spawn via the SHARED launcher (skill/lib/browser-launch.sh) — see
-        # that file for the clean-exit stamp + no-focus-steal + detach
-        # rationale. Do NOT hand-roll launch logic per backend.
-        # shellcheck disable=SC1091
-        source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/browser-launch.sh"
-        launch_harness_chrome "$_chrome_bin" "$_prof_dir" \
-            --remote-debugging-port=9556 \
-            --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
-            --no-first-run --no-default-browser-check \
-            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
-            --disable-backgrounding-occluded-windows \
-            --disable-renderer-backgrounding \
-            --disable-background-timer-throttling \
-            "${_extra[@]}" \
-            about:blank
-        for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null && break
-            sleep 1
-        done
-        if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: LinkedIn harness Chrome failed to start within 12s" >&2
-            return 1
-        fi
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LinkedIn harness Chrome up on port 9556" >&2
-    fi
-    # Always close leftover tabs from prior runs. Safe under acquire_lock
-    # "linkedin-browser" serialization.
-    cleanup_harness_tabs
-
-    # Per-run logout detection (2026-06-03). Every browser pipeline funnels
-    # through here before it touches LinkedIn, so this single call makes ANY
-    # pipeline trip the killswitch on its natural next fire if the harness
-    # Chrome has been logged out (999 / authwall / checkpoint), without editing
-    # the chflags-locked top-level scripts. detect-gate is a no-op when the
-    # killswitch is already active, and only ENGAGES on a CONCLUSIVE /feed/
-    # redirect to auth (infra hiccups -> proceed, so a flaky render never
-    # strands the pipeline). On a confirmed logout it engages the flag (which
-    # pauses every pipeline on its next fire + starts the 24h recovery clock)
-    # and returns 2, so we abort this fire instead of burning a Claude session
-    # on a dead session.
-    _linkedin_session_detect_gate
-}
-
 # Once-per-process guard mirrors _LI_PIPELINE_LOCK_HELD: run-linkedin.sh calls
 # ensure_linkedin_browser_for_backend in both Phase A and Phase B, and we do not
 # want two /feed/ probes per fire.
 _linkedin_session_detect_gate() {
+    # Per-run logout detection (2026-06-03). Every browser pipeline funnels
+    # through ensure_linkedin_browser_for_backend before it touches LinkedIn,
+    # so this single call makes ANY pipeline trip the killswitch on its natural
+    # next fire if the harness Chrome has been logged out (999 / authwall /
+    # checkpoint), without editing the chflags-locked top-level scripts.
+    # detect-gate is a no-op when the killswitch is already active, and only
+    # ENGAGES on a CONCLUSIVE /feed/ redirect to auth (infra hiccups ->
+    # proceed, so a flaky render never strands the pipeline). On a confirmed
+    # logout it engages the flag (which pauses every pipeline on its next fire
+    # + starts the 24h recovery clock) and returns 2, so we abort this fire
+    # instead of burning a Claude session on a dead session.
     if [ "${_LI_SESSION_PROBED:-0}" = "1" ]; then
         return 0
     fi
@@ -403,9 +270,24 @@ _linkedin_session_detect_gate() {
     return 0
 }
 
+ensure_linkedin_browser_for_backend() {
+    # --disable-renderer-backgrounding + --disable-background-timer-throttling:
+    # LinkedIn's SPA stops laying out in a backgrounded renderer even with the
+    # occlusion flags, so elements measure 0x0 (2026-07-03 fix).
+    HC_PLATFORM=linkedin \
+    HC_PORT=9556 \
+    HC_PROFILE_DIR="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
+    HC_DEFAULT_URL="$_BH_LINKEDIN_DEFAULT_URL" \
+    HC_CDP_URL="${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" \
+    HC_LAUNCH_URL="about:blank" \
+    HC_WINDOW_POS="${BH_LINKEDIN_WINDOW_POS:-3814,-1050}" \
+    HC_WINDOW_SIZE="${BH_LINKEDIN_WINDOW_SIZE:-1024,1013}" \
+    HC_EXTRA_FLAGS="--disable-renderer-backgrounding --disable-background-timer-throttling" \
+    HC_PRE_LAUNCH_HOOK=_acquire_linkedin_pipeline_lock \
+    HC_POST_CLEANUP_HOOK=_linkedin_session_detect_gate \
+    hc_ensure_browser
+}
+
 defer_if_foreign_for_backend() {
-    # Harness Chrome accepts multiple concurrent CDP clients on the same
-    # browser-harness-linkedin profile, so a foreign MCP wrapper cannot cause
-    # SingletonLock contention. Always return 1 (do not defer).
-    return 1
+    hc_defer_if_foreign
 }
