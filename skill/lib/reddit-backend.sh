@@ -53,6 +53,12 @@ fi
 # Twitter's 9555 and LinkedIn's 9556).
 export REDDIT_CDP_URL="${REDDIT_CDP_URL:-http://127.0.0.1:9557}"
 
+# Repo root for helper scripts. Honors S4L_REPO_DIR (managed installs run from
+# ~/.social-autoposter-mcp/repo/package, NOT ~/social-autoposter); a $HOME
+# hardcode here silently no-ops on customer boxes (same bug twitter-backend.sh
+# fixed; see its header comment).
+_BH_REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 # Default harness URL - used by ensure_reddit_browser_for_backend +
 # cleanup_harness_tabs to decide whether we own this Chrome (and should
 # launch/clean it) or whether it is externally managed (AppMaker, BYO).
@@ -127,7 +133,7 @@ cleanup_harness_tabs() {
             return 0
         fi
     fi
-    BH_CLEANUP_PORT=9557 python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
+    BH_CLEANUP_PORT=9557 python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
 _resolve_chrome_bin() {
@@ -214,7 +220,8 @@ ensure_reddit_browser_for_backend() {
             --remote-debugging-port=9557 \
             --user-data-dir="$HOME/.claude/browser-profiles/reddit-harness" \
             --no-first-run --no-default-browser-check \
-            --disable-features=ChromeWhatsNewUI \
+            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
+            --disable-backgrounding-occluded-windows \
             "${_extra[@]}" \
             about:blank
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
