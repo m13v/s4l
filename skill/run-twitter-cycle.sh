@@ -2280,7 +2280,9 @@ POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
 # --- ROLLING VIRALITY BAR (2026-07-02) --------------------------------------
 # Fetch THIS install's trailing-24h virality percentile so the parse step posts
 # the top-1 ONLY if it clears the bar. This holds the post rate near the target
-# (~20-30 / 8h) with NO hard cap: the bar is the Nth percentile of the install's
+# (~10 / day as of 2026-07-13 reach-recovery: p0.99 replayed against the prior
+# week's picks yields ~12/day vs ~91/day at the old p0.90) with NO hard cap:
+# the bar is the Nth percentile of the install's
 # OWN recent candidate pool (via /api/v1/twitter-candidates/virality-threshold),
 # so it self-calibrates to cadence and niche instead of being a fixed number.
 # The bar applies to BOTH lanes (2026-07-03, per user instruction): the
@@ -2292,10 +2294,11 @@ POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
 #   - Cold start: sample_count < min, so a fresh pool posts ungated until it fills.
 #     (This is also what keeps brand-new installs seeing every draft card.)
 #   - Fetch failure: fail-open, never silence posting on a transient API blip.
-# Virality percentile is HARDCODED to 0.90 here: single source of truth, no env
+# Virality percentile is HARDCODED to 0.99 here (raised from 0.90 on 2026-07-13,
+# reach-recovery: quality over volume): single source of truth, no env
 # var, no fallback, one path (every install behaves identically regardless of how
 # its plist was generated). Sample floor S4L_TWITTER_VIRALITY_MIN_SAMPLE default 200.
-VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.90" \
+VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.99" \
     S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
     S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
     python3 -c "
@@ -2316,7 +2319,7 @@ except BaseException as e:
     sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
 " 2>>"$LOG_FILE" || echo "")
 if [ -n "$VIRALITY_THRESHOLD" ]; then
-    log "Virality bar ACTIVE: p0.90 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
+    log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
 else
     log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
 fi
