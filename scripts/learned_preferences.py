@@ -108,13 +108,34 @@ DEFAULT_INSTRUCTION = (
 
 
 def config_path() -> str:
-    explicit = os.environ.get("S4L_CONFIG_PATH")
-    if explicit:
-        return explicit
-    repo = os.environ.get("S4L_REPO_DIR")
-    if repo:
-        return os.path.join(repo, "config.json")
-    return os.path.expanduser("~/social-autoposter/config.json")
+    """Delegates to scripts/config.py, THE config resolver (state-dir first,
+    symlinks resolved to their real target). This module's os.replace()
+    writers previously flattened the operator Mac's config symlink into a
+    plain file whenever S4L_CONFIG_PATH was missing from the environment
+    (2026-07-11 and 2026-07-13 incidents); the shared resolver's realpath
+    makes that impossible regardless of env."""
+    try:
+        from config import config_path as _shared
+
+        return _shared()
+    except Exception:
+        # Direct-invocation fallback (scripts/ not importable): same order.
+        explicit = os.environ.get("S4L_CONFIG_PATH")
+        if explicit:
+            p = os.path.expanduser(explicit)
+        else:
+            state_dir = os.environ.get("S4L_STATE_DIR") or "~/.social-autoposter-mcp"
+            sp = os.path.join(os.path.expanduser(state_dir), "config.json")
+            if os.path.exists(sp):
+                p = sp
+            else:
+                repo = os.environ.get("S4L_REPO_DIR")
+                p = (
+                    os.path.join(repo, "config.json")
+                    if repo
+                    else os.path.expanduser("~/social-autoposter/config.json")
+                )
+        return os.path.realpath(p) if os.path.exists(p) else p
 
 
 def _now_iso() -> str:
