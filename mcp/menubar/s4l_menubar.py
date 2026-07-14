@@ -3065,7 +3065,11 @@ class S4LMenuBar(rumps.App):
                 cid = None
             st.review_event_add(
                 {
-                    "platform": "twitter",
+                    # reddit cards ship platform=reddit (2026-07-14); their
+                    # candidate_id is rd-prefixed and int()s to None above, so
+                    # the server's twitter_candidates row flip never fires for
+                    # them (by design — see merge_review_queue.py).
+                    "platform": decision.get("platform") or "twitter",
                     "project": decision.get("project"),
                     "candidate_id": cid,
                     "batch_id": batch,
