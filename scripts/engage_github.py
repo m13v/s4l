@@ -306,9 +306,13 @@ def run_claude(prompt, timeout=300, session_id=None):
     import time as _time
     import select
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_create": 0, "cost_usd": 0.0}
-    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
-    if session_id:
-        cmd += ["--session-id", session_id]
+    # Route through run_claude.sh (2026-07-14) for session cost accounting +
+    # quota handling; tag engage-github is unmapped in TAG_TO_TYPE so this
+    # stays a direct claude -p. --session-id travels via the CLAUDE_SESSION_ID
+    # env (set below); the wrapper passes the flag itself, so adding it here
+    # too would hand claude a duplicate flag.
+    _run_claude_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_claude.sh")
+    cmd = ["bash", _run_claude_sh, "engage-github", "-p", "--output-format", "stream-json", "--verbose"]
     cmd += ["--tools", "Read"]
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)  # use OAuth, not API key
