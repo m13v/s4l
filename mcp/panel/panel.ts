@@ -724,11 +724,13 @@ function renderPostingVolume(data: any) {
   const mode = data.mode || "";
   postingVolumeSelect.value = mode;
   const rates: any[] = Array.isArray(data.rates) ? data.rates : [];
+  // Display names only; internal values stay high|medium|low (API enum).
+  const MODE_LABEL: Record<string, string> = { high: "Aggressive", medium: "Steady", low: "Chill" };
   for (const r of rates) {
     const opt = postingVolumeSelect.querySelector(`option[value="${r.mode}"]`) as HTMLOptionElement | null;
     if (opt && r.est_posts_per_day !== null && r.est_posts_per_day !== undefined) {
       const n = Number(r.est_posts_per_day);
-      const label = r.mode.charAt(0).toUpperCase() + r.mode.slice(1);
+      const label = MODE_LABEL[r.mode] || r.mode;
       opt.textContent = `${label} (~${n >= 10 ? Math.round(n) : n}/day)`;
     }
   }
@@ -753,10 +755,11 @@ postingVolumeSelect.addEventListener("change", async () => {
     if (res && res.error) {
       log("Couldn’t change posting volume: " + res.error);
     } else {
+      const friendly: Record<string, string> = { high: "Aggressive", medium: "Steady", low: "Chill" };
       log(
         mode === "default"
           ? "Posting volume back to the default cycle setting."
-          : `Posting volume set to ${mode}. Applies from the next cycle.`
+          : `Posting volume set to ${friendly[mode] || mode}. Applies from the next cycle.`
       );
     }
     await loadPostingVolume(); // re-sync to server truth either way
