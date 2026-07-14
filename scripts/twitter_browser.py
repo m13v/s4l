@@ -2810,6 +2810,14 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
     """
     from playwright.sync_api import sync_playwright
 
+    # Per-URL stall guard: THIS batch function is the cycle's LIVE media path
+    # (capture_thread_media.py calls it) — not the singular scrape_thread_media
+    # above, which is why guarding only that one missed the 2026-07-14 hang
+    # (31+ min stuck on a crashed renderer at one URL, holding the browser
+    # lock, only the watchdog's 90-min net ahead). Shared implementation —
+    # scripts/stall_guard.py; every URL gets its own deadline.
+    from stall_guard import stall_guard
+
     results = []
     with sync_playwright() as p:
         browser, page, is_cdp = get_browser_and_page(p)
@@ -2817,6 +2825,8 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
             for url in thread_urls:
                 anchor_match = re.search(r"/status/(\d+)", url or "")
                 anchor_tweet_id = anchor_match.group(1) if anchor_match else ""
+                _g = stall_guard("thread_media_batch", url)
+                _g.__enter__()
                 try:
                     page.goto(url, wait_until="domcontentloaded")
                     page.wait_for_timeout(3000)
@@ -2849,6 +2859,8 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
                 except Exception as e:
                     print(f"[thread_media] error on {url}: {e}", file=sys.stderr)
                     results.append({"thread_url": url, "anchor_tweet_id": anchor_tweet_id, "error": str(e), "media": [], "is_repost": False, "reposted_by": ""})
+                finally:
+                    _g.__exit__(None, None, None)
                 page.wait_for_timeout(per_url_delay_ms)
             return {"results": results, "urls_visited": len(thread_urls)}
         finally:
