@@ -281,8 +281,8 @@ def _oldest_running_age() -> float | None:
     """Seconds since the oldest CLAIMED-but-unfinished job was written, or None if
     nothing is in flight. A worker claims by moving a job pending/ -> running/ and
     only removes it on result, so a job lingering in running/ far past any real
-    drafting turn means the worker claimed it and then wedged mid-run (dead/never-
-    spawned claude -p child). This is the ONLY signal for that case: pending-age is
+    drafting turn means the worker claimed it and then wedged mid-run.
+    This is the ONLY signal for that case: pending-age is
     silent (the job left pending/) and the producer's drain latch hasn't fired yet
     (it's still inside its own timeout). running/ is flat (see claude_job.py)."""
     run_root = os.path.join(_queue_root(), "running")
@@ -521,10 +521,7 @@ def main() -> int:
                 sentry = _sentry()
                 sentry.init()
                 if wedged_inflight:
-                    cause = (
-                        "a worker claimed a draft job and then died mid-run (claude -p child "
-                        "never came up / crashed)"
-                    )
+                    cause = "a worker claimed a draft job and then died mid-run"
                     stall_shape = "inflight_wedged"
                 elif batches_stuck:
                     cause = (
