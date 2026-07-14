@@ -55,8 +55,26 @@ def repo_dir() -> str:
 def config_path() -> str:
     env = os.environ.get("S4L_CONFIG_PATH")
     if env:
-        return os.path.expanduser(env)
-    return os.path.join(repo_dir(), "config.json")
+        p = os.path.expanduser(env)
+    else:
+        sp = state_config_path()
+        p = sp if os.path.exists(sp) else os.path.join(repo_dir(), "config.json")
+    # Resolve symlinks to the real target. os.replace()-style atomic writers
+    # otherwise REPLACE a symlink with a plain file instead of writing through
+    # it, which is exactly how the operator Mac's config split in two on
+    # 2026-07-11 and again on 2026-07-13. realpath of a plain file is itself,
+    # so customer installs are unaffected.
+    return os.path.realpath(p) if os.path.exists(p) else p
+
+
+def state_config_path() -> str:
+    """Canonical home of config.json (2026-07-13): the state dir, which no
+    package update, re-materialize, or plist regeneration ever touches. The
+    MCP server migrates a legacy $S4L_REPO_DIR/config.json here on boot and
+    leaves a symlink behind for direct-path readers; config_path() prefers
+    this file whenever it exists."""
+    state_dir = os.environ.get("S4L_STATE_DIR") or "~/.social-autoposter-mcp"
+    return os.path.join(os.path.expanduser(state_dir), "config.json")
 
 
 def load_config(fresh: bool = False) -> dict:
