@@ -43,6 +43,7 @@ import {
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
   configPath,
+  ensureConfigInStateDir,
   normalizeStringList,
   type ProjectInput,
 } from "./setup.js";
@@ -1021,7 +1022,7 @@ function readConfiguredTwitterHandle(): string | null {
   const env = (process.env.AUTOPOSTER_TWITTER_HANDLE || "").trim().replace(/^@/, "");
   if (env) return env;
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(repoDir(), "config.json"), "utf-8"));
+    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf-8"));
     const h = cfg?.accounts?.twitter?.handle;
     const s = (typeof h === "string" ? h : "").trim().replace(/^@/, "");
     return s || null;
@@ -5749,6 +5750,12 @@ async function main() {
   // disk, BEFORE serving, so the very first scan uses the shipped pipeline (not
   // the version first materialized at install). Synchronous + best-effort.
   ensurePipelineCurrent();
+  // Config's canonical home is the state dir (2026-07-13): migrate a legacy
+  // in-repo config.json up on first boot after update, keep the legacy path
+  // working via symlink, and self-heal a missing/wrong link on every boot.
+  // Must run AFTER ensurePipelineCurrent() so repoDir() points at the final
+  // materialized repo.
+  console.error(`[social-autoposter-mcp] config home: ${ensureConfigInStateDir()}`);
   // Deterministically provision the owned runtime on boot: whenever it isn't
   // ready (a fresh install, or one interrupted mid-way because a step failed or
   // Claude/the host died mid-install) kick the full install in the background
