@@ -228,17 +228,23 @@ hc_ensure_browser() {
     fi
 
     if [ "$_need_launch" = 1 ]; then
-        # Dated relaunch stamp for central observability: memory_snapshot.py
-        # counts these (chrome_relaunches block) so a kill-respawn loop is
-        # visible per-install without depending on a foreground observer.
-        echo "$(_hc_ts) port=${_port} reason=${_launch_reason}" \
-            >> "$_BH_REPO_DIR/skill/logs/chrome-relaunch-events.log" 2>/dev/null || true
         local _chrome_bin
         _chrome_bin=$(_resolve_chrome_bin)
         if [ -z "$_chrome_bin" ]; then
             echo "[$(_hc_ts)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
             return 1
         fi
+        # Dated relaunch stamp for central observability: memory_snapshot.py
+        # counts these (chrome_relaunches block) so a kill-respawn loop is
+        # visible per-install without depending on a foreground observer.
+        # chrome= carries the binary version at launch time: a version change
+        # between consecutive lines marks exactly when a silent auto-update
+        # went live (how the 2026-07-12 Chrome 150 crash-storm onset was
+        # dated: update on disk 07-10, active only at the 07-12 reboot).
+        local _chrome_ver
+        _chrome_ver=$("$_chrome_bin" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
+        echo "$(_hc_ts) port=${_port} reason=${_launch_reason} chrome=${_chrome_ver:-unknown}" \
+            >> "$_BH_REPO_DIR/skill/logs/chrome-relaunch-events.log" 2>/dev/null || true
         # On Linux + no display, run headless. On root, add --no-sandbox.
         # Window-position/size only meaningful on macOS multi-monitor; skip
         # elsewhere so we don't hide the window off-screen on single-display
