@@ -3214,9 +3214,9 @@ tool(
     description:
       "Read or set this install's posting-volume mode, the quality bar that decides how many drafts " +
       "per day the twitter cycle produces. Three modes, shown to users as Aggressive (~100+ posts/day), " +
-      "Steady (~30/day), and Chill (~5/day, only the very best candidates); 'default' clears the " +
-      "override so the cycle's built-in setting applies. Internally the modes are high|medium|low and " +
-      "both spellings are accepted. action:'get' returns the current mode plus per-mode estimated " +
+      "Steady (~30/day, the default every install starts on), and Chill (~5/day, only the very best " +
+      "candidates). Internally the modes are high|medium|low and both spellings are accepted. " +
+      "action:'get' returns the current mode plus per-mode estimated " +
       "posts/day computed from this install's own recent candidate pool (show those numbers with the " +
       "Aggressive/Steady/Chill names when the user is choosing). Use when the user asks to post more, " +
       "post less, slow down, be more aggressive, chill out, raise the quality bar, or change posting " +
@@ -3225,9 +3225,9 @@ tool(
     inputSchema: {
       action: z.enum(["get", "set"]).default("get").describe("get = read mode + rates; set = change it"),
       mode: z
-        .enum(["aggressive", "steady", "chill", "high", "medium", "low", "default"])
+        .enum(["aggressive", "steady", "chill", "high", "medium", "low"])
         .optional()
-        .describe("Required for action:'set'. aggressive=high, steady=medium, chill=low; 'default' clears the override."),
+        .describe("Required for action:'set'. aggressive=high, steady=medium, chill=low."),
     },
   },
   async (args: any) => {
@@ -3236,7 +3236,7 @@ tool(
     const ALIAS: Record<string, string> = { aggressive: "high", steady: "medium", chill: "low" };
     if (action === "set") {
       if (!args.mode) {
-        return jsonContent({ error: "mode is required for action:'set' (aggressive|steady|chill|default)" });
+        return jsonContent({ error: "mode is required for action:'set' (aggressive|steady|chill)" });
       }
       const stored = ALIAS[String(args.mode)] || String(args.mode);
       const r = await runPython("scripts/s4l_posting_mode.py", ["set", stored], {
