@@ -57,7 +57,7 @@ def _age_hours(row: dict) -> float:
         return 0.0
 
 
-def fetch(project, status, limit, since, urls):
+def fetch(project, status, limit, since, urls, install_id):
     query = {"limit": limit}
     if project:
         query["matched_project"] = project
@@ -67,6 +67,8 @@ def fetch(project, status, limit, since, urls):
         query["since"] = since
     if urls:
         query["tweet_urls"] = ",".join(urls)
+    if install_id:
+        query["install_id"] = install_id
     resp = api_get("/api/v1/twitter-candidates", query=query)
     return (resp.get("data") or {}).get("candidates") or []
 
@@ -102,15 +104,20 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--since", help="ISO8601 discovered_at lower bound")
     ap.add_argument("--urls", help="comma-separated tweet_urls, explicit selection instead of a filtered pull")
+    ap.add_argument(
+        "--install-id",
+        help="scope the pull to one install (required for another install's data -- "
+        "matched_project alone is NOT tenant-safe, e.g. 'PersonalBrand' spans 7 installs)",
+    )
     ap.add_argument("--out", required=True, help="output path for the pipe-separated candidates file")
     args = ap.parse_args()
 
-    if not args.project and not args.urls:
-        print("[twitter_prompt_sandbox] pass --project or --urls to scope the pull", file=sys.stderr)
+    if not args.project and not args.urls and not args.install_id:
+        print("[twitter_prompt_sandbox] pass --project, --urls, or --install-id to scope the pull", file=sys.stderr)
         return 1
 
     urls = [u.strip() for u in args.urls.split(",") if u.strip()] if args.urls else None
-    rows = fetch(args.project, args.status, args.limit, args.since, urls)
+    rows = fetch(args.project, args.status, args.limit, args.since, urls, args.install_id)
     if not rows:
         print("[twitter_prompt_sandbox] no candidates matched the given filters", file=sys.stderr)
         return 1
