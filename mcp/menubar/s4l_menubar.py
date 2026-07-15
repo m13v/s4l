@@ -702,8 +702,8 @@ class S4LMenuBar(rumps.App):
         self._clipboard_prompt(
             SETUP_PROMPT,
             "Set up S4L in Claude",
-            "Claude will set up your runtime, connect X, configure your project, and "
-            "schedule the autopilot",
+            "Claude will set up your runtime, connect X (or Reddit), configure your "
+            "project, and schedule the autopilot",
         )
 
 
