@@ -120,13 +120,36 @@ TW_ENGINE_PREFIX=""
 # the moment a merge delivers cards, removed after 24h without any. We read
 # the marker file directly; the old S4L_DRAFT_FRESHNESS_HOURS and
 # S4L_FIRST_RUN_FRESHNESS_HOURS env overrides are retired.
+#
+# 2026-07-15 (per user request, thread-age-vs-engagement investigation): both
+# knobs raised 2h/1h -> 6h. Isolating variant D's own posting history (no
+# cross-variant confound) showed engagement flat through ~3h and only
+# cratering past 6h (18-22 avg views vs 51-77 in the 0-3h plateau); 3-6h is a
+# real but under-sampled gray zone precisely because the old 2h cap prevented
+# candidates from ever reaching it. 6h is the evidence-backed outer bound, not
+# a measured optimum inside 3-6h. Discovery (FRESHNESS_HOURS_DISCOVER) moves to
+# 6h too, on explicit request — this reopens, rather than confirms, the
+# concluded A/B/C/D result below, which found a *tighter* 1h discovery window
+# winning.
+#
+# Also fixed here: the expire-stale gate has always compared against
+# discovered_at (discovery age), not tweet_posted_at (thread age) — harmless
+# while discovery was capped at 1h (the two stayed within ~1h of each other),
+# but wrong now that discovery can itself be up to 6h stale at the moment we
+# find a candidate: a discovered_at-based gate would then let real thread age
+# reach ~12h before expiring. score_twitter_candidates.py now passes
+# basis="tweet_posted_at" on its expire-stale calls so the gate measures
+# thread age directly, not how long the row sat in our own pipeline. The
+# route (~/social-autoposter-website twitter-candidates/expire-stale) treats
+# basis as opt-in, defaulting to discovered_at, so other installs are
+# unaffected.
 FIRST_RUN_BOOST_MARKER="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
 if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -f "$FIRST_RUN_BOOST_MARKER" ]; then
     FRESHNESS_HOURS=48
     FRESHNESS_HOURS_DISCOVER=48
 else
-    FRESHNESS_HOURS=2
-    FRESHNESS_HOURS_DISCOVER=1
+    FRESHNESS_HOURS=6
+    FRESHNESS_HOURS_DISCOVER=6
 fi
 
 # ----------------------------------------------------------------------------
@@ -139,17 +162,21 @@ fi
 # permanent, hardcoded behavior. The cycle_variant column is still stamped 'D'
 # below so historical analytics keep a consistent label.
 #
-# Phase 0 hard-expire uses FRESHNESS_HOURS (the union ceiling, tightened to 2h
-# on 2026-06-01, see above) so peer cycles don't accidentally expire each
-# other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
-# since-rewrite hook) stays tightened to 1h, the winning D setting.
+# 2026-07-15: FRESHNESS_HOURS_DISCOVER raised 1h -> 6h (see the block above) —
+# this reopens the exact question this experiment settled in D's favor. D's
+# own no-ripen + 2k-view-cap logic is untouched; only the discovery window
+# widens.
+#
+# Phase 0 hard-expire uses FRESHNESS_HOURS (the union ceiling, now 6h and keyed
+# on thread age via the basis param — see above) so peer cycles don't
+# accidentally expire each other's still-pending rows.
 TWITTER_CYCLE_VARIANT=D
 # FRESHNESS_HOURS_DISCOVER is set together with FRESHNESS_HOURS in the
-# first-run-boost block above: 1h (the winning variant D setting) everywhere,
-# 48h only while the setup marker is live. The lean Phase 1 CDP scraper reads
-# it directly and honors any value.
+# first-run-boost block above: 6h everywhere (2026-07-15), 48h only while the
+# setup marker is live. The lean Phase 1 CDP scraper reads it directly and
+# honors any value.
 # Export FRESHNESS_HOURS too so score_twitter_candidates.py inherits it and
-# drives the expire-stale gate from the same knob (was hardcoded 18h there).
+# drives the expire-stale gate from the same knob.
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
 # Hook env: ~/.claude/hooks/twitter-search-since-rewrite.py reads this and
 # uses it in place of its hardcoded 6h default when present. The hook accepts
@@ -177,7 +204,7 @@ fi
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
-log "Logic=D (no-ripen + 1h freshness + 2k_view_cap; experiment concluded 2026-05-31); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
+log "Logic=D (no-ripen + 2k_view_cap; experiment concluded 2026-05-31, discovery window widened 2026-07-15); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
 log "Length-control experiment concluded 2026-06-04; winner=control; LENGTH_ARM retired"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
