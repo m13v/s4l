@@ -1314,6 +1314,15 @@ async function postApproved(batchId: string, plan: Plan) {
           : dec.text,
       };
       if (cc.engagement_style) decPost.engagement_style = cc.engagement_style;
+      // Two-draft cards (2026-07-15): a human draft-switch (see the generic
+      // edit-handling above, `if (e.variant && Array.isArray(c.drafts))`)
+      // stamps the CHOSEN draft's assigned_style/assigned_mode onto the card
+      // (cc). Forward both into decPost so post_reddit.py's _post_iteration
+      // validates/logs against whichever draft is ACTUALLY posting, not
+      // whichever was recommended at plan-write time — mirrors
+      // twitter_post_plan.py's identical per-candidate override.
+      if (cc.assigned_style !== undefined) decPost.assigned_style = cc.assigned_style;
+      if (cc.assigned_mode !== undefined) decPost.assigned_mode = cc.assigned_mode;
       const miniPlan = {
         project_name: meta.project_name || cc.matched_project,
         batch_id: cc.reddit_batch_id || meta.batch_id || "reddit-mcp-approval",
