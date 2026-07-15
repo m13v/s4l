@@ -14,7 +14,7 @@
     "type": "node",
     "entry_point": "dist/index.js",
     "mcp_config": {
-      "command": "node",
+      "command": "${__dirname}/vendor/node-darwin-arm64/bin/node",
       "args": [
         "${__dirname}/dist/index.js"
       ],
