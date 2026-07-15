@@ -1,9 +1,8 @@
-# Scratch preview: renders 4 review cards back-to-back to visually verify the
-# new expiration-countdown label (replaces the old "age since posted" label).
-# Card 1: fresh (~10min old) -> normal muted countdown, ~1h50m left.
-# Card 2: near cutoff (1h50m old) -> urgent bold countdown, ~10m left.
-# Card 3: past cutoff (3h old) -> "expired", urgent bold.
-# Card 4: fresh but first-run-boost.json present -> 48h window, ~47h50m left.
+# Scratch preview: renders review cards to visually verify (1) the combined
+# "age (countdown)" header label and (2) the dynamic-fit thread-link box that
+# keeps the trailing ↗ link inside the visible, clickable area even when the
+# thread text has many hard line breaks (previously could push the arrow off
+# the bottom of the fixed-height, non-scrolling quote box).
 import datetime
 import os
 import sys
@@ -21,11 +20,16 @@ def _iso(minutes_ago):
     return (now - datetime.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# 12 hard-newline-separated short lines: well under the old 200-char cap, but
+# far more vertical lines than the ~74pt box can show. Before the fix, the
+# trailing " ↗" landed on line 13, entirely below the visible/clickable box.
+many_lines_text = "\n".join(f"Line {i}: short bullet point here" for i in range(1, 13))
+
 drafts = [
     {
         "n": 1,
         "thread_author": "fresh_thread",
-        "thread_text": "Card 1: fresh thread, ~10min old. Expect a muted '1h49m left'.",
+        "thread_text": "Card 1: fresh thread, ~10min old. Expect muted '10m (1h49m left)'.",
         "reply_text": "draft reply 1",
         "thread_url": "https://x.com/fresh_thread/status/1",
         "candidate_id": 1,
@@ -36,7 +40,7 @@ drafts = [
     {
         "n": 2,
         "thread_author": "near_cutoff",
-        "thread_text": "Card 2: 1h50m old thread. Expect a BOLD '9m left' (urgent, <=15min).",
+        "thread_text": "Card 2: 1h50m old. Expect BOLD '1h50m (9m left)'.",
         "reply_text": "draft reply 2",
         "thread_url": "https://x.com/near_cutoff/status/2",
         "candidate_id": 2,
@@ -46,25 +50,14 @@ drafts = [
     },
     {
         "n": 3,
-        "thread_author": "past_cutoff",
-        "thread_text": "Card 3: 3h old thread, past the 2h ceiling. Expect a BOLD 'expired'.",
+        "thread_author": "overflow_thread",
+        "thread_text": many_lines_text,
         "reply_text": "draft reply 3",
-        "thread_url": "https://x.com/past_cutoff/status/3",
+        "thread_url": "https://x.com/overflow_thread/status/3",
         "candidate_id": 3,
         "project": "fazm",
         "platform": "twitter",
-        "stats": {"likes": 5, "views": 100, "tweet_posted_at": _iso(180)},
-    },
-    {
-        "n": 4,
-        "thread_author": "reddit_thread",
-        "thread_text": "Card 4: reddit platform. Expect NO countdown label at all (unchanged from before).",
-        "reply_text": "draft reply 4",
-        "thread_url": "https://reddit.com/r/test/comments/4",
-        "candidate_id": 4,
-        "project": "fazm",
-        "platform": "reddit",
-        "stats": {"likes": 5, "tweet_posted_at": _iso(10)},
+        "stats": {"likes": 5, "views": 100, "tweet_posted_at": _iso(5)},
     },
 ]
 
