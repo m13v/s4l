@@ -55,17 +55,34 @@ DESCRIPTIONS = {
         ),
     },
     "draft_prompt": {
+        "treatment_v4": (
+            "voice-first (global, both lanes): the account's own corpus + "
+            "voice.examples + learned_preferences are made the dominant "
+            "signal, prioritized over voice.tone and over the assigned "
+            "engagement style, which is demoted to an optional idea; skips "
+            "the per-style top_performers exemplar report entirely"
+        ),
+        "control_v4": (
+            "plain draft directive, uniform length clamp, no voice-priority "
+            "order, style block still shown as a firm suggestion"
+        ),
+        # v3 (style-as-form) retired 2026-07-15, replaced wholesale by v4
+        # rather than run alongside it: v4 directly manipulates the same
+        # style-block-bindingness variable v3 owned, so an independent v3
+        # axis would put literal contradictions in the same prompt in one of
+        # the four combinations, not just a statistical interaction. v2
+        # (skeleton-ban) retired 2026-07-10; v1 (decoupled-product-pivot)
+        # retired 2026-07-06; all kept so any straggler card from an old
+        # plan still explains itself.
         "treatment_v3": (
-            "style-as-form: the assigned style is the binding FORM (defining "
-            "move + per-style length + self-check), learned preferences apply "
-            "inside it; keeps the v2 skeleton ban"
+            "v3, retired: style-as-form, the assigned style is the binding "
+            "FORM (defining move + per-style length + self-check), learned "
+            "preferences apply inside it; kept the v2 skeleton ban"
         ),
         "control_v3": (
-            "plain draft directive, uniform length clamp, no structure ban"
+            "v3, retired: plain draft directive, uniform length clamp, no "
+            "structure ban"
         ),
-        # v2 arms (skeleton-ban) retired 2026-07-10; v1 arms
-        # (decoupled-product-pivot) retired 2026-07-06; kept so any
-        # straggler card from an old plan still explains itself.
         "treatment_v2": (
             "v2, retired: skeleton ban, forbids the concede-then-reverse "
             '"easy X / hard Y" structure and forces varied entry points'
@@ -75,17 +92,6 @@ DESCRIPTIONS = {
         ),
         "treatment": "v1, retired: product pivot decoupled from the reply",
         "control": "v1, retired: original draft directive",
-    },
-    "voice_fidelity": {
-        "treatment": (
-            "persona lane: verbatim reply examples + persona corpus are ground "
-            "truth for writing mechanics (capitalization, punctuation, "
-            "contractions); voice.tone loses on conflict with them"
-        ),
-        "control": (
-            "persona lane: today's directive, voice.tone treated as equal to "
-            "voice.examples with no tie-break"
-        ),
     },
     "lane": {
         "personal_brand": (
