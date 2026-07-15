@@ -1675,15 +1675,14 @@ ALL_PROJECTS_JSON=$(python3 -c "
 import json, os, sys
 repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
 sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
-import learned_preferences as lp
 config = json.load(open(os.path.join(repo_dir, 'config.json')))
 projects = config.get('projects', [])
 # learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
-# scripts/learned_preferences.py), not one per project. Computed once here
-# and stamped onto every emitted project dict under the same key so the
-# existing DRAFT_DIRECTIVE prose ('The matched project's learned_preferences
-# block in ALL_PROJECTS_JSON is MANDATORY...') keeps working unchanged.
-global_lp = lp.get_global_block(config)
+# scripts/learned_preferences.py). Since 2026-07-14 it is NO LONGER stamped
+# into each project entry: the prep prompt embeds it exactly ONCE via
+# GLOBAL_LEARNED_PREFS_JSON (the 'Global learned preferences' line right
+# after this JSON). The old per-project stamping quintupled the block in
+# promotion prompts (~100KB of a ~283KB prompt was 5 identical copies).
 lane = os.environ.get('S4L_ACTIVE_LANE', '')
 if lane == 'personal_brand':
     # Personal-brand lane is pure organic growth: the drafter must NOT see any
@@ -1693,30 +1692,53 @@ if lane == 'personal_brand':
     # prompt to accidentally pitch, quote, or link. This also kills cross-routing
     # (no 'other project' exists to route a candidate to). Whitelist, not
     # denylist: any field added to the persona entry later stays out unless
-    # explicitly allowed here.
+    # explicitly allowed here. (learned_preferences left the whitelist
+    # 2026-07-14: it now travels once, globally, not inside the entry.)
     ALLOWED = {
         'name', 'description', 'content_angle', 'voice',
         'voice_relationship', 'content_guardrails',
-        # learned_preferences: human review feedback distilled by
-        # feedback_digest.py. Added 2026-07-03 (user-authorized unlock); the
-        # persona lane was blind to the block from 07-02 to 07-03, which let
-        # rejected draft structures keep recurring despite reject-reason notes.
-        'learned_preferences',
     }
     persona = next((p for p in projects if p.get('persona') is True), None)
     out = {}
     if persona:
-        entry = {k: v for k, v in persona.items() if k in ALLOWED}
-        entry['learned_preferences'] = global_lp
-        out[persona['name']] = entry
+        out[persona['name']] = {k: v for k, v in persona.items() if k in ALLOWED}
     print(json.dumps(out, indent=2))
 else:
+    # Promotion lane: full product config MINUS ops-only plumbing the drafter
+    # can never use (analytics ids, contact/SEO bylines, link-infra flags,
+    # onboarding metadata). Denylist, not whitelist, on purpose: an unknown
+    # future MARKETING field should reach the drafter by default; add a key
+    # here only when it is provably non-drafting plumbing. landing_pages must
+    # stay (the plan schema's has_landing_pages is defined against it).
+    OPS_KEYS = {
+        'posthog', 'contact', 'seo_author', 'seo_roundup', 'web_chat',
+        'short_links_host', 'short_links_live', 'external_short_links',
+        'force_utm_only', 'booking_link_auto_share', 'onboarded_at',
+        'client', 'client_engagement', 'geo_focus', 'engagement_start',
+        'weight', 'enabled', 'demo_video', 'platforms_disabled',
+        'brand_domain', 'learned_preferences',
+    }
     out = {}
     for p in projects:
-        entry = dict(p)
-        entry['learned_preferences'] = global_lp
-        out[p['name']] = entry
+        out[p['name']] = {k: v for k, v in p.items() if k not in OPS_KEYS}
     print(json.dumps(out, indent=2))
+" 2>/dev/null || echo "{}")
+
+# The install-wide learned_preferences block, embedded ONCE in the prep prompt
+# (see the 'Global learned preferences' line under PROJECT ROUTING). history is
+# the feedback loop's audit changelog: it lives in config.json for humans and
+# has NO reader in any prompt (the digest's own prompt embeds only the four
+# managed lists), so it is stripped here; it was ~15KB per copy and rode into
+# every drafting prompt as dead weight before 2026-07-14.
+GLOBAL_LEARNED_PREFS_JSON=$(python3 -c "
+import json, os, sys
+repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
+import learned_preferences as lp
+config = json.load(open(os.path.join(repo_dir, 'config.json')))
+block = lp.get_global_block(config)
+block.pop('history', None)
+print(json.dumps(block, indent=2))
 " 2>/dev/null || echo "{}")
 
 # Engagement-style picker (2026-05-19): pick ONE assigned style for this
@@ -1874,9 +1896,9 @@ print('treatment_v3' if random.random() < rate else 'control_v3')
 export S4L_DRAFT_PROMPT_VARIANT
 log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
 if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v3" ]; then
-    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. THE ASSIGNED ENGAGEMENT STYLE IS THE FORM OF THIS DRAFT, not a flavor hint: the style block above defines the draft's structure, defining move, and length. Commit to that form BEFORE writing, and run the style block's self-check before returning the draft. Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. If your draft contains that concede-then-reverse pivot, rewrite it from a different entry point. This ban OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's defining move, express it without the skeleton. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The matched project's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory, and it works TOGETHER with the engagement style on different layers: the style owns the FORM (structure, defining move, length) and learned_preferences.draft_style_notes own the voice, wording, and content choices INSIDE that form. When a preference seems to conflict with the style, keep the style's structure and satisfy the preference within it; never drop the style's defining move to satisfy a wording note. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. THE ASSIGNED ENGAGEMENT STYLE IS THE FORM OF THIS DRAFT, not a flavor hint: the style block above defines the draft's structure, defining move, and length. Commit to that form BEFORE writing, and run the style block's self-check before returning the draft. Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. If your draft contains that concede-then-reverse pivot, rewrite it from a different entry point. This ban OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's defining move, express it without the skeleton. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory, and it works TOGETHER with the engagement style on different layers: the style owns the FORM (structure, defining move, length) and learned_preferences.draft_style_notes own the voice, wording, and content choices INSIDE that form. When a preference seems to conflict with the style, keep the style's structure and satisfy the preference within it; never drop the style's defining move to satisfy a wording note. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 else
-    DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The matched project's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+    DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 # Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by s4l_mode.py):
 # replace the product-framed directive entirely. This lane is pure organic
@@ -1904,7 +1926,7 @@ if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
         PERSONA_SKELETON_BAN=""
         PERSONA_PREFS_RELATION="(it overrides the engagement style's structural template on conflict)"
     fi
-    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The persona's learned_preferences block in ALL_PROJECTS_JSON is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 
 # 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
@@ -2127,6 +2149,7 @@ $CORPUS_BLOCK
 ## PROJECT ROUTING (per-candidate)
 Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
 All project configs: $ALL_PROJECTS_JSON
+Global learned preferences (ONE install-wide block; it applies to EVERY project. Any directive in this prompt that references a project's learned_preferences block means THIS block): $GLOBAL_LEARNED_PREFS_JSON
 
 ## PROJECT TOP PERFORMERS (query on demand, do NOT skip routing first)
 The feedback reports below carry a per-style exemplar only; project winners are no longer bulk-injected. AFTER you have decided which project a candidate's draft is for, you MAY pull that project's own recent winners (last 30 days, ranked by real click rate) when you are unsure how this product converts in replies:
