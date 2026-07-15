@@ -304,12 +304,18 @@ fi
 echo
 
 # ---- 1c. Claude Desktop scheduled tasks -----------------------------------
-# Onboarding creates the queue-worker tasks (and historically the deprecated
-# single autopilot) under ~/.claude/scheduled-tasks/. They live OUTSIDE the
-# state dir, so a reset that skips them leaves idle workers firing every minute
-# against a wiped install. Remove the task dirs. Like the .mcpb registry, the
-# host (Claude Desktop) owns the live schedule and rewrites it on quit. Step [0]
-# already quit it; this warns only if it came back (--keep-claude / relaunch).
+# Onboarding creates the queue-worker task (current installs: the universal
+# `s4l-worker`; legacy installs: `saps-worker`/`saps-phase1-query`/
+# `saps-phase2b-draft`/the deprecated single `social-autoposter-autopilot`)
+# under ~/.claude/scheduled-tasks/. They live OUTSIDE the state dir, so a
+# reset that skips them leaves idle workers firing every minute against a
+# wiped install. TASK_IDS must be kept in sync with WORKER_TASK_IDS in
+# s4l_menubar.py / schedule_state.py / scheduled_tasks_snapshot.py — this list
+# went stale after the `s4l-worker` rename (2026-07-02) and every "deep reset"
+# since then silently left the live task running (found 2026-07-15). Like the
+# .mcpb registry, the host (Claude Desktop) owns the live schedule and
+# rewrites it on quit. Step [0] already quit it; this warns only if it came
+# back (--keep-claude / relaunch).
 echo "[1c] Claude Desktop scheduled tasks (queue workers + deprecated autopilot)"
 SCHED_DIR="$HOME_DIR/.claude/scheduled-tasks"
 if pgrep -x "Claude" >/dev/null 2>&1; then
@@ -322,7 +328,7 @@ if [ -d "$SCHED_DIR" ]; then
     [ -e "$d" ] && TASK_IDS+=("$(basename "$d")")
   done
 fi
-for t in saps-phase1-query saps-phase2b-draft social-autoposter-autopilot; do
+for t in s4l-worker saps-worker saps-phase1-query saps-phase2b-draft social-autoposter-autopilot; do
   TASK_IDS+=("$t")
 done
 if [ "${#TASK_IDS[@]}" -gt 0 ]; then
