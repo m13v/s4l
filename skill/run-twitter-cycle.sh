@@ -1737,7 +1737,15 @@ ALL_PROJECTS_JSON=$(python3 -c "
 import json, os, sys
 repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
 sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
-config = json.load(open(os.path.join(repo_dir, 'config.json')))
+# Prompt-sandbox config override (2026-07-15): a sandbox run testing another
+# install's real voice/persona (scripts/admin_fetch_install_config.py
+# materializes it) points this at a fetched copy instead of the operator's
+# own config.json. Checked BEFORE the real path since the repo-root
+# config.json is a symlink to the state dir -- the override must never
+# follow that symlink back to the operator's own config.
+_sandbox_dir = os.environ.get('S4L_SANDBOX_CONFIG_DIR')
+_config_path = os.path.join(_sandbox_dir, 'config.json') if _sandbox_dir else os.path.join(repo_dir, 'config.json')
+config = json.load(open(_config_path))
 projects = config.get('projects', [])
 # learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
 # scripts/learned_preferences.py). Since 2026-07-14 it is NO LONGER stamped
@@ -1797,7 +1805,10 @@ import json, os, sys
 repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
 sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
 import learned_preferences as lp
-config = json.load(open(os.path.join(repo_dir, 'config.json')))
+# Same sandbox config override as ALL_PROJECTS_JSON above (see that comment).
+_sandbox_dir = os.environ.get('S4L_SANDBOX_CONFIG_DIR')
+_config_path = os.path.join(_sandbox_dir, 'config.json') if _sandbox_dir else os.path.join(repo_dir, 'config.json')
+config = json.load(open(_config_path))
 block = lp.get_global_block(config)
 block.pop('history', None)
 print(json.dumps(block, indent=2))
@@ -2207,12 +2218,17 @@ release_lock "twitter-browser" 2>>"$LOG_FILE"
 # withholding real examples from control would confound "does showing real
 # examples help" with "does emphasizing them differently help."
 CORPUS_BLOCK=""
-if [ -f "$REPO_DIR/persona_corpus.txt" ]; then
+# Same sandbox override as the config.json reads above: persona_corpus.txt is
+# a flat repo-root file (not symlinked), so it needs its own override branch
+# rather than following $REPO_DIR.
+_PERSONA_CORPUS_PATH="${S4L_SANDBOX_CONFIG_DIR:+$S4L_SANDBOX_CONFIG_DIR/persona_corpus.txt}"
+_PERSONA_CORPUS_PATH="${_PERSONA_CORPUS_PATH:-$REPO_DIR/persona_corpus.txt}"
+if [ -f "$_PERSONA_CORPUS_PATH" ]; then
     CORPUS_BLOCK="## ACCOUNT VOICE CORPUS (raw first-hand material — ground your reply in THIS)
 This is the account holder's own public writing and work, verbatim. Quote and draw real specifics from it: actual projects, real numbers, sharp opinions, real failures. Do NOT invent anything not supported here or in the project's voice block. Use it to make the reply concrete and unmistakably human, and as ground truth for HOW they write (capitalization, punctuation, contractions, length) regardless of which project this reply is for.
-$(cat "$REPO_DIR/persona_corpus.txt")
+$(cat "$_PERSONA_CORPUS_PATH")
 "
-    log "Phase 2b-prep: injected account voice corpus ($(wc -c < "$REPO_DIR/persona_corpus.txt" | tr -d ' ') bytes)."
+    log "Phase 2b-prep: injected account voice corpus ($(wc -c < "$_PERSONA_CORPUS_PATH" | tr -d ' ') bytes)."
 fi
 
 log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
