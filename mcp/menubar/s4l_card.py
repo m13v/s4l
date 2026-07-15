@@ -1816,6 +1816,29 @@ class _ReviewController(NSObject):
         visible whether or not the pointer is over it."""
         self._show_popover(_EXPIRY_EDUCATION_TEXT, self._age_expiry_label, "expiry")
 
+    def tickAgeExpiryLabel_(self, timer):
+        """NSTimer target (2026-07-15): re-renders the header's age/expiry
+        label every second so its countdown visibly counts down without
+        needing hover. Not a python_method -- NSTimer invokes this through
+        the ObjC runtime."""
+        if self._age_expiry_label is None:
+            return
+        try:
+            d = self._drafts[self._idx]
+            stats = d.get("stats") or {}
+            text, urgent = _age_expiry_display(
+                stats.get("tweet_posted_at"), d.get("platform")
+            )
+            if not text:
+                return
+            self._age_expiry_label.setStringValue_(text)
+            self._age_expiry_label.setFont_(_font(11, urgent))
+            self._age_expiry_label.setTextColor_(
+                NSColor.labelColor() if urgent else NSColor.secondaryLabelColor()
+            )
+        except Exception:
+            pass
+
     # Click on an eye SHOWS its popover, never toggles it closed: a click is
     # physically preceded by hover (mouseEntered already opened it), so a
     # toggle would close what the hover just opened and the user sees nothing.
