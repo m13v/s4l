@@ -1232,11 +1232,21 @@ async function postApproved(batchId: string, plan: Plan) {
         redditFailed++;
         continue;
       }
+      // The card's reply_text is the CANONICAL text (post_drafts edits write
+      // there); the embedded decision still carries the draft-time original.
+      // Posting dec.text verbatim would silently discard a human edit.
+      const decPost: Record<string, unknown> = {
+        ...dec,
+        text: (typeof cc.reply_text === "string" && cc.reply_text.trim())
+          ? cc.reply_text
+          : dec.text,
+      };
+      if (cc.engagement_style) decPost.engagement_style = cc.engagement_style;
       const miniPlan = {
         project_name: meta.project_name || cc.matched_project,
         batch_id: cc.reddit_batch_id || meta.batch_id || "reddit-mcp-approval",
         phase: "draft",
-        decisions: [dec],
+        decisions: [decPost],
         style_assignment: meta.style_assignment || {},
         generation_trace_path: meta.generation_trace_path,
         session_id: meta.session_id || meta.draft_session_id,
