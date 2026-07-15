@@ -16,7 +16,21 @@ const MILESTONES = [
   "project_ready",
   "topics_seeded",
   "tasks_scheduled",
+  // Optional platform add-ons (see OPTIONAL_MILESTONES below). Listed here so
+  // assertMilestone/appendEvent accept them, but they never gate `complete`.
+  "reddit_connected",
+  "reddit_verified",
 ];
+
+// Milestones that are offered but NOT required for onboarding completion.
+// Reddit is an optional platform: most installs never connect it, and adding
+// these ids must never regress an already-complete (or fresh X-only) box back
+// to "Setting up". publicSnapshot() therefore (a) excludes these from the
+// `complete` computation and (b) omits them from the milestones array while
+// they are still pristine "pending" (so progress bars and step lists are
+// unchanged for installs that never touch reddit) — the same
+// never-regress-legacy-ledgers principle as the mode_chosen backfill.
+const OPTIONAL_MILESTONES = ["reddit_connected", "reddit_verified"];
 
 function stateDir(opts = {}) {
   return (
@@ -283,12 +297,21 @@ function publicSnapshot(opts = {}) {
     schema_version: ledger.schema_version,
     started_at: ledger.started_at,
     updated_at: ledger.updated_at,
-    complete: MILESTONES.every(
+    // Optional milestones (reddit) never gate completion.
+    complete: MILESTONES.filter((id) => !OPTIONAL_MILESTONES.includes(id)).every(
       (id) => ledger.milestones[id].status === "complete"
     ),
-    milestones: MILESTONES.map((id) => ({
+    // Optional milestones appear only once touched (attempted/completed/
+    // blocked); a pristine pending optional row would read as an unfinished
+    // setup step on installs that never opted into that platform.
+    milestones: MILESTONES.filter(
+      (id) =>
+        !OPTIONAL_MILESTONES.includes(id) ||
+        ledger.milestones[id].status !== "pending"
+    ).map((id) => ({
       id,
       ...ledger.milestones[id],
+      ...(OPTIONAL_MILESTONES.includes(id) ? { optional: true } : {}),
     })),
     current_blocker: ledger.current_blocker,
     doctor: ledger.doctor.latest
@@ -311,6 +334,7 @@ function publicSnapshot(opts = {}) {
 
 module.exports = {
   MILESTONES,
+  OPTIONAL_MILESTONES,
   blockMilestone,
   completeMilestone,
   ledgerPath,
