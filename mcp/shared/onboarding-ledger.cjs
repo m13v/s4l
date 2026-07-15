@@ -32,6 +32,22 @@ const MILESTONES = [
 // never-regress-legacy-ledgers principle as the mode_chosen backfill.
 const OPTIONAL_MILESTONES = ["reddit_connected", "reddit_verified"];
 
+// Any-of platform completion (2026-07-15, user requirement): onboarding is
+// complete with AT LEAST ONE platform connected. X stays the default first
+// suggestion, but a Reddit-only install must read complete. A required
+// X milestone therefore also counts as satisfied when its Reddit counterpart
+// is complete; profile_scanned (an X-account scan) is required only while X is
+// the connected platform. Same never-regress principle as the mode_chosen
+// backfill: X-only and fresh ledgers evaluate exactly as before.
+function milestoneSatisfied(ledger, id) {
+  const done = (m) => ledger.milestones[m] && ledger.milestones[m].status === "complete";
+  if (done(id)) return true;
+  if (id === "x_connected") return done("reddit_connected");
+  if (id === "x_verified") return done("reddit_verified");
+  if (id === "profile_scanned") return !done("x_connected") && done("reddit_connected");
+  return false;
+}
+
 function stateDir(opts = {}) {
   return (
     opts.stateDir ||
@@ -297,23 +313,42 @@ function publicSnapshot(opts = {}) {
     schema_version: ledger.schema_version,
     started_at: ledger.started_at,
     updated_at: ledger.updated_at,
-    // Optional milestones (reddit) never gate completion.
+    // Optional milestones (reddit) never gate completion, and required X
+    // milestones count as satisfied via their Reddit counterpart (any-of
+    // platform completion; see milestoneSatisfied above).
     complete: MILESTONES.filter((id) => !OPTIONAL_MILESTONES.includes(id)).every(
-      (id) => ledger.milestones[id].status === "complete"
+      (id) => milestoneSatisfied(ledger, id)
     ),
-    // Optional milestones appear only once touched (attempted/completed/
-    // blocked); a pristine pending optional row would read as an unfinished
-    // setup step on installs that never opted into that platform.
-    milestones: MILESTONES.filter(
-      (id) =>
-        !OPTIONAL_MILESTONES.includes(id) ||
-        ledger.milestones[id].status !== "pending"
-    ).map((id) => ({
+    // Row filtering, two rules with one goal (the step list shows only steps
+    // that apply to THIS install):
+    //   - optional milestones appear only once touched (attempted/completed/
+    //     blocked); a pristine pending optional row would read as an
+    //     unfinished setup step on installs that never opted in.
+    //   - a required milestone that is still pristine-pending but satisfied
+    //     via the other platform (reddit-only install: x_connected,
+    //     x_verified, profile_scanned) is omitted as not-applicable. A
+    //     blocked/in_progress row stays visible: the user actually tried it.
+    milestones: MILESTONES.filter((id) => {
+      const status = ledger.milestones[id].status;
+      if (OPTIONAL_MILESTONES.includes(id)) return status !== "pending";
+      if (status === "pending" && milestoneSatisfied(ledger, id)) return false;
+      return true;
+    }).map((id) => ({
       id,
       ...ledger.milestones[id],
       ...(OPTIONAL_MILESTONES.includes(id) ? { optional: true } : {}),
     })),
-    current_blocker: ledger.current_blocker,
+    // Blocker suppression: a blocker on an OPTIONAL milestone (a failed
+    // reddit connect attempt on an X box) or on a milestone satisfied via the
+    // other platform (a failed X attempt on a reddit-only box) must not flag
+    // the setup as needing attention. The raw blocker stays in the ledger for
+    // history; only the reported snapshot hides it.
+    current_blocker:
+      ledger.current_blocker &&
+      (OPTIONAL_MILESTONES.includes(ledger.current_blocker.milestone) ||
+        milestoneSatisfied(ledger, ledger.current_blocker.milestone))
+        ? null
+        : ledger.current_blocker,
     doctor: ledger.doctor.latest
       ? {
           phase: ledger.doctor.latest.phase,
