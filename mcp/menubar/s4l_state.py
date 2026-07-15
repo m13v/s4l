@@ -209,15 +209,6 @@ def runtime_ready() -> bool:
     return bool(py and os.path.exists(py))
 
 
-def _launchctl_list() -> str:
-    try:
-        return subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True, timeout=10
-        ).stdout
-    except Exception:
-        return ""
-
-
 def autopilot_loaded() -> bool:
     # Autopilot is now the Claude Desktop scheduled task, not the legacy launchd job.
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(str(Path.home()), ".claude")
@@ -454,23 +445,6 @@ def snapshot():
         out["latest_tag"] = ver.get("latest_tag", out.get("latest_tag"))
         out["update_available"] = ver.get("update_available", out.get("update_available"))
     return out
-
-
-def stats_7d():
-    """7-day post stats; loopback only (the DB read needs the owned runtime)."""
-    res = loopback_tool("get_stats", {"days": 7})
-    if not isinstance(res, dict):
-        return None
-    projects = res.get("projects")
-    proj = projects[0] if isinstance(projects, list) and projects else None
-    p = (proj or {}).get("posts")
-    if not p:
-        return None
-    return {
-        "posts": p.get("total", 0),
-        "views": p.get("views_period_total", p.get("views", 0)),
-        "replies": p.get("comments_period_total", p.get("comments", 0)),
-    }
 
 
 # set_autopilot() (the launchd toggle) was removed: the autopilot is now the Claude
@@ -1385,16 +1359,6 @@ def toggle_lane(lane):
     f = read_flags()
     f[lane] = not f.get(lane)
     return write_flags(f["personal_brand"], f["promotion"])
-
-
-def toggle_mode():
-    """Legacy whole-mode flip (mutually exclusive). Kept for old callers."""
-    new = (
-        MODE_PROMOTION
-        if read_mode() == MODE_PERSONAL_BRAND
-        else MODE_PERSONAL_BRAND
-    )
-    return write_mode(new)
 
 
 def approved_queue_set_status(batch, n, status, error=None):
