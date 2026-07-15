@@ -281,10 +281,17 @@ hc_ensure_browser() {
         # shellcheck disable=SC1091
         source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/browser-launch.sh"
         # shellcheck disable=SC2086
+        # --disable-hang-monitor: standard automation flag. Without it Chrome's
+        # hang monitor kills renderers that stop responding while CDP-driven
+        # scans hammer them under system load — the leading explanation for the
+        # 2026-07-14/15 EXC_BREAKPOINT (deliberate internal abort) crash dumps
+        # arriving ~once per cycle with zero jetsam/OOM evidence. Playwright
+        # and Puppeteer both launch with it for exactly this reason.
         launch_harness_chrome "$_chrome_bin" "$_prof" \
             --remote-debugging-port="$_port" \
             --user-data-dir="$_prof" \
             --no-first-run --no-default-browser-check \
+            --disable-hang-monitor \
             --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
             --disable-backgrounding-occluded-windows \
             ${HC_EXTRA_FLAGS:-} \

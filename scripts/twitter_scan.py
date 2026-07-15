@@ -232,18 +232,26 @@ def _write_scan_tweets_record(rec: dict) -> None:
 
 
 def _navigate(url: str) -> None:
-    """Reuse the existing real tab if there is one (typical cycle behavior),
-    otherwise open one. The MCP-managed Chrome always has at least an
-    about:blank tab from launch, but be defensive: a hung tab close between
-    cycles can leave us with only chrome:// tabs."""
-    real = [
-        t for t in list_tabs(include_chrome=False)
-        if (t.get("url") or "").startswith(("http", "about:"))
-    ]
-    if real:
+    """ALWAYS try to reuse the daemon's current tab; create one only when
+    navigation is impossible.
+
+    Page.navigate (goto_url) drives the current tab even when its renderer
+    has CRASHED — navigation revives an "Aw, Snap" tab in place. Creating a
+    tab is the one harness call PROVEN to activate Chrome and steal focus
+    (2026-07-15 correlation: 7/7 new_tab calls produced a same-second
+    harness_browser_foregrounded event), so the old list_tabs pre-check —
+    which saw an empty list whenever the surviving tab was internal-only or
+    mid-crash and then minted a fresh tab — is gone. new_tab remains solely
+    as the fallback for a truly navigable-tab-free Chrome (goto_url raises)."""
+    try:
         goto_url(url)
-    else:
-        new_tab(url)
+        return
+    except Exception as e:
+        print(
+            f"[twitter_scan] goto_url failed ({e}); falling back to new_tab",
+            file=sys.stderr,
+        )
+    new_tab(url)
 
 
 # Per-query stall guard: shared implementation (scripts/stall_guard.py) used
