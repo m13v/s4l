@@ -479,51 +479,6 @@ def accessibility_trusted() -> bool:
         return False
 
 
-def request_accessibility() -> bool:
-    """Pop the system Accessibility prompt for THIS process (registers it in the
-    list so the user can toggle it on) and open the Settings pane. Returns the
-    current trust state. Safe to call when already trusted (no prompt shown)."""
-    trusted = False
-    try:
-        import ctypes
-        import ctypes.util
-
-        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
-        ap = ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices"))
-        prompt_key = ctypes.c_void_p.in_dll(ap, "kAXTrustedCheckOptionPrompt")
-        cf_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
-        cf.CFDictionaryCreate.restype = ctypes.c_void_p
-        cf.CFDictionaryCreate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_long,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        keys = (ctypes.c_void_p * 1)(prompt_key)
-        vals = (ctypes.c_void_p * 1)(cf_true)
-        d = cf.CFDictionaryCreate(None, keys, vals, 1, None, None)
-        ap.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-        ap.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-        trusted = bool(ap.AXIsProcessTrustedWithOptions(d))
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            [
-                "open",
-                "x-apple.systempreferences:com.apple.preference.security"
-                "?Privacy_Accessibility",
-            ],
-            capture_output=True,
-            timeout=10,
-        )
-    except Exception:
-        pass
-    return trusted
-
-
 # ---- draft review (pop-up cards) ------------------------------------------
 # draft_cycle writes review-request.json when a fresh batch is ready; we read
 # the linked plan file (the /tmp/twitter_cycle_plan_<batch>.json the pipeline
