@@ -243,8 +243,6 @@ def find_reddit_cdp_port():
     return None
 
 
-_LOCK_SESSION_ID = f"python:{os.getpid()}"
-
 # Path to the bash-lock lease helper. Bumping this lease from inside reddit_browser.py
 # is what shields Python-CDP pipelines (run-reddit-search, audit-reddit-resurrect,
 # stats.sh reddit phase, engage-reddit) from the watchdog's 60-90s reclaim. Those
@@ -279,72 +277,41 @@ def _heartbeat_bash_lease():
         pass  # Best-effort. Never fail a CDP op because of lease bookkeeping.
 
 
-def _release_browser_lock():
-    """Release the lock if we hold it."""
-    try:
-        if os.path.exists(LOCK_FILE):
-            with open(LOCK_FILE) as f:
-                lock = json.load(f)
-            if lock.get("session_id") == _LOCK_SESSION_ID:
-                os.remove(LOCK_FILE)
-    except (json.JSONDecodeError, OSError):
-        pass
+# ---- browser-session mutex (2026-07-14: shared implementation) -------------
+# The old inline lock here still had the check-then-write claim race AND the
+# dead-holder starvation (a SIGKILLed peer blocked everyone for the full
+# 300s LOCK_EXPIRY) that twitter_browser.py fixed on 2026-06-16. Both drivers
+# now share scripts/browser_mutex.py (twitter's proven mutex, parameterized):
+# reddit gains the O_EXCL atomic claim, dead-PID reclaim, batch inherit via
+# S4L_LOCK_OWNER, and role-aware posting priority (only active when a caller
+# sets S4L_LOCK_ROLE=post; default scan keeps today's no-preemption behavior).
+# The bash-lease bump rides the mutex's on_touch hook, so every acquire AND
+# refresh keeps the watchdog fed exactly as before.
+from browser_mutex import BrowserMutex
 
-
-atexit.register(_release_browser_lock)
+_MUTEX = BrowserMutex(
+    lock_file=LOCK_FILE,
+    label="Reddit browser",
+    lock_expiry=LOCK_EXPIRY,
+    wait_max=LOCK_WAIT_MAX,
+    poll_interval=LOCK_POLL_INTERVAL,
+    on_touch=_heartbeat_bash_lease,
+)
 
 
 def _acquire_browser_lock():
-    """Wait for the Reddit browser lock to free, then acquire it.
-
-    Polls every LOCK_POLL_INTERVAL seconds for up to LOCK_WAIT_MAX seconds.
-    Exits 1 only after exhausting the wait budget; the launchd caller will
-    retry on the next 5-min tick.
-    """
-    deadline = time.time() + LOCK_WAIT_MAX
-    while True:
-        if os.path.exists(LOCK_FILE):
-            try:
-                with open(LOCK_FILE) as f:
-                    lock = json.load(f)
-                age = time.time() - lock.get("timestamp", 0)
-                if age >= LOCK_EXPIRY:
-                    break
-                holder = lock.get("session_id", "unknown")
-                if time.time() >= deadline:
-                    print(json.dumps({
-                        "success": False,
-                        "error": f"Reddit browser locked by session {holder} ({int(age)}s); waited {LOCK_WAIT_MAX}s, giving up."
-                    }))
-                    sys.exit(1)
-                time.sleep(LOCK_POLL_INTERVAL)
-                continue
-            except (json.JSONDecodeError, OSError):
-                pass
-        break
-    with open(LOCK_FILE, "w") as f:
-        json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
-    # Also bump the bash-lock lease so the watchdog respects this CDP burst.
-    # See _heartbeat_bash_lease() for why: Python-CDP pipelines never trigger
-    # the MCP PreToolUse heartbeat hook, so without this call the watchdog
-    # would steal the bash lock at age >= 60s during legitimate CDP work.
-    _heartbeat_bash_lease()
+    _MUTEX.acquire()
 
 
 def _refresh_browser_lock():
-    """Refresh the lock timestamp to prevent expiry during long operations.
+    _MUTEX.refresh()
 
-    Also bumps the bash-lock lease so the watchdog won't reclaim during
-    multi-step CDP ops. Call this from inside long CDP flows (scroll loops,
-    multi-second waits) to keep both the python lock file mtime AND the bash
-    lease fresh.
-    """
-    try:
-        with open(LOCK_FILE, "w") as f:
-            json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
-    except OSError:
-        pass
-    _heartbeat_bash_lease()
+
+def _release_browser_lock():
+    _MUTEX.release()
+
+
+atexit.register(_release_browser_lock)
 
 
 # --- L1/L2 browser-hang guards (2026-07-13, mirrors twitter_browser.py) ------
