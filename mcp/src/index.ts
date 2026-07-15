@@ -504,6 +504,14 @@ const server = new McpServer(
       "old 'social-autoposter-autopilot' task — it is deprecated. Do NOT ask the user to review drafts " +
       "or pause for input mid-onboarding; once the tasks are created and firing, setup is done. If the " +
       "host exposes no create_scheduled_task tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
+      "REDDIT IS OPTIONAL. After X setup completes (never before, and never as a requirement or " +
+      "terminal goal), you may offer Reddit as an add-on: `project_config` action:'connect_reddit' " +
+      "imports the user's reddit.com session into the autoposter's managed reddit browser, same " +
+      "confirm-first flow and keychain heads-up as connect_x. Once connected, reddit discovery and " +
+      "drafting run on the same draft-only queue and review cards as X; nothing posts without " +
+      "approval. If the result carries a `warning` (fresh or low-karma account), relay it so the " +
+      "user knows AutoMod may gate early replies. Skipping Reddit entirely is a perfectly complete " +
+      "setup; do not nag about it.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: point it out to the user — the draft autopilot runs " +
@@ -4430,6 +4438,98 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
   }
 }
 
+// ---- Reddit discovery kicker (optional platform) ----------------------------
+// Mirrors ensureQueueKickerInstalled for the reddit lane: a 15-minute launchd
+// job that runs skill/run-reddit-search-launchd.sh (the detach wrapper; the
+// real cycle honors the global draft-only flag via s4l_mode.py, and its
+// drafting turn rides the same s4l-worker queue as X). Gates:
+//   - runtime ready
+//   - reddit connected (connected OR connected_idle; the profile persists)
+//   - a managed project is configured and ready
+// It is NEVER an onboarding requirement: installs that never connect reddit
+// simply never get this plist.
+//
+// OPERATOR-MAC SAFETY: a hand-built com.m13v.social-reddit-search plist
+// pointing at ~/social-autoposter (StartCalendarInterval, custom env) exists
+// on the dev box. If an existing plist's program path is not the managed
+// package's wrapper, we log and leave it completely alone: no rewrite, no
+// reload, no unload.
+async function ensureRedditKickerInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    if (!runtimeReady()) return { ok: false, detail: "runtime not ready" };
+    const productReady = listManagedProjectStatus().some((p) => p.ready);
+    if (!productReady) return { ok: false, detail: "no ready project yet" };
+    // Reddit session gate. status is read-only (never launches Chrome): a live
+    // me.json validation when the harness is up, the on-disk profile cookie
+    // check (connected_idle) when it isn't.
+    const rs = await redditStatus();
+    if (!rs.connected) {
+      return { ok: false, detail: `reddit not connected (${rs.state})` };
+    }
+
+    const managedWrapper = path.join(repoDir(), "skill", "run-reddit-search-launchd.sh");
+    // Foreign-plist guard BEFORE any write: if a plist already exists and its
+    // ProgramArguments do not point at the managed package's wrapper, it is a
+    // hand-built / operator arrangement. Leave it untouched.
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(REDDIT_SEARCH_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    if (cur !== null && !cur.includes(`<string>${managedWrapper}</string>`)) {
+      const msg = `existing ${REDDIT_SEARCH_LABEL} plist points outside the managed package; leaving it untouched`;
+      console.error(`[reddit-kicker] ${msg}`);
+      return { ok: true, detail: `skip: ${msg}` };
+    }
+
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: REDDIT_SEARCH_LABEL,
+      programArgs: ["bash", managedWrapper],
+      intervalSecs: REDDIT_SEARCH_INTERVAL_SECS,
+      runAtLoad: false, // never fire a discovery cycle the instant Claude launches
+      stdoutLog: path.join(logDir, "launchd-reddit-search-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-reddit-search-stderr.log"),
+      // S4L_REPO_DIR + S4L_PYTHON are baked by plistXml. State dir + CDP url
+      // pin the wrapper's children to the managed state and the harness port.
+      extraEnv: {
+        S4L_STATE_DIR: s4lStateDir(),
+        REDDIT_CDP_URL: REDDIT_CDP_URL_DEFAULT,
+      },
+      // The wrapper double-forks the real cycle into its own session already,
+      // but keep launchd away from the harness Chrome all the same.
+      abandonProcessGroup: true,
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    if (cur === xml) {
+      const res = await loadPlist(REDDIT_SEARCH_LABEL, REDDIT_SEARCH_PLIST, uid);
+      return { ok: true, detail: `current (load rc=${res.code})` };
+    }
+    if (cur !== null) {
+      await unloadPlist(REDDIT_SEARCH_LABEL, REDDIT_SEARCH_PLIST, uid);
+    }
+    fs.mkdirSync(path.dirname(REDDIT_SEARCH_PLIST), { recursive: true });
+    fs.writeFileSync(REDDIT_SEARCH_PLIST, xml, "utf-8");
+    const res = await loadPlist(REDDIT_SEARCH_LABEL, REDDIT_SEARCH_PLIST, uid);
+    // No first-run kickstart on purpose: reddit discovery is a background
+    // add-on, and the connect flow just finished using the harness browser.
+    // The first StartInterval tick (≤15 min) is soon enough.
+    return {
+      ok: true,
+      detail: cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`,
+    };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // ---- launchd reaper: kill leaked agent-mode claude worker sessions ----------
 // Independent guardrail (NOT gated on a project being ready): the leak happens
 // whenever the scheduled-task workers fire, and a no-leak run is a cheap no-op.
@@ -6059,6 +6159,16 @@ async function main() {
       .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
   } else {
     console.error("[queue-worker] launchd kicker: skip (paused)");
+  }
+  // Reddit discovery kicker (optional platform): installs only when reddit is
+  // connected AND a project is ready; a box that never connected reddit is a
+  // cheap no-op skip. Paused-gated like the X kicker (it produces drafts).
+  if (!isPaused()) {
+    void ensureRedditKickerInstalled()
+      .then((r) => console.error(`[reddit-kicker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+      .catch((e) => console.error("[reddit-kicker] kicker install failed:", e?.message || e));
+  } else {
+    console.error("[reddit-kicker] launchd kicker: skip (paused)");
   }
   // Self-healing reaper for the agent-mode session leak the queue autopilot
   // produces (finished `claude` worker sessions Desktop never tears down). A
