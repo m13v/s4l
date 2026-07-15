@@ -36,9 +36,13 @@ done <<EOF_ENV
 $(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
 EOF_ENV
 
-[ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
+# Honor S4L_REPO_DIR (customer boxes run the materialized package copy, not
+# ~/social-autoposter; the MCP-managed launchd plist bakes S4L_REPO_DIR in).
+# Fallback keeps the operator Mac's hand-built plist working unchanged.
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 
-REPO_DIR="$HOME/social-autoposter"
+[ -f "$REPO_DIR/.env" ] && source "$REPO_DIR/.env"
+
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run-reddit-search-$(date +%Y-%m-%d_%H%M%S).log"
