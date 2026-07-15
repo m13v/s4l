@@ -1846,24 +1846,38 @@ fi
 export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
 log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)} source=$DRAFT_B_SOURCE"
 
-# --- Draft-prompt A/B: style-as-form (v3, 2026-07-10) ------------------------
+# --- Draft-prompt A/B: voice-first (v4, 2026-07-15) --------------------------
 # Per-CYCLE arm (the prep session drafts the whole batch from ONE prompt, so
 # assignment is at cycle granularity, not per post; the whole batch shares it).
-#   control_v3   = the plain draft directive (v2's control text verbatim).
-#   treatment_v3 = style-as-FORM package: the assigned engagement style is the
-#                  binding FORM of the draft (defining move + per-style length +
-#                  end-of-block self-check, rendered arm-aware by
-#                  engagement_styles.get_assigned_style_prompt, which reads
-#                  S4L_DRAFT_PROMPT_VARIANT at render time IN this cycle
-#                  process), PLUS the two-layer learned_preferences contract
-#                  (style owns form, preferences own voice inside it; the old
-#                  'overrides on conflict' phrasing made the model treat the
-#                  style as optional), PLUS the v2 skeleton ban carried over.
+#   control_v4   = the plain draft directive (v3's control text verbatim).
+#   treatment_v4 = voice-first package: real, human-verified voice signal (the
+#                  account's own corpus + voice.examples + learned_preferences)
+#                  is made the DOMINANT signal, elevated above and prioritized
+#                  over the assigned engagement style, which is demoted from a
+#                  binding FORM (v3's treatment) to an optional idea, rendered
+#                  arm-aware by engagement_styles.get_assigned_style_prompt,
+#                  which reads S4L_DRAFT_PROMPT_VARIANT at render time IN this
+#                  cycle process. Also skips the per-style top_performers
+#                  exemplar report entirely (TOP_REPORT/TOP_REPORT_B below) so
+#                  no cross-account "what wins in this style" signal competes
+#                  with the account's own real voice. Applied GLOBALLY: both
+#                  the promotion-lane and personal_brand-lane directives are
+#                  arm-aware, not just personal_brand (learned_preferences is
+#                  install-wide and voice.examples is per-project already).
 #   History: v1 (2026-06-29) decoupled the product pivot; the model kept the
 #   skeleton (30% ~= 28% on 857 replies). v2 (2026-07-06) banned the
-#   concede-then-reverse STRUCTURE. v3 (2026-07-10) replaces v2's treatment
-#   wholesale: drafts converged in shape regardless of assigned style, so v3
-#   makes the style block load-bearing instead of only banning one skeleton.
+#   concede-then-reverse STRUCTURE. v3 (2026-07-10) made the style block the
+#   binding FORM of the draft, testing whether structural specificity beat a
+#   uniform length clamp. v4 (2026-07-15) replaces v3's treatment wholesale:
+#   rather than testing HOW MUCH the style should structure the draft, it
+#   tests whether the account's own real voice (corpus + examples +
+#   learned_preferences) should dominate over the style and other generic
+#   exemplars entirely. Retiring v3 rather than running v4 alongside it as an
+#   independent axis: v4 directly manipulates the same style-block-bindingness
+#   variable v3 already owned, and running both independently would produce
+#   literal contradictions in the same prompt in one of the four combinations
+#   (v3-treatment saying "commit to this style's form", v4-treatment saying
+#   "the style is optional"), not just a statistical interaction to control for.
 # The arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
 # (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
 # mirroring the tail_link_variant plumbing. Split tunable via
@@ -1877,12 +1891,12 @@ log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(i
 # .env override, prevents that. The dashboard reads the SAME var with the SAME
 # default (bin/server.js), so display and routing never diverge.
 DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
-# Arm VALUE versioned to '..._v3' on 2026-07-10 to RESET the experiment. The old
-# v1/v2 rows stay in the DB under their old labels but the dashboard now counts
-# only the '_v3' arms, so the style-as-form experiment starts fresh from zero.
-# Bump this suffix again on any future reset (keep bin/server.js
+# Arm VALUE versioned to '..._v4' on 2026-07-15 to RESET the experiment. The old
+# v1/v2/v3 rows stay in the DB under their old labels but the dashboard now
+# counts only the '_v4' arms, so the voice-first experiment starts fresh from
+# zero. Bump this suffix again on any future reset (keep bin/server.js
 # DRAFT_PROMPT_VARIANT_DEFS, scripts/active_experiments.py DESCRIPTIONS, and the
-# treatment_v3 gate in scripts/engagement_styles.py get_assigned_style_prompt in
+# treatment_v4 gate in scripts/engagement_styles.py get_assigned_style_prompt in
 # sync).
 S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
@@ -1891,73 +1905,60 @@ try:
 except Exception:
     rate = 0.5
 rate = min(1.0, max(0.0, rate))
-print('treatment_v3' if random.random() < rate else 'control_v3')
-" 2>/dev/null || echo treatment_v3)
+print('treatment_v4' if random.random() < rate else 'control_v4')
+" 2>/dev/null || echo treatment_v4)
 export S4L_DRAFT_PROMPT_VARIANT
 log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
-if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v3" ]; then
-    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. THE ASSIGNED ENGAGEMENT STYLE IS THE FORM OF THIS DRAFT, not a flavor hint: the style block above defines the draft's structure, defining move, and length. Commit to that form BEFORE writing, and run the style block's self-check before returning the draft. Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. If your draft contains that concede-then-reverse pivot, rewrite it from a different entry point. This ban OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's defining move, express it without the skeleton. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory, and it works TOGETHER with the engagement style on different layers: the style owns the FORM (structure, defining move, length) and learned_preferences.draft_style_notes own the voice, wording, and content choices INSIDE that form. When a preference seems to conflict with the style, keep the style's structure and satisfy the preference within it; never drop the style's defining move to satisfy a wording note. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+# v4 RESET (2026-07-15, replaces v3 wholesale): v3 tested whether the
+# assigned engagement style should be a binding structural FORM. v4 tests a
+# different, bigger claim: that real, measured voice signal (the account's
+# own corpus + voice.examples + learned_preferences, all human-verified)
+# should dominate the draft over EVERY other competing signal — including the
+# style block's structure, which is now demoted to an optional idea
+# (scripts/engagement_styles.py), and the per-style top-performers exemplar
+# report, which treatment_v4 skips computing entirely (see TOP_REPORT below).
+# Applied GLOBALLY (both lanes), not personal_brand-only: learned_preferences
+# has been install-wide since 2026-07-08 and voice.examples exists per-project
+# for every project, persona or product. v1-v3 arm strings are retired; the
+# dashboard (bin/server.js DRAFT_PROMPT_VARIANT_DEFS) and
+# scripts/active_experiments.py DESCRIPTIONS now count only v4.
+if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
+    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. PRIORITY ORDER for how you write this, highest first: (1) learned_preferences.draft_style_notes and edit_examples under PROJECT ROUTING are the strongest signal available, real human corrections to this account's own past drafts, and are MANDATORY, not advisory. (2) The ACCOUNT VOICE CORPUS block and the matched project's voice.examples are VERBATIM GROUND TRUTH for how this account actually writes: capitalization, punctuation, contractions, sentence length, terseness. Match those mechanics exactly. (3) voice.tone is a supporting description only, never ground truth: if it ever conflicts with what the corpus/examples actually show, follow the examples, not the tone description. (4) The assigned engagement style is an optional idea for angle and length, not a required structure; draw on it only when it fits naturally, never at the cost of (1)-(3). Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes. Never violate voice.never. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 else
     DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 # Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by s4l_mode.py):
 # replace the product-framed directive entirely. This lane is pure organic
 # growth: no product, no link, no CTA. The reply must add real value grounded in
-# the persona's first-hand material (the PERSONA CORPUS block + the persona voice
-# block), not concede-and-agree filler. Replaces the product-framed promotion
-# directives above, but is itself arm-aware (see below): treatment_v3 adds the
-# skeleton ban + the two-layer style/preferences contract, control_v3 keeps the
-# plain persona directive, so the A/B runs in this lane too.
+# the persona's first-hand material (the ACCOUNT VOICE CORPUS block + the
+# persona voice block), not concede-and-agree filler. Replaces the
+# product-framed promotion directives above, but is itself arm-aware (see
+# below): treatment_v4 adds the skeleton ban AND the voice/preferences
+# priority order; control_v4 keeps the plain persona directive, so the A/B
+# runs in this lane too.
 if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
-    # Arm-aware persona lane (v3, 2026-07-10): treatment_v3 adds the
-    # concede-then-reverse ban clause AND swaps the learned_preferences
-    # relation from 'overrides the style on conflict' to the two-layer
-    # contract (style owns form, preferences own voice inside it);
-    # control_v3 keeps the plain persona directive. The style block itself
-    # (STYLES_BLOCK, rendered in this process) is also arm-aware, so the
-    # persona lane gets the style-as-FORM block on treatment automatically.
-    # The arm is stamped onto the card + surfaced (active_experiments.py no
-    # longer drops draft_prompt for personal_brand), so persona cards show
-    # treatment_v3 / control_v3.
-    if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v3" ]; then
-        PERSONA_SKELETON_BAN=" Also do NOT use the concede-then-reverse skeleton in ANY form: banned openings include 'X is the easy part/half/win, the hard part is Y', 'X was never the [thing], it's Y', 'X isn't the [problem], it's Y', 'the real/actual/harder part is Y', 'what actually breaks/ships/matters is Y', 'the part nobody says/shows is Y', and 'X is solved, Y is what breaks'; if a draft has that pivot, rewrite it from one of the entry points above. This ban OVERRIDES the assigned style's example when that example uses the skeleton: keep the style's defining move, express it without the skeleton."
-        PERSONA_PREFS_RELATION="(learned_preferences work TOGETHER with the engagement style on different layers: the style owns the FORM, structure, defining move, and length; draft_style_notes own the voice and wording INSIDE that form; on apparent conflict keep the style's structure and satisfy the preference within it)"
+    # Arm-aware persona lane (v4 RESET, 2026-07-15): treatment_v4 adds the
+    # concede-then-reverse ban clause AND a PRIORITY ORDER clause making the
+    # ACCOUNT VOICE CORPUS / voice.examples and learned_preferences outrank
+    # the freeform voice.tone description and the assigned engagement style
+    # whenever they disagree. voice.tone is synthesized LLM prose written at
+    # onboarding and can drift from what the corpus actually shows (seen in
+    # the wild: a persona's tone said "lowercase is fine" while every scanned
+    # example was properly capitalized) — the old directive never told the
+    # model which one wins on conflict; v4 does. control_v4 keeps the plain
+    # persona directive. The style block itself (STYLES_BLOCK, rendered in
+    # this process) is also arm-aware: it renders as an optional idea, not a
+    # binding FORM, on treatment_v4 (scripts/engagement_styles.py).
+    if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
+        PERSONA_SKELETON_BAN=" Also do NOT use the concede-then-reverse skeleton in ANY form: banned openings include 'X is the easy part/half/win, the hard part is Y', 'X was never the [thing], it's Y', 'X isn't the [problem], it's Y', 'the real/actual/harder part is Y', 'what actually breaks/ships/matters is Y', 'the part nobody says/shows is Y', and 'X is solved, Y is what breaks'; if a draft has that pivot, rewrite it from one of the entry points above."
+        PERSONA_VOICE_PRIORITY_CLAUSE=" PRIORITY ORDER for how you write this, highest first: (1) learned_preferences.draft_style_notes and edit_examples are the strongest signal available, real human corrections to this account's own past drafts, and are MANDATORY. (2) The ACCOUNT VOICE CORPUS block and voice.examples above are VERBATIM GROUND TRUTH for how they actually write: capitalization, punctuation, contractions, sentence length, terseness. Match those mechanics exactly. (3) voice.tone is a supporting description only, never ground truth: if it ever conflicts with what the corpus/examples actually show (for example tone says lowercase is fine but every real example is properly capitalized), follow the examples. (4) The assigned engagement style is an optional idea for angle and length, not a required structure."
+        PERSONA_PREFS_RELATION="(per the PRIORITY ORDER above: learned_preferences and the account's real voice outrank the engagement style whenever they disagree)"
     else
         PERSONA_SKELETON_BAN=""
+        PERSONA_VOICE_PRIORITY_CLAUSE=""
         PERSONA_PREFS_RELATION="(it overrides the engagement style's structural template on conflict)"
     fi
-    # --- Voice-fidelity experiment (2026-07-15) ------------------------------
-    # Does making the persona's own verbatim reply examples / persona corpus
-    # outrank the freeform voice.tone description produce drafts closer to the
-    # real person's voice? voice.tone is synthesized once (LLM prose written
-    # at onboarding) and can drift from what the scanned corpus actually shows
-    # (seen in the wild: a persona's tone said "lowercase is fine" while every
-    # scanned example was properly capitalized with normal punctuation) — the
-    # directive never told the model which one wins on conflict. Per-cycle
-    # 50/50 arm, personal_brand lane only (the promotion lane has no persona
-    # corpus to be faithful to). Independent of S4L_DRAFT_PROMPT_VARIANT (a
-    # different concern: FORM/skeleton, not voice-mechanics fidelity), so
-    # neither experiment disturbs the other. Follows the S4L_EXP_ convention
-    # (scripts/active_experiments.py collect()): exporting the var is the only
-    # wiring needed, the plan writer stamps it automatically.
-    VOICE_FIDELITY_AB_RATE="${S4L_VOICE_FIDELITY_AB_RATE:-0.5}"
-    S4L_EXP_VOICE_FIDELITY=$(python3 -c "
-import random
-try:
-    rate = float('$VOICE_FIDELITY_AB_RATE')
-except Exception:
-    rate = 0.5
-rate = min(1.0, max(0.0, rate))
-print('treatment' if random.random() < rate else 'control')
-" 2>/dev/null || echo control)
-    export S4L_EXP_VOICE_FIDELITY
-    log "Voice-fidelity A/B arm: $S4L_EXP_VOICE_FIDELITY (rate=$VOICE_FIDELITY_AB_RATE)"
-    if [ "$S4L_EXP_VOICE_FIDELITY" = "treatment" ]; then
-        PERSONA_VOICE_FIDELITY_CLAUSE=" The PERSONA CORPUS and voice.examples above are VERBATIM GROUND TRUTH for how they actually write: capitalization, punctuation, contractions, sentence length, and terseness. Match those mechanics exactly. voice.tone is a supporting description, not ground truth: if it ever conflicts with what the corpus/examples actually show (for example tone says lowercase is fine but every real example is properly capitalized), follow the examples, not the tone description."
-    else
-        PERSONA_VOICE_FIDELITY_CLAUSE=""
-    fi
-    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.${PERSONA_VOICE_FIDELITY_CLAUSE} The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the ACCOUNT VOICE CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.${PERSONA_VOICE_PRIORITY_CLAUSE} The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 
 # 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
@@ -1965,15 +1966,26 @@ fi
 # used to ride along in EVERY draft prompt and homogenize drafts. The prep
 # session now queries per-project winners on demand AFTER routing a
 # candidate (see PROJECT TOP PERFORMERS section in PREP_PROMPT below).
-if [ -n "$PICKED_STYLE" ]; then
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+# 2026-07-15 (draft_prompt v4): treatment_v4 skips even the per-style
+# exemplar report below. voice.examples + the account voice corpus +
+# learned_preferences are meant to be the dominant signal on treatment; a
+# report of what wins in this style ACROSS OTHER ACCOUNTS/PROJECTS is direct
+# competing signal against one specific account's own real voice, and is cut
+# entirely rather than reduced. control_v4 is unaffected (unchanged from v3).
+if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
+    TOP_REPORT=""
+    TOP_REPORT_B=""
 else
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
-fi
-if [ -n "$PICKED_STYLE_B" ]; then
-    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE_B" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
-else
-    TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    if [ -n "$PICKED_STYLE" ]; then
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    else
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    fi
+    if [ -n "$PICKED_STYLE_B" ]; then
+        TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE_B" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    else
+        TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    fi
 fi
 
 # --- Cross-cycle self-memory (anti-repetition) ------------------------------
@@ -2119,19 +2131,26 @@ rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 log "Releasing twitter-browser lock before Claude drafting (drafting never touches the browser)..."
 release_lock "twitter-browser" 2>>"$LOG_FILE"
 
-# --- PERSONA CORPUS injection (personal_brand lane only) --------------------
-# build_persona.py apply writes a raw first-hand corpus sidecar next to
-# config.json. In the personal_brand lane we inline it so the drafter grounds
-# replies in real specifics (projects, numbers, opinions) instead of the single
-# synthesized content_angle paragraph. Empty string in the promotion lane, so
-# promotion prompts stay lean and config.json is never bloated with the corpus.
+# --- ACCOUNT VOICE CORPUS injection (both lanes, 2026-07-15) -----------------
+# build_persona.py apply / voice_exemplars.py write a raw first-hand corpus
+# sidecar (persona_corpus.txt) next to config.json, scanned from the
+# account's OWN real posts/replies. It reflects the ACCOUNT HOLDER, not a
+# specific project, so it is equally valid grounding whether this cycle is
+# drafting a personal_brand reply or a promotion-lane reply for a product
+# project: same human, same fingers, same account. Previously gated to the
+# personal_brand lane only, which withheld real grounding data from every
+# promotion-lane draft for no reason tied to the data itself; ungated so
+# every lane gets it whenever the file exists. This is NOT part of the
+# draft_prompt A/B — both v4 arms (and any legacy card mid-flight) see it;
+# withholding real examples from control would confound "does showing real
+# examples help" with "does emphasizing them differently help."
 CORPUS_BLOCK=""
-if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ] && [ -f "$REPO_DIR/persona_corpus.txt" ]; then
-    CORPUS_BLOCK="## PERSONA CORPUS (raw first-hand material — ground your reply in THIS)
-This is the persona's own public writing and work, verbatim. Quote and draw real specifics from it: actual projects, real numbers, sharp opinions, real failures. Do NOT invent anything not supported here or in the persona voice block. Use it to make the reply concrete and unmistakably human.
+if [ -f "$REPO_DIR/persona_corpus.txt" ]; then
+    CORPUS_BLOCK="## ACCOUNT VOICE CORPUS (raw first-hand material — ground your reply in THIS)
+This is the account holder's own public writing and work, verbatim. Quote and draw real specifics from it: actual projects, real numbers, sharp opinions, real failures. Do NOT invent anything not supported here or in the project's voice block. Use it to make the reply concrete and unmistakably human, and as ground truth for HOW they write (capitalization, punctuation, contractions, length) regardless of which project this reply is for.
 $(cat "$REPO_DIR/persona_corpus.txt")
 "
-    log "Phase 2b-prep: injected persona corpus ($(wc -c < "$REPO_DIR/persona_corpus.txt" | tr -d ' ') bytes)."
+    log "Phase 2b-prep: injected account voice corpus ($(wc -c < "$REPO_DIR/persona_corpus.txt" | tr -d ' ') bytes)."
 fi
 
 log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
