@@ -1124,13 +1124,6 @@ def read_flags():
     return dict(_DEFAULT_FLAGS)
 
 
-def read_mode():
-    """Derived legacy single-mode string (personal_brand wins when on). Kept so
-    older menu-bar callers that expect one value keep working."""
-    f = read_flags()
-    return MODE_PERSONAL_BRAND if f.get("personal_brand") else MODE_PROMOTION
-
-
 def write_flags(personal_brand, promotion):
     """Persist both lane flags atomically (plus the derived legacy `mode`).
 
@@ -1302,16 +1295,6 @@ def write_posting_mode(mode):
             at=time.time(),
         )
     return stored
-
-
-def write_mode(mode):
-    """Legacy single-mode setter: named lane ON, the other OFF (compat)."""
-    if mode not in _VALID_MODES:
-        return read_flags()
-    return write_flags(
-        personal_brand=(mode == MODE_PERSONAL_BRAND),
-        promotion=(mode == MODE_PROMOTION),
-    )
 
 
 def toggle_lane(lane):
