@@ -74,6 +74,7 @@ from Foundation import (
     NSAttributedString,
     NSMutableAttributedString,
     NSURL,
+    NSTimer,
 )
 from AppKit import (
     NSApp,
@@ -651,12 +652,11 @@ def _first_run_boost_active():
         return False
 
 
-def _expiry_str(iso, platform):
-    """Countdown to the Phase 0 hard-expire cutoff ('1h22m left', '4m left'),
-    or 'expired' once past it (a laggy sync can leave a stale card showing
-    for a few seconds before the backend prune catches up and drops it).
-    None when there's nothing to count down: no timestamp, or a platform this
-    doesn't apply to."""
+def _expiry_secs_left(iso, platform):
+    """Seconds remaining until the Phase 0 hard-expire cutoff, shared by the
+    header's minute-granular label and the hover popover's second-granular
+    live countdown. None when there's nothing to count down: no timestamp,
+    or a platform this doesn't apply to."""
     if not iso or (platform or "twitter").lower() != "twitter":
         return None
     try:
@@ -669,10 +669,20 @@ def _expiry_str(iso, platform):
             else _TWITTER_EXPIRE_HOURS
         )
         deadline = t + datetime.timedelta(hours=hours)
-        secs_left = int(
+        return int(
             (deadline - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
         )
     except Exception:
+        return None
+
+
+def _expiry_str(iso, platform):
+    """Minute-granular countdown for the card header ('1h22m left', '4m
+    left'), or 'expired' once past it (a laggy sync can leave a stale card
+    showing for a few seconds before the backend prune catches up and drops
+    it). None when _expiry_secs_left is None."""
+    secs_left = _expiry_secs_left(iso, platform)
+    if secs_left is None:
         return None
     if secs_left <= 0:
         return "expired"
@@ -681,6 +691,36 @@ def _expiry_str(iso, platform):
         return f"{mins_left}m left"
     h, m = divmod(mins_left, 60)
     return f"{h}h left" if m == 0 else f"{h}h{m:02d}m left"
+
+
+def _expiry_seconds_str(iso, platform):
+    """Second-granular countdown ('1h22m03s left', '4m09s left', '38s
+    left'), or 'expired'. Only the hover popover uses this -- it visibly
+    ticks down (2026-07-15 per user) while the header label itself stays
+    minute-granular so it isn't re-laid-out every second."""
+    secs_left = _expiry_secs_left(iso, platform)
+    if secs_left is None:
+        return None
+    if secs_left <= 0:
+        return "expired"
+    h, rem = divmod(secs_left, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s left"
+    if m:
+        return f"{m}m{s:02d}s left"
+    return f"{s}s left"
+
+
+# Hover popover on the header's age/expiry label (2026-07-15 per user): the
+# reviewer sees the countdown but not necessarily WHY it exists, so the
+# popover pairs the live seconds-granular clock with the reasoning behind the
+# freshness gate itself.
+_EXPIRY_EDUCATION_TEXT = (
+    "What we care about is not a post that has a lot of engagement, but the "
+    "fresh ones: ideally we're the first to comment and like a post, to have "
+    "the highest share of voice and be the first-ranking comment on a thread."
+)
 
 
 # ---- contemporary styling helpers --------------------------------------------
@@ -865,6 +905,9 @@ class _ReviewController(NSObject):
         self._eye_btn = None
         self._details_btn = None
         self._stats_popover = None
+        self._age_expiry_label = None
+        self._expiry_timer = None
+        self._expiry_secs_label = None
         # Per-card telemetry, reset when a NEW card renders (not on the
         # card <-> reason-picker swap, which is the same card).
         self._rendered_idx = -1
