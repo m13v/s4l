@@ -334,7 +334,6 @@ SETUP_PROMPT = (
     "Keep going without asking me to approve each safe setup step. Ask only if I "
     "must interactively sign in or no product can be identified."
 )
-UPDATE_PROMPT = "Update the S4L plugin to the latest version."
 # Re-arm goes through the HOST create_scheduled_task path (the same one onboarding
 # uses) — it registers the routines under whatever account is logged in and shows
 # up in Routines. The host tool only runs inside an agent chat, so the menu bar
@@ -492,42 +491,6 @@ def _label_elapsed_secs(label):
 
 def _glyph(status):
     return GLYPH.get(status, "·")
-
-
-def _osa_quote(s):
-    """Escape a Python string for an AppleScript double-quoted literal."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _claude_send_script(prompt):
-    """AppleScript that focuses Claude, pastes `prompt` into the focused composer,
-    and presses Return. Uses the clipboard (saved + restored) rather than slow
-    per-character keystrokes, and waits longer on a cold launch so the window is
-    ready before pasting."""
-    p = _osa_quote(prompt)
-    return "\n".join(
-        [
-            'set prevClip to ""',
-            "try",
-            "    set prevClip to (the clipboard as text)",
-            "end try",
-            f'set the clipboard to "{p}"',
-            'tell application "System Events" to set wasRunning to (exists process "Claude")',
-            'tell application "Claude" to activate',
-            "if wasRunning then",
-            "    delay 0.5",
-            "else",
-            "    delay 2.5",
-            "end if",
-            'tell application "System Events"',
-            '    keystroke "v" using {command down}',
-            "    delay 0.15",
-            "    key code 36",
-            "end tell",
-            "delay 0.3",
-            'if prevClip is not "" then set the clipboard to prevClip',
-        ]
-    )
 
 
 class S4LMenuBar(rumps.App):
@@ -710,23 +673,6 @@ class S4LMenuBar(rumps.App):
         except Exception:
             return False
 
-    def _manual_paste_fallback(self, prompt, reason):
-        """Automation couldn't paste (no Accessibility, or osascript failed). Don't
-        dead-end: drop the prompt on the clipboard and open Claude so the user can
-        paste it themselves (Cmd+V, Enter). This is what makes re-arm/setup usable
-        even when the TCC grant is stale (granted but the running process still
-        reads untrusted until restart)."""
-        copied = self._copy_to_clipboard(prompt)
-        self._open_claude()
-        if copied:
-            self._notify(
-                "S4L · prompt copied to clipboard",
-                f"{reason} Paste it into Claude (⌘V) and press Enter to continue.",
-            )
-        else:
-            self._notify("S4L", f"{reason} Open Claude and type your request there.")
-        return False
-
     def _clipboard_prompt(self, prompt, title, action_desc):
         """The menu bar's UNIVERSAL way to hand an agent-driven action to Claude
         without depending on the MCP/loopback being up (the menu bar can't inject
@@ -750,13 +696,6 @@ class S4LMenuBar(rumps.App):
                          "Paste the prompt into Claude (Cmd+V) and press Enter.")
         self._open_claude()
         return True
-
-    def _send_to_claude(self, prompt):
-        """Back-compat shim: every agent-driven menu action now uses the reliable
-        clipboard-prompt model (no flaky auto-type). Delegates to _clipboard_prompt."""
-        return self._clipboard_prompt(
-            prompt, "Send to Claude", "Claude will take it from there"
-        )
 
     # Agent-driven action: hand the full setup prompt to Claude via the clipboard.
     def _setup(self, _=None):
@@ -1305,26 +1244,6 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
 
-    # ---- disable scheduled tasks (menu-bar driven) ------------------------
-    def _has_scheduled_tasks(self):
-        """Read-only: True if any S4L worker/autopilot task is registered in any
-        scheduled-tasks.json. Gates whether the 'Disable scheduled tasks' item is
-        worth showing."""
-        try:
-            wanted = set(WORKER_TASK_IDS) | set(DEPRECATED_TASK_IDS)
-            for f in glob.glob(SCHED_REGISTRY_GLOB):
-                try:
-                    with open(f) as fh:
-                        d = json.load(fh)
-                except Exception:
-                    continue
-                for t in d.get("scheduledTasks", []):
-                    if t.get("id") in wanted:
-                        return True
-        except Exception:
-            pass
-        return False
-
     def _pause_toggle(self, _=None):
         """Pause/Resume: the lighter, fully reversible alternative to Quit. Stops
         S4L's own scan/draft/post pipeline (the launchd kicker + its support
@@ -1475,9 +1394,6 @@ class S4LMenuBar(rumps.App):
             # launchd). Exit 0: KeepAlive {SuccessfulExit: false} treats a clean
             # exit as final. os._exit because we're on a background thread.
             os._exit(0)
-
-    def _update(self, _=None):
-        self._send_to_claude(UPDATE_PROMPT)
 
     # ---- .mcpb self-update (menu-bar driven) ------------------------------
     @staticmethod
