@@ -291,6 +291,40 @@ def _x_status():
     return val
 
 
+# ---- Reddit status (setup_reddit_auth.py status), cached --------------------
+# Mirrors _x_status for the optional Reddit platform. The reddit status command
+# is deliberately CHEAP (reddit_session cookie presence over CDP or on-disk
+# profile check; it never navigates the shared harness tab), so polling it on
+# the same TTL as X is safe.
+_reddit_cache = {"at": 0.0, "val": None}
+
+
+def _reddit_status():
+    now = time.time()
+    if _reddit_cache["val"] is not None and now - _reddit_cache["at"] < _X_TTL:
+        return _reddit_cache["val"]
+    val = {"connected": False, "state": "", "username": None}
+    if _runtime_ready():
+        try:
+            py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
+            res = subprocess.run(
+                [py, os.path.join(_repo_dir(), "scripts", "setup_reddit_auth.py"), "status"],
+                capture_output=True, text=True, timeout=90,
+            )
+            parsed = json.loads("\n".join(res.stdout.strip().splitlines()[-50:]))
+            val = {
+                "connected": bool(parsed.get("connected")),
+                "state": parsed.get("state") or "",
+                "username": parsed.get("username"),
+            }
+        except Exception:
+            val = {"connected": False, "state": "status_unavailable", "username": None}
+    else:
+        val = {"connected": False, "state": "runtime_not_ready", "username": None}
+    _reddit_cache.update(at=now, val=val)
+    return val
+
+
 # ---- version (resolveVersion + latest release + semver), cached ------------
 # Latest-version SOURCE = GitHub releases/latest first, npm only as a fallback.
 # This mirrors mcp/src/version.ts::latestPublishedVersion and is load-bearing:
@@ -658,13 +692,46 @@ def _onboarding_live(live_status):
     # list. Mirror onboarding-ledger.cjs publicSnapshot() ordering via MILESTONES.
     order = ["environment_checked", "runtime_ready", "x_connected", "profile_scanned",
              "mode_chosen", "project_ready", "topics_seeded", "tasks_scheduled"]
+    # Optional reddit milestones render only once touched; they never gate
+    # completion (mirror of onboarding-ledger.cjs OPTIONAL_MILESTONES).
+    optional = ["reddit_connected", "reddit_verified"]
+
+    def _st(mid):
+        rec = ms.get(mid) if isinstance(ms, dict) else None
+        st = (rec or {}).get("status", "pending")
+        return live_status.get(mid, st)
+
+    # Any-of platform completion (mirror of onboarding-ledger.cjs
+    # milestoneSatisfied): a required X milestone also counts when its Reddit
+    # counterpart is complete, and profile_scanned (an X-account scan) is
+    # required only while X is the connected platform.
+    def _satisfied(mid):
+        if _st(mid) == "complete":
+            return True
+        if mid == "x_connected":
+            return _st("reddit_connected") == "complete"
+        if mid == "profile_scanned":
+            return _st("x_connected") != "complete" and _st("reddit_connected") == "complete"
+        return False
+
     out = []
     if isinstance(ms, dict):
         for mid in order:
+            # Omit a pristine-pending required row that the other platform
+            # satisfies (reddit-only install), same as the ledger snapshot.
+            if _st(mid) == "pending" and _satisfied(mid):
+                continue
             rec = dict(ms.get(mid) or {"status": "pending", "attempts": 0})
             rec["id"] = mid
-            if mid in live_status:
-                rec["status"] = live_status[mid]
+            rec["status"] = _st(mid)
+            out.append(rec)
+        for mid in optional:
+            if _st(mid) == "pending":
+                continue
+            rec = dict(ms.get(mid) or {"status": "pending", "attempts": 0})
+            rec["id"] = mid
+            rec["status"] = _st(mid)
+            rec["optional"] = True
             out.append(rec)
     elif isinstance(ms, list):
         for rec in ms:
@@ -674,7 +741,10 @@ def _onboarding_live(live_status):
             out.append(rec)
     result = dict(led)
     result["milestones"] = out
-    result["complete"] = bool(out) and all(m.get("status") == "complete" for m in out)
+    if isinstance(ms, dict):
+        result["complete"] = all(_satisfied(mid) for mid in order)
+    else:
+        result["complete"] = bool(out) and all(m.get("status") == "complete" for m in out)
     return result
 
 
@@ -694,7 +764,11 @@ def compute() -> dict:
     if persona is not None and flags.get("personal_brand"):
         projects = projects + [persona]
     any_ready = any(p["ready"] for p in projects)
-    setup_complete = rt_ready and any_ready and bool(x["connected"])
+    # Any-of platform completion (2026-07-15): setup is complete with AT LEAST
+    # ONE platform connected. X stays the default suggestion; a reddit-only
+    # install must not read "not set up" forever.
+    reddit = _reddit_status()
+    setup_complete = rt_ready and any_ready and (bool(x["connected"]) or bool(reddit["connected"]))
 
     installed = _resolve_version()
     channel = _channel()
@@ -708,6 +782,10 @@ def compute() -> dict:
         "project_ready": "complete" if any_ready else "pending",
         "tasks_scheduled": "complete" if schedule_state == "ok" else "pending",
     }
+    # Live reddit overlay only when connected: never force a pending overlay
+    # onto a ledger-complete reddit milestone from a transient status miss.
+    if reddit["connected"]:
+        live_status["reddit_connected"] = "complete"
 
     return {
         "projects": projects,
@@ -716,6 +794,9 @@ def compute() -> dict:
         "x_connected": bool(x["connected"]),
         "x_state": x["state"] or "",
         "x_handle": x["handle"],
+        "reddit_connected": bool(reddit["connected"]),
+        "reddit_state": reddit["state"] or "",
+        "reddit_username": reddit["username"],
         "autopilot_on": _autopilot_on(),
         "autopilot_stalled": setup_complete and _autopilot_stalled(),
         "schedule_state": schedule_state,
