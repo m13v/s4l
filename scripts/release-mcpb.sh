@@ -187,6 +187,23 @@ fi
 
 command -v mcpb >/dev/null || die "mcpb CLI not found (npm i -g @anthropic-ai/mcpb)"
 
+# ---- 0b. Regression gate: no silent-fallback / bare-python3 reintroductions --
+# scripts/test_no_silent_fallbacks.py locks in two recurring bug classes that
+# have separately shipped to customers more than once (X handle -> hardcoded
+# "m13v_" impersonation, DEFAULT_ACCOUNTS, and bare "python3" subprocess spawns
+# of Playwright-dependent scripts silently dying on a fresh install with no
+# Playwright on PATH -- see bug_twitter_reply_bare_python3_no_playwright.md
+# and bug_twitter_handle_scrape_brittle_m13v_fallback.md). Runs BEFORE any
+# build/pack/publish work so a regression blocks the release, not a customer.
+# Applies to every path that actually builds a new artifact (stable + both
+# --staging and default runs); --promote ships an already-tested artifact
+# byte-for-byte with no rebuild, so it's exempt (handled in step 0 above,
+# which exits before reaching here) -- that artifact already passed this gate
+# when it was first built.
+say "Regression gate: scripts/test_no_silent_fallbacks.py"
+python3 "$REPO_ROOT/scripts/test_no_silent_fallbacks.py" \
+  || die "regression gate failed -- a silent-fallback / bare-python3 issue was (re)introduced. See output above; do not release until it's clean or the finding is reviewed into the test's ALLOWLIST with a reason."
+
 # ---- 1. Resolve + WRITE version into the repo-root package.json -------------
 # The repo-root package.json is the SINGLE source of truth: `npm pack` reads it
 # to build the embedded pipeline.tgz, so the bundle shell and the bundled
