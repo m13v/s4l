@@ -479,6 +479,12 @@ def _reply_heading_suffix(d):
     project = (d.get("project") or "").strip()
     lane = ((d.get("experiments") or {}).get("lane") or "").strip()
     bits = []
+    if (d.get("experiments") or {}).get("sandbox"):
+        # Prompt-sandbox replay (run-twitter-cycle.sh S4L_SANDBOX_CANDIDATES_FILE):
+        # visible on the heading itself, not just the details popover, since
+        # approve_() blocks posting on these and the reviewer should know why
+        # before clicking rather than after.
+        bits.append("⚠ SANDBOX — not postable")
     # Project and lane are independent concepts most of the time (project
     # "fazm" drafted under lane "personal_brand"), but the operator's own
     # PersonalBrand project IS the personal_brand lane, so project=="PersonalBrand"
@@ -2238,6 +2244,20 @@ class _ReviewController(NSObject):
         # level. Commits and advances immediately; level 2+ is the loved
         # signal, with the exact strength riding along as an approve_level_N
         # interaction.
+        d = self._drafts[self._idx]
+        if (d.get("experiments") or {}).get("sandbox"):
+            # Sandbox replay of a historical thread (run-twitter-cycle.sh's
+            # S4L_SANDBOX_CANDIDATES_FILE short-circuit): approving this would
+            # feed a real reply to twitter_post_plan.py against a months-old
+            # thread. Block it here, the single choke point _record(True, ...)
+            # always routes through, rather than downstream — Reject is still
+            # the only way to clear a sandbox card.
+            _log("blocked approve on sandbox draft (not postable)")
+            try:
+                self._panel.setTitle_("s4l · SANDBOX draft — not postable, use Reject")
+            except Exception:
+                pass
+            return
         try:
             level = int(sender.tag())
         except Exception:
