@@ -1901,8 +1901,9 @@ class _ReviewController(NSObject):
     def _hover_info(self, event):
         """(kind, slot) a tracking-area event belongs to, from the userInfo
         stamped at creation: ('stats'|'details', None) for the eye icons,
-        ('draft', 0|1) for the two draft boxes. Defaults to ('stats', None),
-        the original single-eye behavior, if the area carries no info."""
+        ('expiry', None) for the age/expiry label, ('draft', 0|1) for the two
+        draft boxes. Defaults to ('stats', None), the original single-eye
+        behavior, if the area carries no info."""
         try:
             info = event.trackingArea().userInfo()
             if info:
@@ -1911,22 +1912,26 @@ class _ReviewController(NSObject):
                     return "draft", int(info.get("slot"))
                 if kind == "details":
                     return "details", None
+                if kind == "expiry":
+                    return "expiry", None
         except Exception:
             pass
         return "stats", None
 
-    # NSTrackingArea owner callbacks (hover over either eye icon or, on
-    # two-draft cards, either draft box). Draft hovers only bank dwell time
-    # (no popover, no logging: the boxes are big and enter/exit fires on
-    # every pass of the pointer).
+    # NSTrackingArea owner callbacks (hover over either eye icon, the
+    # age/expiry label, or, on two-draft cards, either draft box). Draft
+    # hovers only bank dwell time (no popover, no logging: the boxes are big
+    # and enter/exit fires on every pass of the pointer).
     def mouseEntered_(self, event):
         kind, slot = self._hover_info(event)
         if kind == "draft":
             self._draft_hover_open[slot] = time.time()
             return
-        _log(f"{kind} eye hover enter")
+        _log(f"{kind} eye hover enter" if kind != "expiry" else "expiry label hover enter")
         if kind == "details":
             self._show_details_popover()
+        elif kind == "expiry":
+            self._show_expiry_popover()
         else:
             self._show_stats_popover()
 
