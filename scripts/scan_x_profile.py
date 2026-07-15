@@ -272,10 +272,22 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
     End-of-feed is detected by COLLECTED-COUNT STALL, not scrollHeight: x.com
     virtualizes the timeline (unloads off-screen articles and keeps total height
     ~constant while swapping content), so scrollHeight plateaus even mid-feed and
-    would false-trigger an early stop. We instead stop when no NEW item has been
-    captured for `STALL_LIMIT` consecutive scrolls (after a min number of scrolls),
-    scrolling to the bottom each step to force the next lazy-load batch."""
+    would false-trigger an early stop. We instead stop when no NEW article has
+    been observed for `STALL_LIMIT` consecutive scrolls (after a min number of
+    scrolls), scrolling to the bottom each step to force the next lazy-load batch.
+
+    Stall detection tracks EVERY distinct article observed (`seen_keys`),
+    including ones dropped via `exclude_ids`, not just the KEPT pool (`seen`).
+    On an install where S4L has been posting heavily, /with_replies is
+    dominated by the account's own already-excluded S4L posts; a long run of
+    those looks identical to `seen` not growing, which used to trip
+    STALL_LIMIT and abandon the scroll after only a few screens (found
+    2026-07-15: an active persona account returned only 1 usable organic
+    reply from a --comments 150 scan). Tracking all distinct keys means a
+    dense run of excluded posts still counts as feed progress, so the scan
+    keeps scrolling until it actually runs out of new articles."""
     seen: dict[str, dict] = {}
+    seen_keys: set = set()
     exclude_ids = exclude_ids or set()
     expr = _TIMELINE_JS_TMPL % (json.dumps(me.lower()),
                                 "true" if capture_parents else "false")
@@ -287,17 +299,21 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
             batch = json.loads(raw)
         except Exception:
             batch = []
-        before = len(seen)
+        before = len(seen_keys)
         for item in batch:
             key = item.get("id") or item.get("url") or item.get("text", "")[:80]
-            if not key or key in seen or key in exclude_ids:
+            if not key:
+                continue
+            seen_keys.add(key)
+            if key in seen or key in exclude_ids:
                 continue
             seen[key] = item
         if len(seen) >= want:
             break
-        # No new items this pass? Count it as a stall. Give the feed a few
-        # consecutive empty scrolls (lazy-load can lag) before declaring the end.
-        if len(seen) == before and n > 0:
+        # No new article at all this pass (kept or excluded)? Count it as a
+        # stall. Give the feed a few consecutive empty scrolls (lazy-load can
+        # lag) before declaring the end.
+        if len(seen_keys) == before and n > 0:
             stall += 1
             if stall >= STALL_LIMIT:
                 break
