@@ -2506,6 +2506,141 @@ tool(
       });
     }
 
+    // ---- List Reddit import sources (read-only, no keychain prompt) --------
+    if (args.action === "detect_reddit_sources") {
+      const r = await redditDetectSources();
+      return jsonContent({
+        action: "detect_reddit_sources",
+        ok: r.ok,
+        sources: r.sources,
+        recommended: r.recommended,
+        error: r.error,
+      });
+    }
+
+    // ---- Connect Reddit: OPTIONAL platform, mirrors connect_x --------------
+    // Preview-or-run, same confirm-first shape as connect_x. Reddit is never
+    // required for onboarding completion; offer it only after X setup is done
+    // and the user wants it.
+    if (args.action === "connect_reddit") {
+      if (args.confirm !== true) {
+        // Cheap probe so the explanation reflects current state (no Chrome launch).
+        const cur = await redditStatus();
+        if (cur.connected) {
+          return jsonContent({
+            action: "connect_reddit",
+            already_connected: true,
+            state: cur.state,
+            username: cur.username,
+            note: "Reddit is already connected in the autoposter's reddit browser. Nothing to import.",
+          });
+        }
+        return jsonContent({
+          action: "connect_reddit",
+          requires_confirmation: true,
+          current_state: cur.state,
+          what_will_happen:
+            "To engage on Reddit for you, the autoposter uses its OWN managed Google Chrome (separate " +
+            "from your everyday browser and from the X one). It needs your logged-in reddit.com " +
+            "session. If you confirm, it will: (1) start that managed reddit browser if it isn't " +
+            "running, (2) copy ONLY your reddit.com cookies (reddit_session, token_v2) from your " +
+            "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into it, and (3) verify you're " +
+            "logged in via Reddit's own me.json. No other site's cookies are read, and your passwords " +
+            "are never seen. If it can't import a valid session, a Chrome window will open for you to " +
+            "sign in once.",
+          keychain_prompt:
+            "Reading the saved session requires macOS to unlock the browser's encrypted cookie store, so " +
+            "one or more keychain prompts will appear (“... wants to use your confidential information " +
+            "stored in '... Safe Storage' in your keychain”). This is expected. The user enters their Mac " +
+            "login password and clicks Allow (or Always Allow to avoid repeats). If they use more than one " +
+            "browser, the prompt can appear a few times, once per browser.",
+          say_to_user:
+            "Heads up: your Mac will pop up a keychain prompt asking to use your browser's Safe Storage. " +
+            "That's just us reading your saved Reddit login, nothing else. Type your Mac login password and " +
+            "click Allow (or Always Allow). If you use more than one browser you may see it a couple of " +
+            "times, once per browser.",
+          how_to_proceed:
+            "If the user explicitly requested connecting Reddit, relay the say_to_user line as a brief " +
+            "heads-up and immediately call project_config again with action:'connect_reddit', confirm:true; " +
+            "do not wait for another yes/no reply. Optionally pass a reddit_source from " +
+            "detect_reddit_sources. If the user only asked what connection would do, stop after this " +
+            "preview. Reddit is OPTIONAL: never treat it as required for setup completion.",
+        });
+      }
+      recordOnboardingAttempt("reddit_connected", {
+        state: args.reddit_source ? "source_selected" : "auto_detect",
+      });
+      const r = await redditConnect(args.reddit_source, args.reddit_manual_login);
+      let verified = false;
+      let configNote: string | undefined;
+      if (r.connected) {
+        completeOnboardingMilestone("reddit_connected", { state: r.state });
+        // Persist the discovered username through the server's config-write
+        // path (accounts.reddit.username, the field account_resolver reads),
+        // never overwriting a deliberately-set value.
+        if (r.username) {
+          const w = recordRedditAccount(r.username);
+          configNote = w.detail;
+        }
+        // Doctor-style persistence re-check before reddit_verified: a fresh
+        // read-only status probe confirms the session actually persisted
+        // (live me.json or the on-disk profile cookie row) rather than
+        // trusting the connect call's own success.
+        const recheck = await redditStatus();
+        if (recheck.connected) {
+          completeOnboardingMilestone("reddit_verified", { state: recheck.state });
+          verified = true;
+        } else {
+          recordOnboardingAttempt("reddit_verified", {
+            state: recheck.state || "unverified",
+          });
+        }
+        // Reddit is live: install the discovery kicker (idempotent; gated on
+        // runtime + project readiness inside, and it never touches a
+        // hand-built plist pointing outside the managed package).
+        void ensureRedditKickerInstalled()
+          .then((res) =>
+            console.error(`[reddit-kicker] post-connect install: ${res.ok ? "ok" : "skip"} (${res.detail})`)
+          )
+          .catch((e) => console.error("[reddit-kicker] post-connect install failed:", e?.message || e));
+      } else {
+        blockOnboardingMilestone(
+          "reddit_connected",
+          `reddit_${r.state || "not_connected"}`,
+          r.error || r.note || summarizeRedditAuth(r),
+          { state: r.state || "not_connected" }
+        );
+      }
+      return jsonContent({
+        action: "connect_reddit",
+        connected: r.connected,
+        state: r.state,
+        username: r.username,
+        account_age_days: r.account_age_days,
+        comment_karma: r.comment_karma,
+        // Ready-to-relay expectation setter for fresh/low-karma accounts
+        // (AutoMod gates those in most subreddits). Advisory only; never a
+        // reason to block or undo the connect.
+        warning: r.warning,
+        verified,
+        config: configNote,
+        summary: summarizeRedditAuth(r),
+        note: r.note,
+        attempts: r.attempts,
+        onboarding: onboardingSnapshot(),
+        next_step: r.connected
+          ? "Reddit is connected. The reddit discovery job installs itself once a project is " +
+            "configured; drafts flow into the same review cards as X and nothing posts without " +
+            "approval." +
+            (r.warning ? " Relay the `warning` field to the user so expectations are set." : "")
+          : r.state === "needs_login"
+            ? "The user must finish signing in to reddit.com in the Chrome window that opened. Tell " +
+              "them that single required action, then call project_config action:'connect_reddit', " +
+              "confirm:true again."
+            : "Reddit is not connected yet. " + summarizeRedditAuth(r),
+      });
+    }
+
     // ---- Profile scan: grounding-truth corpus from the connected account ----
     // Reuses the authenticated managed-Chrome session (so it must run AFTER a
     // successful connect_x) to read the user's bio + recent posts + recent
