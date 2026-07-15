@@ -65,6 +65,12 @@ DEFAULT_MAX_URLS = 40
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 REPLY_PAGE_LIMIT = 500
 
+# Pinned interpreter, never the literal "python3": twitter_browser.py (below)
+# imports Playwright, and bare "python3" resolves to the caller's system
+# Python on PATH, which has no Playwright on a fresh install (silent
+# failure). See scripts/twitter_post_plan.py:131.
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
@@ -137,7 +143,7 @@ def run_browser_scrape(urls, scroll_count=3):
             f.write(u + "\n")
     try:
         proc = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts/twitter_browser.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts/twitter_browser.py"),
              "thread-followups", urls_path, str(scroll_count)],
             capture_output=True, text=True, timeout=1800,
         )
