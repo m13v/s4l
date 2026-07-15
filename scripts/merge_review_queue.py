@@ -160,8 +160,21 @@ def _reddit_plan_to_candidates(plan: dict) -> list:
             "matched_project": plan.get("project_name"),
             "reply_text": d.get("text"),
             "engagement_style": d.get("engagement_style"),
-            "assigned_style": d.get("engagement_style"),
+            "assigned_style": d.get("assigned_style") or d.get("engagement_style"),
+            "assigned_mode": d.get("assigned_mode"),
             "search_topic": d.get("search_topic"),
+            # Two-draft A/B (2026-07-15): post_reddit.py's _draft_iteration
+            # stamps a 2-element drafts[] (mirrors twitter's shape exactly:
+            # variant/text/style/assigned_style/assigned_mode). s4l_card.py's
+            # dual-box rendering, pairwise hover/choice tracking, and the
+            # edit-learning digest already key off `isinstance(drafts, list)
+            # and len == 2`, not platform, so passing it through is all this
+            # needs. None on legacy single-draft decisions.
+            "drafts": d.get("drafts"),
+            # Experiment/scenario arms (2026-07-15): stamped at the source in
+            # post_reddit.py's _draft_iteration (mirrors run-twitter-cycle.sh);
+            # this is a pure passthrough, same convention as the twitter path.
+            "experiments": d.get("experiments") or {},
             "reddit_batch_id": plan.get("batch_id"),
             "reddit_decision": d,
             "reddit_plan_meta": {
