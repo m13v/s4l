@@ -416,6 +416,55 @@ export function applySetup(input: ProjectInput): {
   };
 }
 
+// Persist the connected Reddit username into config accounts.reddit.username
+// (the field account_resolver.resolve('reddit') reads), following the same
+// never-clobber rule connect_x uses for the X handle: only write when the
+// configured value is empty or the template placeholder. This is the MCP
+// server's config-write path (configPath() resolution + backup + snapshot);
+// setup_reddit_auth.py deliberately does NOT write config.json itself.
+const REDDIT_USERNAME_PLACEHOLDERS = new Set(["", "your-reddit-username", "u/your-reddit-username"]);
+
+export function recordRedditAccount(username: string): { written: boolean; detail: string } {
+  const clean = (username || "").trim().replace(/^u\//i, "").replace(/^@/, "");
+  if (!clean) return { written: false, detail: "empty username" };
+  let cfg: ConfigFile;
+  try {
+    cfg = readConfig();
+  } catch (e: any) {
+    return { written: false, detail: `config unreadable: ${e?.message || e}` };
+  }
+  const accounts = ((cfg as Record<string, unknown>).accounts ??= {}) as Record<string, unknown>;
+  if (typeof accounts !== "object" || accounts === null) {
+    return { written: false, detail: "config accounts is not an object" };
+  }
+  const reddit = (accounts.reddit ??= {}) as Record<string, unknown>;
+  if (typeof reddit !== "object" || reddit === null) {
+    return { written: false, detail: "config accounts.reddit is not an object" };
+  }
+  const cur = String(reddit.username ?? "").trim();
+  if (!REDDIT_USERNAME_PLACEHOLDERS.has(cur.toLowerCase())) {
+    return {
+      written: false,
+      detail: `accounts.reddit.username already set (${cur}); not overwriting`,
+    };
+  }
+  reddit.username = clean;
+  if (!reddit.login_method) reddit.login_method = "browser";
+  try {
+    const cfgPath = configPath();
+    if (fs.existsSync(cfgPath)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+    }
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    void sendStateSnapshot("config_write");
+    return { written: true, detail: `accounts.reddit.username = ${clean}` };
+  } catch (e: any) {
+    return { written: false, detail: `config write failed: ${e?.message || e}` };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Personal-brand PERSONA project (2026-06-26).
 //
