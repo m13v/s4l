@@ -841,21 +841,34 @@ const LENGTH_VARIANT_DEFS = {
   control:   { label: 'Unconstrained',     desc: 'no length target (legacy, longer replies)' },
 };
 
-// twitter draft-prompt variant defs. RESET to v3 on 2026-07-10: the arm value was
-// versioned to '..._v3' in run-twitter-cycle.sh so the experiment restarts from
-// zero. v1 ('treatment'/'control', decoupled-product-pivot) and v2
-// ('*_v2', skeleton-ban) are retired but their rows stay in the DB; the
-// dashboard only counts the '_v3' arms below. v3's treatment makes the assigned
-// engagement style the binding FORM of the draft (defining move + per-style
-// length + self-check, rendered arm-aware in engagement_styles.py) with the
-// two-layer learned_preferences contract, and keeps v2's skeleton ban.
-// Per-CYCLE arm; lives on posts.draft_prompt_variant. Tunable via
-// TWITTER_DRAFT_PROMPT_AB_RATE (code default 0.5). Keep keys in sync with the
-// arm strings printed in run-twitter-cycle.sh AND the DESCRIPTIONS registry in
-// scripts/active_experiments.py (the review card's details popover reads that).
+// twitter draft-prompt variant defs. RESET to v4 on 2026-07-15: the arm value
+// was versioned to '..._v4' in run-twitter-cycle.sh so the experiment restarts
+// from zero. v1 ('treatment'/'control', decoupled-product-pivot), v2
+// ('*_v2', skeleton-ban), and v3 ('*_v3', style-as-form) are retired but their
+// rows stay in the DB; the dashboard only counts the '_v4' arms below. v3
+// tested whether the assigned engagement style should be a binding FORM; v4
+// replaces that wholesale with a bigger claim: the account's own real voice
+// (corpus + voice.examples + learned_preferences, all human-verified) should
+// dominate the draft over every other competing signal, including the style
+// block (now demoted to an optional idea) and the per-style top_performers
+// exemplar report (skipped entirely on treatment). v4 is retiring v3 rather
+// than running alongside it because it directly manipulates the same
+// style-block-bindingness variable v3 owned; independent axes would have
+// produced literal contradictions in the same prompt, not just an
+// interaction to control for. Also applied GLOBALLY now (both lanes), not
+// personal_brand-only. Per-CYCLE arm; lives on posts.draft_prompt_variant.
+// Tunable via TWITTER_DRAFT_PROMPT_AB_RATE (code default 0.5). Keep keys in
+// sync with the arm strings printed in run-twitter-cycle.sh AND the
+// DESCRIPTIONS registry in scripts/active_experiments.py (the review card's
+// details popover reads that).
 const DRAFT_PROMPT_VARIANT_DEFS = {
-  treatment_v3: { label: 'Style-as-form', desc: 'assigned style is the binding FORM (defining move + per-style length + self-check); learned preferences apply inside it; keeps the v2 skeleton ban' },
-  control_v3:   { label: 'Current',       desc: 'plain draft directive, uniform length clamp, no structure ban' },
+  treatment_v4: { label: 'Voice-first', desc: 'account corpus + voice.examples + learned_preferences dominate; style demoted to an optional idea; skips the per-style top-performers report; applies to both lanes' },
+  control_v4:   { label: 'Current',     desc: 'plain draft directive, uniform length clamp, no voice-priority order' },
+  // Retired arms kept ONLY so DRAFT_PROMPT_VARIANT_DEFS[v] lookups for a
+  // straggler card from an old plan still resolve to a label/desc instead of
+  // undefined; dpVariants below (the aggregate readout) counts v4 only.
+  treatment_v3: { label: 'v3, retired: Style-as-form', desc: 'assigned style is the binding FORM (defining move + per-style length + self-check); learned preferences apply inside it; kept the v2 skeleton ban' },
+  control_v3:   { label: 'v3, retired: Current',       desc: 'plain draft directive, uniform length clamp, no structure ban' },
 };
 
 // Standalone jobs with no platform axis. script_name -> display label.
@@ -6842,7 +6855,7 @@ async function handleApi(req, res) {
             GROUP BY p.draft_prompt_variant
           `, []);
           const dpDefs = DRAFT_PROMPT_VARIANT_DEFS;
-          const dpVariants = ['treatment_v3', 'control_v3'].map(k => {
+          const dpVariants = ['treatment_v4', 'control_v4'].map(k => {
             const row = (dpRows || []).find(r => r.variant === k) || {};
             const n = Number(row.n_posts || 0);
             return {
