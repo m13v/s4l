@@ -69,6 +69,7 @@ import objc
 from Foundation import (
     NSObject,
     NSMakeRect,
+    NSMakeRange,
     NSMakeSize,
     NSAttributedString,
     NSMutableAttributedString,
@@ -328,6 +329,85 @@ def _log(msg):
 def _truncate(s, n=320):
     s = (s or "").strip()
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _fit_thread_body(thread_tv, text, link_url, *, font_size=12, step=15, floor=10):
+    """Set the thread-quote text on `thread_tv` ('text… ↗' when link_url is
+    given), shrinking `text` -- never the trailing link -- until the arrow
+    actually lands inside the view's visible box.
+
+    thread_tv is fixed-height and not vertically resizable, with no
+    scrollview around it, so a glyph laid out below its frame is simply
+    never drawn and never clickable. The old fixed `_truncate(text, 200)`
+    assumed ~4 lines always fit 200 characters, which holds most of the
+    time but not when word/URL lengths wrap more per line -- the trailing
+    ↗ link, the card's only way to open the source thread, could then sit
+    past the visible box (2026-07-15 user report: link "sometimes appears
+    outside the visible area", "doesn't fit into the card"). Checking the
+    arrow glyph's own bounding rect (rather than comparing total laid-out
+    height to the box) is what makes this correct whether or not the text
+    container itself turns out to be height-bounded."""
+    text = (text or "").strip()
+    box_h = thread_tv.frame().size.height
+    try:
+        inset = thread_tv.textContainerInset()
+        available_h = box_h - 2 * inset.height
+    except Exception:
+        available_h = box_h
+
+    def _attributed(shown_text):
+        b = NSMutableAttributedString.alloc().initWithString_attributes_(
+            shown_text,
+            {
+                NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
+                NSForegroundColorAttributeName: NSColor.labelColor(),
+            },
+        )
+        if link_url:
+            b.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    " ↗",
+                    {
+                        NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
+                        # Delegate (textView:clickedOnLink:atIndex:) tracks the
+                        # click as a thread_click interaction, then opens the
+                        # URL itself via NSWorkspace.
+                        NSLinkAttributeName: NSURL.URLWithString_(link_url),
+                    },
+                )
+            )
+        return b
+
+    length = min(len(text), 200)
+    lm = thread_tv.layoutManager()
+    tc = thread_tv.textContainer()
+    # Bounded loop: each pass is a cheap native layout of at most a couple
+    # hundred characters. The common case (thread fits in ~200 chars)
+    # exits after the first pass; only pathological long-word wrapping
+    # iterates further, and it always terminates at `floor`.
+    for _ in range(20):
+        shown = text[:length].rstrip()
+        if length < len(text):
+            shown += "…"
+        attributed = _attributed(shown)
+        thread_tv.textStorage().setAttributedString_(attributed)
+        if not link_url:
+            return
+        total_len = attributed.length()
+        if total_len == 0:
+            return
+        lm.ensureLayoutForTextContainer_(tc)
+        glyph_range = lm.glyphRangeForTextContainer_(tc)
+        laid_out_all = (glyph_range.location + glyph_range.length) >= total_len
+        fits = False
+        if laid_out_all:
+            last_rect = lm.boundingRectForGlyphRange_inTextContainer_(
+                NSMakeRange(total_len - 1, 1), tc
+            )
+            fits = (last_rect.origin.y + last_rect.size.height) <= available_h
+        if fits or length <= floor:
+            return
+        length = max(floor, length - step)
 
 
 # Human names for the ISO 639-1 codes the drafting model actually emits, so the
@@ -1347,32 +1427,13 @@ class _ReviewController(NSObject):
             thread_tv.setDrawsBackground_(False)
         # An NSTextView grows vertically by default; long threads inflated the
         # frame over the author row above (non-flipped superview: growth goes
-        # UP) and pushed the trailing ↗ out of the box. Pin the frame and
-        # truncate to what 4 lines actually fit so the arrow stays visible.
+        # UP). Pin the frame, then _fit_thread_body shrinks the text (never
+        # the trailing ↗ link) until the arrow actually lands inside it.
         thread_tv.setVerticallyResizable_(False)
         thread_tv.setHorizontallyResizable_(False)
-        body = NSMutableAttributedString.alloc().initWithString_attributes_(
-            _truncate(thread_en or d.get("thread_text"), 200),
-            {
-                NSFontAttributeName: NSFont.systemFontOfSize_(12),
-                NSForegroundColorAttributeName: NSColor.labelColor(),
-            },
-        )
         if thread_url:
-            body.appendAttributedString_(
-                NSAttributedString.alloc().initWithString_attributes_(
-                    " ↗",
-                    {
-                        NSFontAttributeName: NSFont.systemFontOfSize_(12),
-                        # Delegate (textView:clickedOnLink:atIndex:) tracks the
-                        # click as a thread_click interaction, then opens the
-                        # URL itself via NSWorkspace.
-                        NSLinkAttributeName: NSURL.URLWithString_(thread_url),
-                    },
-                )
-            )
             thread_tv.setDelegate_(self)
-        thread_tv.textStorage().setAttributedString_(body)
+        _fit_thread_body(thread_tv, thread_en or d.get("thread_text"), thread_url)
         content.addSubview_(thread_tv)
         # Reply heading — bold. A concise "project/lane · viral N" tag rides
         # right after it in a SEPARATE, regular-weight label (2026-07-08:
