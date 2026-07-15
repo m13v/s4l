@@ -466,7 +466,9 @@ const server = new McpServer(
       "can run them hands-free on autopilot.\n\n" +
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
-      "project is fully configured with seeded search topics, X is connected with its real handle, AND " +
+      "project is fully configured with seeded search topics, AT LEAST ONE platform is connected " +
+      "(X with its real handle is the DEFAULT first suggestion; Reddit via connect_reddit counts " +
+      "equally if the user prefers it or X connection fails or is skipped), AND " +
       "the two draft-autopilot scheduled tasks have been created via queue_setup and are firing " +
       "(see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
       "ITSELF automatically on boot — you do NOT install it. Just poll runtime action:'status' until it " +
@@ -482,7 +484,8 @@ const server = new McpServer(
       "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup. " +
       "DO schedule the draft autopilot as the final step (once running it only queues drafts for " +
       "approval, it never posts on its own). When setup reaches done (" +
-      "runtime ready, a project configured with seeded topics, X connected, and the two scheduled tasks " +
+      "runtime ready, a project configured with seeded topics, at least one platform connected, and the " +
+      "two scheduled tasks " +
       "created and firing), call the `dashboard` tool so the user " +
       "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
@@ -504,14 +507,16 @@ const server = new McpServer(
       "old 'social-autoposter-autopilot' task — it is deprecated. Do NOT ask the user to review drafts " +
       "or pause for input mid-onboarding; once the tasks are created and firing, setup is done. If the " +
       "host exposes no create_scheduled_task tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
-      "REDDIT IS OPTIONAL. After X setup completes (never before, and never as a requirement or " +
-      "terminal goal), you may offer Reddit as an add-on: `project_config` action:'connect_reddit' " +
-      "imports the user's reddit.com session into the autoposter's managed reddit browser, same " +
-      "confirm-first flow and keychain heads-up as connect_x. Once connected, reddit discovery and " +
-      "drafting run on the same draft-only queue and review cards as X; nothing posts without " +
-      "approval. If the result carries a `warning` (fresh or low-karma account), relay it so the " +
-      "user knows AutoMod may gate early replies. Skipping Reddit entirely is a perfectly complete " +
-      "setup; do not nag about it.\n\n" +
+      "REDDIT IS AN EQUAL, OPTIONAL PLATFORM. Setup is complete with AT LEAST ONE platform " +
+      "connected: X-only, Reddit-only, or both. X stays the default first suggestion; offer Reddit " +
+      "as an add-on after X setup completes, OR standalone when the user prefers Reddit or X " +
+      "connection fails or is skipped. `project_config` action:'connect_reddit' imports the user's " +
+      "reddit.com session into the autoposter's managed reddit browser, same confirm-first flow and " +
+      "keychain heads-up as connect_x. Once connected, reddit discovery and drafting run on the same " +
+      "draft-only queue and review cards as X; nothing posts without approval. If the result carries " +
+      "a `warning` (fresh or low-karma account), relay it so the user knows AutoMod may gate early " +
+      "replies. Never make Reddit a requirement, and never nag a happily X-only (or reddit-only) " +
+      "user about the other platform.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: point it out to the user — the draft autopilot runs " +
@@ -2288,8 +2293,9 @@ tool(
             "the USER'S OWN register (their phrases, vibe, profession), then save a conservative best " +
             "draft without requiring a confirmation round-trip. Returns {profile, posts, comments, " +
             "grounding_instructions}. " +
-            "connect_reddit = OPTIONAL, only when the user wants Reddit too (offer it AFTER X setup " +
-            "completes; never required): import/validate the user's reddit.com session in the " +
+            "connect_reddit = OPTIONAL equal platform (setup completes with X-only, Reddit-only, or " +
+            "both; offer Reddit after X setup, or standalone when the user prefers it or X fails/is " +
+            "skipped): import/validate the user's reddit.com session in the " +
             "autoposter's managed reddit browser, same confirm-first shape as connect_x. " +
             "detect_reddit_sources = list the browsers/profiles the Reddit session can be imported " +
             "from (read-only, no keychain prompt)."
@@ -2799,14 +2805,15 @@ tool(
             ? "Runtime is not ready yet. It provisions automatically on boot — poll runtime action:'status' until ready (only call runtime action:'install' to retry if status shows the boot provision failed or stalled), then continue setup automatically."
             : projects.length === 0
             ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call project_config. Ask only if no product can be identified." +
-              (xConnected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
+              (anyPlatform ? "" : " No platform is connected yet either — X is the default: detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn. If the user prefers Reddit (or X can't be connected), connect_reddit works standalone.")
             : projects.every((p) => p.ready)
-              ? (xConnected
-                  ? "All configured projects are ready and X is connected. SCHEDULE THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt and notifyOnCompletion verbatim — notifyOnCompletion must be false; 'already exists' is fine, but then call update_scheduled_task with notifyOnCompletion:false to silence per-run notifications); (2) the autopilot then runs on its own (launchd kicker + queue worker). Call the `dashboard` tool to confirm the schedule is firing (schedule_state 'ok') — that is the terminal step; do NOT wait for or verify a draft card. Do NOT pause to ask the user to review drafts."
-                  : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
-                    "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
+              ? (anyPlatform
+                  ? "All configured projects are ready and a platform is connected" +
+                    (xConnected ? "" : " (Reddit; X was skipped, which is fine)") +
+                    ". SCHEDULE THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt and notifyOnCompletion verbatim — notifyOnCompletion must be false; 'already exists' is fine, but then call update_scheduled_task with notifyOnCompletion:false to silence per-run notifications); (2) the autopilot then runs on its own (launchd kicker + queue worker). Call the `dashboard` tool to confirm the schedule is firing (schedule_state 'ok') — that is the terminal step; do NOT wait for or verify a draft card. Do NOT pause to ask the user to review drafts."
+                  : "All configured projects are ready, but NO platform is connected yet — posting needs a logged-in session. X is the default: detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed. If the user prefers Reddit or X can't be connected, run action:'connect_reddit' instead; ONE connected platform completes setup.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
-                (xConnected ? "" : " X is also not connected yet; detect sources and run connect_x with confirm:true."),
+                (anyPlatform ? "" : " No platform is connected yet either; X is the default (connect_x with confirm:true), or connect_reddit if the user prefers Reddit."),
       });
     }
 
