@@ -43,7 +43,12 @@ json.dump(d, open(p, "w"))' "$_bl_prof_dir" 2>/dev/null || true
         *.app/Contents/MacOS/*) _bl_app_bundle="${_bl_chrome_bin%%/Contents/MacOS/*}" ;;
     esac
     if [ "$(uname -s)" = "Darwin" ] && [ -n "$_bl_app_bundle" ] && [ -d "$_bl_app_bundle" ]; then
-        open -n -g -a "$_bl_app_bundle" --args "$@" >/dev/null 2>&1 || true
+        # -j launches HIDDEN on top of -g's no-foreground: -g alone still let
+        # every wedge-heal relaunch register a `cause: launched` activation in
+        # the browser-foreground telemetry (the last remaining window-pop
+        # class, 2026-07-15). Occlusion/backgrounding flags keep a hidden
+        # Chrome rendering, so the pipeline is unaffected.
+        open -n -g -j -a "$_bl_app_bundle" --args "$@" >/dev/null 2>&1 || true
     else
         "${S4L_PYTHON:-python3}" -c 'import os,sys
 os.setsid()
