@@ -1334,6 +1334,7 @@ class _ReviewController(NSObject):
         )
         right_x = W - M
         self._close_stats_popover()
+        self._stop_age_expiry_timer()
         self._eye_btn = None
         self._details_btn = None
         self._age_expiry_label = None
@@ -1711,6 +1712,19 @@ class _ReviewController(NSObject):
         if self._focus or self._decisions or self._last_interaction_at is not None:
             self._panel.makeFirstResponder_(tv)
             self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
+
+    @objc.python_method
+    def _stop_age_expiry_timer(self):
+        """Stop the header label's per-second tick (tickAgeExpiryLabel_).
+        Called at the top of every _render (the label it targets is about to
+        be replaced) and from _finish (the whole panel is going away), so a
+        repeating NSTimer can never outlive the label it updates."""
+        if self._age_expiry_timer is not None:
+            try:
+                self._age_expiry_timer.invalidate()
+            except Exception:
+                pass
+            self._age_expiry_timer = None
 
     @objc.python_method
     def _close_stats_popover(self):
@@ -2357,6 +2371,7 @@ class _ReviewController(NSObject):
     def _finish(self):
         global _active
         self._close_stats_popover()
+        self._stop_age_expiry_timer()
         try:
             if self._panel is not None:
                 self._panel.setDelegate_(None)
