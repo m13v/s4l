@@ -197,6 +197,24 @@ cleanup_harness_tabs() {
 # real pipelines never set this and share the one /tmp path.
 _LI_PIPELINE_LOCK_DIR="${_LI_PIPELINE_LOCK_DIR:-/tmp/s4l-linkedin-pipeline.lock}"
 _acquire_linkedin_pipeline_lock() {
+    # 2026-07-14: the normal path delegates to lock.sh's
+    # acquire_pipeline_singleton — the GENERALIZED version of this exact
+    # function (same /tmp/s4l-linkedin-pipeline.lock dir, same rc=78 contract,
+    # same dead-holder reclaim and $$-re-entrancy), so any platform can now
+    # request one-driver-per-Chrome semantics. The inline body below survives
+    # ONLY for the test-override path (_LI_PIPELINE_LOCK_DIR pointing at a
+    # scratch dir) and for a caller that somehow sourced this backend without
+    # lock.sh (documented sourcing order says lock.sh comes first).
+    if declare -F acquire_pipeline_singleton >/dev/null 2>&1 \
+       && [ "$_LI_PIPELINE_LOCK_DIR" = "/tmp/s4l-linkedin-pipeline.lock" ]; then
+        if [ "${_LI_PIPELINE_LOCK_HELD:-0}" = "1" ]; then
+            return 0
+        fi
+        acquire_pipeline_singleton linkedin
+        local _li_rc=$?
+        [ "$_li_rc" = "0" ] && export _LI_PIPELINE_LOCK_HELD=1
+        return $_li_rc
+    fi
     # Already held by THIS process (re-entry across phases) -> proceed.
     if [ "${_LI_PIPELINE_LOCK_HELD:-0}" = "1" ]; then
         return 0
