@@ -22,10 +22,12 @@ The feedback loop:
      `learned_preferences_global` block, whitelist-enforced, with flock +
      backup + atomic replace.
   4. Enforcement is SOFT (prompt-level, never a deterministic filter): the
-     twitter prep prompt embeds every project entry verbatim via
-     ALL_PROJECTS_JSON (each project dict is stamped with the same global
-     block at prompt-build time), so the block (with its self-describing
-     _instruction) reaches the judging/drafting model automatically.
+     twitter prep prompt embeds the block exactly ONCE via
+     GLOBAL_LEARNED_PREFS_JSON (the 'Global learned preferences' line under
+     PROJECT ROUTING; per-project stamping retired 2026-07-14), so the block
+     (with its self-describing _instruction) reaches the judging/drafting
+     model automatically. `history` is stripped at prompt-build time: it is
+     a config.json-only audit changelog with no reader in any prompt.
      prompt_block() renders the same content for callers that want an
      explicit section instead of the raw embed.
 
@@ -81,9 +83,9 @@ MAX_HISTORY = 50
 MAX_EDIT_EXAMPLES = 5
 MAX_EXAMPLE_CHARS = 600
 
-# Travels inside the JSON the prep prompt embeds (ALL_PROJECTS_JSON is the
-# full project entry), so the drafting model reads its own operating manual
-# for the block. Split semantics (2026-07-03, after the persona lane kept
+# Travels inside the global block the prep prompt embeds (once, via
+# GLOBAL_LEARNED_PREFS_JSON), so the drafting model reads its own operating
+# manual for the block. Split semantics (2026-07-03, after the persona lane kept
 # recycling a rejected draft structure): candidate JUDGING signals stay soft
 # (judgment, not a hard ban), but draft_style_notes is MANDATORY when
 # writing; if it doesn't beat the engagement style's structural template,
