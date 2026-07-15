@@ -2610,6 +2610,13 @@ def _draft_iteration(plan, config, reddit_username):
             merged_d["thread_author"] = drafted_d.get("thread_author") or c.get("thread_author")
             merged_d["thread_title"] = drafted_d.get("thread_title") or c.get("thread_title")
             merged_d["engagement_style"] = _style_a or c.get("engagement_style")
+            # Top-level assigned_style/assigned_mode default to Draft A (the
+            # legacy-mirror draft); the MCP post_drafts edit path overwrites
+            # these on the card when a human switches to Draft B (mirrors
+            # twitter_post_plan.py's per-candidate override, see
+            # _post_iteration below and index.ts's reddit approval branch).
+            merged_d["assigned_style"] = picked_style_a
+            merged_d["assigned_mode"] = style_assignment_a.get("mode")
             merged_d["action"] = "post"
             merged_d["experiments"] = dict(_exps)
             merged.append(merged_d)
@@ -2641,7 +2648,10 @@ def _draft_iteration(plan, config, reddit_username):
     # Stash the picker assignment so _post_iteration (which runs in a
     # separate process via JSON-serialized plan) can pass it to
     # validate_or_register for USE-mode drift coercion + INVENT-mode gating.
-    plan["style_assignment"] = style_assignment
+    # This is the BATCH-LEVEL fallback (Draft A); per-decision
+    # assigned_style/assigned_mode (set above, and overridable by a human
+    # draft-switch) takes precedence in _post_iteration when present.
+    plan["style_assignment"] = style_assignment_a
     return plan
 
 
@@ -2697,9 +2707,25 @@ def _post_iteration(plan, reddit_username):
         # back to the assigned one (so picker authority is preserved even if
         # the drafter ignores the assignment). In INVENT mode (5% slot),
         # registers the new style into engagement_styles_registry via
-        # /api/v1/engagement-styles/registry. assigned_style/assigned_mode
-        # come from pick_style_for_post() above; without them the picker's
-        # choice would be silently overridable by the model.
+        # /api/v1/engagement-styles/registry.
+        #
+        # Two-draft cards (2026-07-15): each decision may carry its OWN
+        # (assigned_style, assigned_mode) reflecting whichever draft is
+        # actually posting — either Draft A (stamped at plan-write time) or
+        # Draft B (stamped by the MCP post_drafts edit path when a human
+        # switched drafts on the review card). Without this, every card
+        # would coerce back to the single batch-wide Draft A assignment even
+        # when it posted under Draft B's style, silently corrupting the
+        # engagement_style label the picker's performance stats are learned
+        # from. Mirrors twitter_post_plan.py's identical per-candidate
+        # override. Falls back to the batch-level assignment for any
+        # decision that predates this (assigned_mode key absent).
+        if "assigned_mode" in decision:
+            _cand_style = decision.get("assigned_style")
+            _cand_mode = decision.get("assigned_mode")
+        else:
+            _cand_style = (style_assignment or {}).get("style")
+            _cand_mode = (style_assignment or {}).get("mode")
         engagement_style, _style_action = validate_or_register(
             decision,
             source_post={
@@ -2708,8 +2734,8 @@ def _post_iteration(plan, reddit_username):
                 "post_id": None,
                 "model": decision.get("model"),
             },
-            assigned_style=(style_assignment or {}).get("style"),
-            assigned_mode=(style_assignment or {}).get("mode"),
+            assigned_style=_cand_style,
+            assigned_mode=_cand_mode,
         )
         search_topic = decision.get("search_topic") or None
 
