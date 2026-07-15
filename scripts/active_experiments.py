@@ -76,6 +76,17 @@ DESCRIPTIONS = {
         "treatment": "v1, retired: product pivot decoupled from the reply",
         "control": "v1, retired: original draft directive",
     },
+    "voice_fidelity": {
+        "treatment": (
+            "persona lane: verbatim reply examples + persona corpus are ground "
+            "truth for writing mechanics (capitalization, punctuation, "
+            "contractions); voice.tone loses on conflict with them"
+        ),
+        "control": (
+            "persona lane: today's directive, voice.tone treated as equal to "
+            "voice.examples with no tie-break"
+        ),
+    },
     "lane": {
         "personal_brand": (
             "organic persona lane: first-hand voice, no product, no link, no CTA"
