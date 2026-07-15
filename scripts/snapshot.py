@@ -745,6 +745,17 @@ def _onboarding_live(live_status):
         result["complete"] = all(_satisfied(mid) for mid in order)
     else:
         result["complete"] = bool(out) and all(m.get("status") == "complete" for m in out)
+    # Blocker suppression (mirror of onboarding-ledger.cjs publicSnapshot): a
+    # blocker on an optional reddit milestone (failed reddit attempt on an X
+    # box) or on a milestone the other platform satisfies (failed X attempt on
+    # a reddit-only box) must not flag attention on the dashboard.
+    blocker = result.get("current_blocker")
+    if isinstance(blocker, dict):
+        bmid = blocker.get("milestone")
+        if bmid in optional:
+            result["current_blocker"] = None
+        elif isinstance(ms, dict) and bmid in order and _satisfied(bmid):
+            result["current_blocker"] = None
     return result
 
 
