@@ -231,27 +231,84 @@ def _write_scan_tweets_record(rec: dict) -> None:
         pass  # fail-open; shell falls back to structured_output if file is missing
 
 
-def _navigate(url: str) -> None:
-    """ALWAYS try to reuse the daemon's current tab; create one only when
-    navigation is impossible.
+def _revive_current_tab(url: str) -> bool:
+    """Side-door revive of a wedged tab: attach a FRESH CDP session to the
+    SAME target and stop+navigate it there, so the one-tab-reused-forever
+    invariant survives a hung renderer.
 
-    Page.navigate (goto_url) drives the current tab even when its renderer
-    has CRASHED — navigation revives an "Aw, Snap" tab in place. Creating a
-    tab is the one harness call PROVEN to activate Chrome and steal focus
-    (2026-07-15 correlation: 7/7 new_tab calls produced a same-second
-    harness_browser_foregrounded event), so the old list_tabs pre-check —
-    which saw an empty list whenever the surviving tab was internal-only or
-    mid-crash and then minted a fresh tab — is gone. new_tab remains solely
-    as the fallback for a truly navigable-tab-free Chrome (goto_url raises)."""
+    When goto_url times out, what died is (almost always) the tab session or
+    the renderer, not the daemon's browser-level connection — the daemon just
+    REPORTED the timeout over that very connection. Page.stopLoading and
+    Page.navigate are handled by the BROWSER process, and navigate is allowed
+    to replace a crashed/hung renderer, so a fresh session to the same target
+    recovers the tab in place. Finish by re-pointing the daemon at the fresh
+    session (set_session, deliberately WITHOUT Target.activateTarget — that
+    call raises/focuses the Chrome window). Returns True when the navigate
+    was acknowledged; False routes the caller to the new-tab last resort
+    (only justified when the browser's handling of the target itself is
+    dead). Outcome is logged either way: every real wedge doubles as an
+    experiment on which recovery door works."""
+    from browser_harness import helpers as _bh
+
+    try:
+        tid = None
+        try:
+            tid = (_bh.current_tab() or {}).get("targetId")
+        except Exception:
+            pass
+        if not tid:
+            infos = _bh.cdp("Target.getTargets").get("targetInfos", [])
+            pages = [t for t in infos if t.get("type") == "page"]
+            pref = [t for t in pages if (t.get("url") or "").startswith("http")]
+            tid = ((pref or pages) or [{}])[0].get("targetId")
+        if not tid:
+            print("[twitter_scan] revive: no page target found", file=sys.stderr)
+            return False
+        sid = _bh.cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
+        try:
+            _bh.cdp("Page.stopLoading", session_id=sid)
+        except Exception:
+            pass  # stop is best-effort; navigate is the recovery
+        _bh.cdp("Page.navigate", session_id=sid, url=url)
+        _bh._send({"meta": "set_session", "session_id": sid, "target_id": tid})
+        print(
+            f"[twitter_scan] revived wedged tab in place (target={tid[:12]})",
+            file=sys.stderr,
+        )
+        return True
+    except Exception as e:
+        print(f"[twitter_scan] revive failed ({e})", file=sys.stderr)
+        return False
+
+
+def _navigate(url: str) -> None:
+    """ALWAYS reuse the daemon's current tab; escalate through revive; create
+    a tab only when both fail — and then in background, so it cannot pop.
+
+    Recovery ladder (2026-07-15, after the Chrome 150 wedge storm):
+      1. goto_url — plain reuse; also revives an "Aw, Snap" tab whose session
+         still answers. The only path 99% of navigations take.
+      2. _revive_current_tab — fresh CDP session to the SAME target
+         (stop+navigate); recovers a wedged session/renderer in place.
+      3. new_tab(background=True) — last resort for a dead target.
+         Target.createTarget/activateTarget are PROVEN to focus-steal (7/7
+         same-second harness_browser_foregrounded correlation), hence
+         background; the TypeError fallback covers customer boxes whose
+         installed harness predates the background parameter."""
     try:
         goto_url(url)
         return
     except Exception as e:
         print(
-            f"[twitter_scan] goto_url failed ({e}); falling back to new_tab",
+            f"[twitter_scan] goto_url failed ({e}); trying in-place revive",
             file=sys.stderr,
         )
-    new_tab(url)
+    if _revive_current_tab(url):
+        return
+    try:
+        new_tab(url, background=True)
+    except TypeError:
+        new_tab(url)
 
 
 # Per-query stall guard: shared implementation (scripts/stall_guard.py) used
