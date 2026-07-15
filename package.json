@@ -19,6 +19,7 @@
     "scripts/*.py",
     "scripts/patches/",
     "!scripts/db_direct.py",
+    "!scripts/admin_fetch_install_config.py",
     "!scripts/sync_blocked_authors.py",
     "!scripts/backfill_real_clicks.py",
     "!scripts/historical_engagement.py",
