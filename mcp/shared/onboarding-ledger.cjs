@@ -28,7 +28,7 @@ const MILESTONES = [
 // to "Setting up". publicSnapshot() therefore (a) excludes these from the
 // `complete` computation and (b) omits them from the milestones array while
 // they are still pristine "pending" (so progress bars and step lists are
-// unchanged for installs that never touch reddit) — the same
+// unchanged for installs that never touch reddit); the same
 // never-regress-legacy-ledgers principle as the mode_chosen backfill.
 const OPTIONAL_MILESTONES = ["reddit_connected", "reddit_verified"];
 
