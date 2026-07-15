@@ -102,34 +102,45 @@ def _find_playwright_dependent_scripts():
     return dependent
 
 
-def _const_str(node, literals):
+def _const_str(node, literals, file_path):
     """Best-effort static string resolution: literals, known module-level
-    names, and os.path.join(...)/os.path.expanduser(...) of resolvable
-    parts. Not full data-flow analysis -- anything else resolves to None
-    and is reported separately, never silently treated as safe."""
+    names, `__file__` (resolved to the real path of the file being scanned),
+    and os.path.join/expanduser/dirname/abspath of resolvable parts -- this
+    covers the repo's common `REPO_DIR = os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))` idiom. Not full data-flow analysis --
+    anything else resolves to None and is reported separately, never
+    silently treated as safe."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.Name):
+        if node.id == "__file__":
+            return file_path
         return literals.get(node.id)
     if isinstance(node, ast.Call):
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "join":
-            parts = [_const_str(a, literals) for a in node.args]
+        if isinstance(func, ast.Attribute) and func.attr == "join" and node.args:
+            parts = [_const_str(a, literals, file_path) for a in node.args]
             if all(p is not None for p in parts):
                 return os.path.join(*parts)
-        if isinstance(func, ast.Attribute) and func.attr == "expanduser":
-            if node.args:
-                inner = _const_str(node.args[0], literals)
-                if inner is not None:
+        if isinstance(func, ast.Attribute) and func.attr in ("expanduser", "dirname", "abspath", "normpath") and len(node.args) == 1:
+            inner = _const_str(node.args[0], literals, file_path)
+            if inner is not None:
+                if func.attr == "expanduser":
                     return os.path.expanduser(inner)
+                if func.attr == "dirname":
+                    return os.path.dirname(inner)
+                if func.attr == "abspath":
+                    return os.path.abspath(inner)
+                if func.attr == "normpath":
+                    return os.path.normpath(inner)
     return None
 
 
-def _resolve_module_literals(tree):
+def _resolve_module_literals(tree, file_path):
     literals = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            val = _const_str(node.value, literals)
+            val = _const_str(node.value, literals, file_path)
             if val is not None:
                 literals[node.targets[0].id] = val
     return literals
@@ -142,7 +153,7 @@ def _scan_file(path, playwright_scripts, fails, notes):
         tree = ast.parse(src, filename=path)
     except SyntaxError:
         return
-    literals = _resolve_module_literals(tree)
+    literals = _resolve_module_literals(tree, path)
     rel = os.path.relpath(path, REPO_ROOT)
 
     for node in ast.walk(tree):
@@ -170,7 +181,7 @@ def _scan_file(path, playwright_scripts, fails, notes):
         if key in ALLOWLIST:
             continue
 
-        target = _const_str(first_arg.elts[1], literals)
+        target = _const_str(first_arg.elts[1], literals, path)
         if target is None:
             notes.append((key, "target script path not statically resolvable -- review manually"))
             continue
