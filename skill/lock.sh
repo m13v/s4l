@@ -709,3 +709,60 @@ release_lock() {
   done
   _SA_LOCK_DIRS=(${new_stack[@]+"${new_stack[@]}"})
 }
+
+# ---- whole-run pipeline singleton (generalized 2026-07-14) ------------------
+# acquire_pipeline_singleton NAME
+#
+# One-driver-per-resource lock for an ENTIRE pipeline run, generalized from
+# linkedin-backend.sh's _acquire_linkedin_pipeline_lock (2026-05-30; read the
+# incident comments there for why every semantic below is load-bearing):
+#   - try once (mkdir /tmp/s4l-<NAME>-pipeline.lock); NO waiting/queueing (the
+#     2026-06-04/05 wait experiment starved the comment poster).
+#   - reclaim when the recorded holder pid is dead.
+#   - re-entrant per top-level script: an env flag survives same-process
+#     re-calls, and a holder-pid==$$ check survives subshell/pipe call sites
+#     (where the env export is lost but $$ is still the script pid).
+#   - a DIFFERENT live pipeline holds it -> return the RESERVED SKIP CODE 78.
+#     Callers MUST check for 78 in the PARENT shell and exit 0 (skip this
+#     fire; launchd re-fires on cadence). `exit` inside this function only
+#     kills the caller's subshell (2026-07-06 incident), and `kill -TERM $$`
+#     is neutered by lock.sh's TERM trap, so the rc contract is the ONLY
+#     mechanism that works.
+#   - NO release trap on purpose: the next pipeline's dead-pid check reclaims
+#     a finished run's dir, and adding a trap would clobber the parent
+#     scripts' EXIT/INT/TERM/HUP run_monitor traps.
+acquire_pipeline_singleton() {
+  local _ps_name="${1:?pipeline singleton name}"
+  local _ps_dir="/tmp/s4l-${_ps_name}-pipeline.lock"
+  local _ps_flag_var="_S4L_PIPE_LOCK_HELD_$(printf '%s' "$_ps_name" | tr -c 'A-Za-z0-9' '_')"
+  # Already held by THIS process (re-entry across phases) -> proceed.
+  if [ "$(eval "printf '%s' \"\${${_ps_flag_var}:-0}\"")" = "1" ]; then
+    return 0
+  fi
+  local _ps_who="${S4L_PIPELINE_NAME:-$(basename "${0:-${_ps_name}-pipeline}")}"
+  while : ; do
+    if mkdir "$_ps_dir" 2>/dev/null; then
+      echo "$$" > "$_ps_dir/pid"
+      echo "$_ps_who" > "$_ps_dir/holder"
+      eval "export ${_ps_flag_var}=1"
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_ps_name}-pipeline lock ACQUIRED by $_ps_who (pid $$)" >&2
+      return 0
+    fi
+    local _ps_h_pid _ps_h_who
+    _ps_h_pid="$(cat "$_ps_dir/pid" 2>/dev/null || echo "")"
+    _ps_h_who="$(cat "$_ps_dir/holder" 2>/dev/null || echo "?")"
+    # Re-entry when the acquiring call ran in a subshell/pipe: the env flag
+    # was lost with that subshell, but the recorded holder pid is still OURS.
+    if [ "$_ps_h_pid" = "$$" ]; then
+      eval "export ${_ps_flag_var}=1"
+      return 0
+    fi
+    if [ -z "$_ps_h_pid" ] || ! kill -0 "$_ps_h_pid" 2>/dev/null; then
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_ps_name}-pipeline lock: reclaiming stale lock (dead holder ${_ps_h_who} pid ${_ps_h_pid:-unknown})" >&2
+      rm -rf "$_ps_dir"
+      continue
+    fi
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_ps_name}-pipeline lock: held by ${_ps_h_who} (pid ${_ps_h_pid}); ${_ps_who} skipping this fire (rc=78)" >&2
+    return 78
+  done
+}
