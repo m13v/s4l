@@ -135,73 +135,81 @@ def browser_get_json(url, cdp_url=None, timeout_ms=25000):
     host = parsed.netloc or "www.reddit.com"
     host_root = f"{parsed.scheme or 'https'}://{host}/"
 
-    with sync_playwright() as p:
-        browser = None
-        page = None
-        try:
-            browser = p.chromium.connect_over_cdp(cdp_url)
-            if not browser.contexts:
-                sys.stderr.write("[reddit_browser_fetch] no CDP contexts on harness\n")
-                return None, 0
-            ctx = browser.contexts[0]
-            # Reuse an existing tab instead of new_page() on every fetch. new_page()
-            # steals OS focus each call (there are many discovery fetches per cycle,
-            # so this churned the user's focus constantly); navigating a background
-            # tab does not. Prefer a tab already on reddit.com; else pages[0]; else
-            # create one. Mirrors reddit_browser / twitter_browser tab reuse. The
-            # page is left OPEN for the next fetch (cleanup_harness_tabs trims to one
-            # at cycle start).
+    # Tab access is mutex-protected (2026-07-15, see _MUTEX above): everything
+    # from tab selection through the evaluate retries must be atomic relative
+    # to every other concurrent fetch, since they all share the ONE reused tab.
+    if not _acquire_fetch_lock():
+        return None, 0
+    try:
+        with sync_playwright() as p:
+            browser = None
             page = None
-            for pg in ctx.pages:
-                if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
-                    page = pg
-                    break
-            if page is None and ctx.pages:
-                page = ctx.pages[0]
-            if page is None:
-                page = ctx.new_page()
-            # Load the matching host root so the subsequent fetch() is same-origin
-            # (no CORS between www/old) and carries the logged-in session.
             try:
-                page.goto(host_root, wait_until="load", timeout=timeout_ms)
-            except Exception:
-                pass  # partial load is fine; we just need an active reddit origin
-            # Same-origin fetch with a couple retries — reddit.com sometimes does a
-            # client redirect on first load that destroys the execution context.
-            js = (
-                "async (u) => {"
-                "  const r = await fetch(u, {credentials:'include',"
-                "                            headers:{'Accept':'application/json'}});"
-                "  const t = await r.text();"
-                "  return {status: r.status, body: t};"
-                "}"
-            )
-            last_err = None
-            for attempt in range(3):
+                browser = p.chromium.connect_over_cdp(cdp_url)
+                if not browser.contexts:
+                    sys.stderr.write("[reddit_browser_fetch] no CDP contexts on harness\n")
+                    return None, 0
+                ctx = browser.contexts[0]
+                # Reuse an existing tab instead of new_page() on every fetch. new_page()
+                # steals OS focus each call (there are many discovery fetches per cycle,
+                # so this churned the user's focus constantly); navigating a background
+                # tab does not. Prefer a tab already on reddit.com; else pages[0]; else
+                # create one. Mirrors reddit_browser / twitter_browser tab reuse. The
+                # page is left OPEN for the next fetch (cleanup_harness_tabs trims to one
+                # at cycle start).
+                page = None
+                for pg in ctx.pages:
+                    if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
+                        page = pg
+                        break
+                if page is None and ctx.pages:
+                    page = ctx.pages[0]
+                if page is None:
+                    page = ctx.new_page()
+                # Load the matching host root so the subsequent fetch() is same-origin
+                # (no CORS between www/old) and carries the logged-in session.
                 try:
-                    res = page.evaluate(js, url)
-                    status = int(res.get("status", 0))
-                    body = res.get("body") or ""
-                    if status != 200:
-                        return None, status
-                    return body, status
-                except Exception as e:
-                    last_err = e
-                    time.sleep(2.0)  # let a redirect settle, then retry
-            sys.stderr.write(f"[reddit_browser_fetch] evaluate failed after retries: {last_err}\n")
-            return None, 0
-        except Exception as e:
-            sys.stderr.write(f"[reddit_browser_fetch] error: {e}\n")
-            return None, 0
-        finally:
-            # Do NOT close the page: it is a REUSED tab, and closing it forces the
-            # next fetch to new_page() which steals OS focus. Leaving it open lets
-            # the next fetch reuse it (cleanup_harness_tabs trims to one at cycle
-            # start). Also never close the connect_over_cdp browser/context: that can
-            # terminate the real harness Chrome (see reddit_browser.py warning). The
-            # sync_playwright() context exit disconnects the CDP client cleanly
-            # without killing the remote browser.
-            pass
+                    page.goto(host_root, wait_until="load", timeout=timeout_ms)
+                except Exception:
+                    pass  # partial load is fine; we just need an active reddit origin
+                # Same-origin fetch with a couple retries — reddit.com sometimes does a
+                # client redirect on first load that destroys the execution context.
+                js = (
+                    "async (u) => {"
+                    "  const r = await fetch(u, {credentials:'include',"
+                    "                            headers:{'Accept':'application/json'}});"
+                    "  const t = await r.text();"
+                    "  return {status: r.status, body: t};"
+                    "}"
+                )
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        res = page.evaluate(js, url)
+                        status = int(res.get("status", 0))
+                        body = res.get("body") or ""
+                        if status != 200:
+                            return None, status
+                        return body, status
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(2.0)  # let a redirect settle, then retry
+                sys.stderr.write(f"[reddit_browser_fetch] evaluate failed after retries: {last_err}\n")
+                return None, 0
+            except Exception as e:
+                sys.stderr.write(f"[reddit_browser_fetch] error: {e}\n")
+                return None, 0
+            finally:
+                # Do NOT close the page: it is a REUSED tab, and closing it forces the
+                # next fetch to new_page() which steals OS focus. Leaving it open lets
+                # the next fetch reuse it (cleanup_harness_tabs trims to one at cycle
+                # start). Also never close the connect_over_cdp browser/context: that can
+                # terminate the real harness Chrome (see reddit_browser.py warning). The
+                # sync_playwright() context exit disconnects the CDP client cleanly
+                # without killing the remote browser.
+                pass
+    finally:
+        _MUTEX.release()
 
 
 def main(argv):
