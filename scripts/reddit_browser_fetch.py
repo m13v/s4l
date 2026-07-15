@@ -33,6 +33,9 @@ import sys
 import time
 from urllib.parse import urlparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from browser_mutex import BrowserMutex
+
 
 def _default_cdp_url():
     return os.environ.get("REDDIT_CDP_URL", "http://127.0.0.1:9557").strip() \
@@ -68,6 +71,50 @@ def _yield_to_poster():
         time.sleep(5)
     if waited:
         sys.stderr.write("[reddit_browser_fetch] yielded to active poster\n")
+
+
+# ---- browser-session mutex (2026-07-15) -------------------------------------
+# Overlapping run-reddit-search.sh cycles are BY DESIGN (the "double-fork
+# wrapper" in that script deliberately lets cycles stack when one runs longer
+# than the 15-min launchd interval, which is routine — cycles regularly take
+# 20-40 min). Every one of those cycles' discover-phase fetches calls
+# browser_get_json, and until now nothing serialized them: two concurrent
+# calls both reuse the SAME harness tab (see the tab-reuse comment below), so
+# one call's page.goto() destroys the other's in-flight page.evaluate()
+# execution context ("Execution context was destroyed, most likely because
+# of a navigation" / "TypeError: Failed to fetch"). That failure returns
+# (None, 0), the caller falls back to urllib, and urllib has been 403'd by
+# Reddit's bot wall since 2026-05-28 — so what looks like "Reddit blocked us"
+# is actually two of our own readers racing each other.
+#
+# reddit_browser.py (posting) already fixed this class of bug for itself via
+# scripts/browser_mutex.py (twitter's proven mutex, parameterized) — same
+# lock_file, same JSON shape, so this shares that lock domain rather than
+# adding a fourth divergent one. Role defaults to "scan" (a read), matching
+# every other reader; BrowserMutex's own env read means an actual role="post"
+# caller would still inherit posting priority automatically.
+_LOCK_FILE = os.path.expanduser("~/.claude/reddit-agent-lock.json")
+_MUTEX = BrowserMutex(
+    lock_file=_LOCK_FILE,
+    label="Reddit browser",
+    lock_expiry=300,
+    wait_max=45,
+    poll_interval=2,
+)
+
+
+def _acquire_fetch_lock() -> bool:
+    """True if the tab is ours. BrowserMutex.acquire() prints a JSON error and
+    sys.exit(1)s on contention timeout — correct for a CLI entrypoint like
+    reddit_browser.py's own callers, but browser_get_json is a library call
+    nested inside reddit_tools.py/post_reddit.py and must degrade to its
+    documented (None, 0) contract instead of killing the caller process."""
+    try:
+        _MUTEX.acquire()
+        return True
+    except SystemExit:
+        sys.stderr.write("[reddit_browser_fetch] tab lock contended; skipping this fetch\n")
+        return False
 
 
 def browser_get_json(url, cdp_url=None, timeout_ms=25000):
