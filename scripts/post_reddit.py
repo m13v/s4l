@@ -2522,7 +2522,7 @@ def _draft_iteration(plan, config, reddit_username):
             if not isinstance(_d, dict):
                 continue
             _url = _d.get("thread_url", "")
-            if _d.get("text") and _url and _url not in _seen_urls:
+            if _d.get("draft_a_text") and _url and _url not in _seen_urls:
                 _d.setdefault("action", "post")
                 drafted.append(_d)
                 _seen_urls.add(_url)
@@ -2561,19 +2561,57 @@ def _draft_iteration(plan, config, reddit_username):
     # preserve ripen annotations, search_topic, etc. from discover phase.
     # Each freshly-written draft is also persisted to reddit_candidates so a
     # later salvage iteration can reuse it without paying the LLM cost again.
+    # Experiment/scenario arms (2026-07-15, mirrors run-twitter-cycle.sh):
+    # collect() reads S4L_EXP_* from THIS process's env once and the same
+    # dict rides onto every candidate below. merge_review_queue.py carries it
+    # through untouched; it does not stamp anything itself.
+    _exps = _collect_exps()
+
     by_url = {d["thread_url"]: d for d in drafted}
     merged = []
     for c in candidates:
         url = c.get("thread_url", "")
         drafted_d = by_url.get(url)
-        if drafted_d and drafted_d.get("text"):
+        if drafted_d and drafted_d.get("draft_a_text"):
             merged_d = dict(c)
-            merged_d["text"] = drafted_d["text"]
+            _text_a = drafted_d.get("draft_a_text") or ""
+            _style_a = drafted_d.get("draft_a_style") or picked_style_a or ""
+            _text_b = drafted_d.get("draft_b_text") or ""
+            _style_b = drafted_d.get("draft_b_style") or picked_style_b or ""
+            # Two-draft card (2026-07-15): drafts[] mirrors twitter's shape
+            # exactly (variant/text/style/assigned_style/assigned_mode) so
+            # s4l_card.py's dual-box rendering, pairwise hover/choice
+            # tracking, and the edit-learning digest apply unchanged — that
+            # machinery already keys off `isinstance(drafts, list) and
+            # len(drafts) == 2`, not platform. Only populate when Draft B
+            # actually came back (defensive; the schema requires it).
+            merged_d["drafts"] = [
+                {
+                    "variant": "a",
+                    "text": _text_a,
+                    "style": _style_a,
+                    "assigned_style": picked_style_a,
+                    "assigned_mode": style_assignment_a.get("mode"),
+                },
+                {
+                    "variant": "b",
+                    "text": _text_b,
+                    "style": _style_b,
+                    "assigned_style": picked_style_b,
+                    "assigned_mode": style_assignment_b.get("mode"),
+                },
+            ] if _text_b else None
+            # Legacy singular mirrors: Draft A is the single-draft
+            # representative, same convention as twitter (validate_or_register,
+            # _db_save_draft, and any older reader expecting `text`/
+            # `engagement_style` sees Draft A's values by default).
+            merged_d["text"] = _text_a
             merged_d["reply_to_url"] = drafted_d.get("reply_to_url")
             merged_d["thread_author"] = drafted_d.get("thread_author") or c.get("thread_author")
             merged_d["thread_title"] = drafted_d.get("thread_title") or c.get("thread_title")
-            merged_d["engagement_style"] = drafted_d.get("engagement_style") or c.get("engagement_style")
+            merged_d["engagement_style"] = _style_a or c.get("engagement_style")
             merged_d["action"] = "post"
+            merged_d["experiments"] = dict(_exps)
             merged.append(merged_d)
             _db_save_draft(url, merged_d["text"], merged_d.get("engagement_style"))
         else:
