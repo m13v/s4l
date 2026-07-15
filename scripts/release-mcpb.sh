@@ -359,6 +359,57 @@ fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
 console.log('  manifest tools ('+tools.length+'): '+tools.map(t=>t.name).join(', '));
 "
 
+# ---- 3d. Vendor an owned Node runtime (bare .mcpb installs) ------------------
+# manifest.json's mcp_config.command used to be the bare string "node", resolved
+# by whatever spawns the extension. Claude Desktop's own chat bridge covers this
+# with an internal "built-in Node" shortcut (an Electron-hosted UtilityProcess),
+# but a DIFFERENT Desktop session type (agent-mode/Cowork, which spawns a real
+# `claude` CLI subprocess with --mcp-config) does a literal subprocess spawn of
+# "node" resolved via system PATH instead. On a box with no system Node/Homebrew
+# (true of every MacStadium QA box we've checked), that spawn fails with ENOENT
+# and that session type sees zero S4L tools — even though Desktop's own bridge
+# reports "connected" for the SAME extension. Confirmed 2026-07-15: installing a
+# real Node on a broken box fixed it immediately, no other change. Root cause is
+# Desktop's own internal built-in-node eligibility, which is undocumented and
+# apparently shifted between app versions without any change on our side (the
+# manifest's "node" declaration is unchanged since the very first commit). Owning
+# our Node the same way we already own Python (uv) and Chromium removes the
+# dependency on Desktop's internal behavior entirely: manifest.json's command now
+# points at this vendored binary's absolute path, so every session type — main
+# chat, agent-mode, any future session type — spawns the SAME real binary.
+# macOS arm64 only for now (matches every deployed box); revisit if x64 support
+# is ever needed.
+NODE_RUNTIME_VERSION="v24.18.0"
+NODE_RUNTIME_PLATFORM="darwin-arm64"
+NODE_VENDOR_DIR="$MCP_DIR/vendor/node-$NODE_RUNTIME_PLATFORM"
+NODE_VENDOR_BIN="$NODE_VENDOR_DIR/bin/node"
+NODE_CACHE_DIR="$REPO_ROOT/.cache/node-runtime"
+say "Vendoring Node $NODE_RUNTIME_VERSION ($NODE_RUNTIME_PLATFORM) for the .mcpb"
+if [[ ! -x "$NODE_VENDOR_BIN" ]]; then
+  NODE_TARBALL="node-$NODE_RUNTIME_VERSION-$NODE_RUNTIME_PLATFORM.tar.gz"
+  NODE_CACHED_TARBALL="$NODE_CACHE_DIR/$NODE_TARBALL"
+  mkdir -p "$NODE_CACHE_DIR"
+  if [[ ! -f "$NODE_CACHED_TARBALL" ]]; then
+    say "  downloading $NODE_TARBALL (not cached)"
+    curl -sL "https://nodejs.org/dist/$NODE_RUNTIME_VERSION/$NODE_TARBALL" -o "$NODE_CACHED_TARBALL.tmp" \
+      || die "Node download failed"
+    mv "$NODE_CACHED_TARBALL.tmp" "$NODE_CACHED_TARBALL"
+  else
+    say "  using cached $NODE_CACHED_TARBALL"
+  fi
+  rm -rf "$NODE_VENDOR_DIR"
+  mkdir -p "$NODE_VENDOR_DIR/bin"
+  # Extract ONLY the node binary itself (no npm/npx/corepack — the server is
+  # invoked directly as `node dist/index.js`, nothing here ever needs npm).
+  tar -xzf "$NODE_CACHED_TARBALL" -O "node-$NODE_RUNTIME_VERSION-$NODE_RUNTIME_PLATFORM/bin/node" > "$NODE_VENDOR_BIN" \
+    || die "failed to extract node binary from $NODE_CACHED_TARBALL"
+  chmod +x "$NODE_VENDOR_BIN"
+fi
+[[ -x "$NODE_VENDOR_BIN" ]] || die "vendored node binary missing/not executable at $NODE_VENDOR_BIN"
+VENDORED_NODE_VER="$("$NODE_VENDOR_BIN" --version)"
+[[ "$VENDORED_NODE_VER" == "$NODE_RUNTIME_VERSION" ]] || die "vendored node reports $VENDORED_NODE_VER, expected $NODE_RUNTIME_VERSION"
+echo "  vendored node: $VENDORED_NODE_VER at mcp/vendor/node-$NODE_RUNTIME_PLATFORM/bin/node ($(du -h "$NODE_VENDOR_BIN" | cut -f1))"
+
 # ---- 4. Pack the .mcpb ------------------------------------------------------
 say "Packing $BUNDLE"
 rm -f "$BUNDLE"
@@ -407,13 +458,26 @@ for sub in mcp/dist/version.json mcp/package.json; do
   echo "  pipeline.tgz $sub: $SUBV ok"
 done
 
-for f in "dist/index.js" "dist/runtime.js" "manifest.json"; do
+for f in "dist/index.js" "dist/runtime.js" "manifest.json" "vendor/node-$NODE_RUNTIME_PLATFORM/bin/node"; do
   # grep -c reads all input (no SIGPIPE); anchor on the time column + 3-space
   # gutter so node_modules/.../dist/index.js does not false-match the top-level.
   n=$(printf '%s\n' "$LISTING" | grep -c "[0-9:]   $f\$" || true)
   [[ "$n" -ge 1 ]] || die "bundle missing $f"
 done
-echo "  runtime + server + manifest: ok"
+echo "  runtime + server + manifest + vendored node: ok"
+
+# The vendored binary must survive the zip round-trip with its executable bit
+# intact (unzip -x extracts to a temp file and runs --version; a permissions
+# regression here would silently produce a Node that Desktop can spawn but that
+# refuses to execute, or vice versa).
+VENDOR_CHECK_DIR="$(mktemp -d)"
+unzip -q -o "$BUNDLE" "vendor/node-$NODE_RUNTIME_PLATFORM/bin/node" -d "$VENDOR_CHECK_DIR"
+VENDOR_CHECK_BIN="$VENDOR_CHECK_DIR/vendor/node-$NODE_RUNTIME_PLATFORM/bin/node"
+[[ -x "$VENDOR_CHECK_BIN" ]] || die "vendored node in bundle lost its executable bit"
+VENDOR_CHECK_VER="$("$VENDOR_CHECK_BIN" --version)"
+[[ "$VENDOR_CHECK_VER" == "$NODE_RUNTIME_VERSION" ]] || die "vendored node in bundle reports $VENDOR_CHECK_VER, expected $NODE_RUNTIME_VERSION"
+rm -rf "$VENDOR_CHECK_DIR"
+echo "  vendored node runs from bundle: $VENDOR_CHECK_VER ok"
 
 if [[ "$DO_RELEASE" == "0" ]]; then
   say "Done (--no-release). Bundle ready at: $BUNDLE"
