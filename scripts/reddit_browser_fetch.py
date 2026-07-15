@@ -39,12 +39,44 @@ def _default_cdp_url():
         or "http://127.0.0.1:9557"
 
 
+_POSTING_FLAG = os.path.join(
+    os.path.expanduser(os.environ.get("S4L_STATE_DIR") or "~/.social-autoposter-mcp"),
+    "reddit-posting-active.json",
+)
+_POSTING_FRESH_S = 120
+_POSTING_YIELD_MAX_S = 300
+
+
+def _yield_to_poster():
+    """Posting owns the ONE shared harness tab (2026-07-14). Every reader
+    fetch navigates the tab to the reddit host root, which is exactly what
+    yanked the tab out from under mid-post drains (the tab_contention /
+    false account_blocked_in_sub family). A fresh reddit-posting-active.json
+    (heartbeated per row by post_reddit.py) means a poster is mid-drain:
+    WAIT for it instead of navigating, bounded so a stale flag can never
+    starve discovery/stats (they just run a few minutes later)."""
+    deadline = time.time() + _POSTING_YIELD_MAX_S
+    waited = False
+    while time.time() < deadline:
+        try:
+            age = time.time() - os.path.getmtime(_POSTING_FLAG)
+        except OSError:
+            break  # no flag -> no poster
+        if age >= _POSTING_FRESH_S:
+            break  # stale flag -> dead poster; never blocks readers
+        waited = True
+        time.sleep(5)
+    if waited:
+        sys.stderr.write("[reddit_browser_fetch] yielded to active poster\n")
+
+
 def browser_get_json(url, cdp_url=None, timeout_ms=25000):
     """Fetch a Reddit JSON URL through the logged-in harness Chrome.
 
     Returns (body_str_or_None, http_status_int). On any transport/connect
     failure returns (None, 0) so the caller can fall back to urllib.
     """
+    _yield_to_poster()
     cdp_url = (cdp_url or _default_cdp_url())
     try:
         from playwright.sync_api import sync_playwright
