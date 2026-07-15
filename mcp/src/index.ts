@@ -45,9 +45,16 @@ import {
   configPath,
   ensureConfigInStateDir,
   normalizeStringList,
+  recordRedditAccount,
   type ProjectInput,
 } from "./setup.js";
 import { xStatus, xConnect, xDetectSources, xScanProfile, summarizeXAuth } from "./twitterAuth.js";
+import {
+  redditStatus,
+  redditConnect,
+  redditDetectSources,
+  summarizeRedditAuth,
+} from "./redditAuth.js";
 import {
   startProvisioning,
   isProvisioning,
@@ -132,6 +139,23 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
   "LaunchAgents",
   `${TWITTER_AUTOPILOT_LABEL}.plist`
 );
+
+// Reddit discovery kicker (optional platform, 2026-07-15). Runs the SAME
+// launchd label the operator Mac has used by hand since May
+// (com.m13v.social-reddit-search) so there is one canonical name fleet-wide,
+// but ensureRedditKickerInstalled() refuses to touch a plist whose program
+// path points outside the managed package (the operator's hand-built plist
+// stays untouched). Installed only when reddit is connected AND a project is
+// configured; never part of onboarding completion.
+const REDDIT_SEARCH_LABEL = "com.m13v.social-reddit-search";
+const REDDIT_SEARCH_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${REDDIT_SEARCH_LABEL}.plist`
+);
+const REDDIT_SEARCH_INTERVAL_SECS = 900;
+const REDDIT_CDP_URL_DEFAULT = "http://127.0.0.1:9557";
 
 // Self-healing reaper for leaked Claude agent-mode worker sessions. The queue
 // autopilot fires two scheduled tasks every ~1 min; each fire spawns a ~200 MB
@@ -2229,7 +2253,14 @@ tool(
     inputSchema: {
       status: z.boolean().optional(),
       action: z
-        .enum(["get", "connect_x", "detect_x_sources", "profile_scan"])
+        .enum([
+          "get",
+          "connect_x",
+          "detect_x_sources",
+          "profile_scan",
+          "connect_reddit",
+          "detect_reddit_sources",
+        ])
         .optional()
         .describe(
           "get = read the CURRENT SAVED VALUES of every project's editable fields (website, " +
@@ -2248,7 +2279,12 @@ tool(
             "replies to build a 'grounding truth' corpus. Use it to draft voice/icp/search_topics in " +
             "the USER'S OWN register (their phrases, vibe, profession), then save a conservative best " +
             "draft without requiring a confirmation round-trip. Returns {profile, posts, comments, " +
-            "grounding_instructions}."
+            "grounding_instructions}. " +
+            "connect_reddit = OPTIONAL, only when the user wants Reddit too (offer it AFTER X setup " +
+            "completes; never required): import/validate the user's reddit.com session in the " +
+            "autoposter's managed reddit browser, same confirm-first shape as connect_x. " +
+            "detect_reddit_sources = list the browsers/profiles the Reddit session can be imported " +
+            "from (read-only, no keychain prompt)."
         ),
       confirm: z
         .boolean()
@@ -2269,6 +2305,21 @@ tool(
             "X login window and waits for them to log in. By default (false), connect_x does NOT pop a " +
             "browser window on an auto-import miss; it returns needs_login and you offer manual login as " +
             "an opt-in. The login window still opens automatically if the user DENIED the keychain prompt."
+        ),
+      reddit_source: z
+        .string()
+        .optional()
+        .describe(
+          "Optional browser profile to import the Reddit session from, e.g. 'arc:Default', " +
+            "'chrome:Profile 1'. Default: auto-detect the browser that holds a reddit.com session."
+        ),
+      reddit_manual_login: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true ONLY when the user explicitly wants to sign into Reddit by hand. Opens a focused " +
+            "Reddit login window in the autoposter's reddit browser and waits. Same opt-in discipline " +
+            "as x_manual_login."
         ),
       name: z
         .string()
