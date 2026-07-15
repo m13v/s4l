@@ -289,6 +289,25 @@ TW_MCP_CONFIG="$MCP_CONFIG_FILE"
 # m13v_" identity that the block carried, so prompts are no longer single-tenant.
 TW_ENGINE_PREFIX=""
 
+# --- Prompt-sandbox short-circuit (2026-07-15) -------------------------------
+# When S4L_SANDBOX_CANDIDATES_FILE is set, skip live batch tracking + Phase 0
+# salvage + Phase 1 discovery/scraping entirely and jump straight to Phase
+# 2b-prep drafting against a pre-selected set of historical twitter_candidates
+# rows (scripts/twitter_prompt_sandbox.py writes the file in the exact
+# pipe-separated shape twitter_cycle_helper.py's cmd_candidates produces).
+# Lets a prompt variant (S4L_DRAFT_PROMPT_VARIANT / S4L_EXP_*) be tried
+# against real past threads through the real drafting pipeline without
+# spending live search/scrape quota or writing a twitter_batches telemetry
+# row. The historical rows' OWN draft/status history is never written to:
+# the loader mints synthetic ids far outside the real serial range so any
+# accidental by-id write-back (log_draft.py, media set_media) 404s
+# harmlessly instead of corrupting the real historical candidate — mirrors
+# the "rd-" candidate_id prefix merge_review_queue.py already uses for
+# reddit cards for the identical reason. The body of the "live" branch below
+# (Phase tracking through the Phase 1 candidate fetch) is intentionally left
+# at its original indentation to keep this a pure wrap, not a reformat.
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+
 # --- Phase tracking: start the twitter_batches row + chain into lock.sh trap -
 # Per-cycle phase row (twitter_batches.current_phase + phase_started_at) is
 # read by peer cycles' Phase 0 to decide salvage timing per-phase instead of
@@ -1573,6 +1592,22 @@ log "No ripen wait (logic D): skipping sleep + T1 fetch, delta_score stays at T0
 # scripts/twitter_cycle_helper.py:cmd_candidates.
 CANDIDATES=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" candidates --batch-id "$BATCH_ID" 2>/dev/null || echo "")
 
+else
+    log "SANDBOX MODE: loading historical candidates from $S4L_SANDBOX_CANDIDATES_FILE (Phase 0/Phase 1 discovery skipped, no twitter_batches row created)."
+    if [ ! -s "$S4L_SANDBOX_CANDIDATES_FILE" ]; then
+        log "Sandbox candidates file missing or empty: $S4L_SANDBOX_CANDIDATES_FILE"
+        _SA_RUN_SUMMARY_EMITTED=1
+        exit 1
+    fi
+    BATCH_ID="sandbox-$(date +%Y%m%d-%H%M%S)"
+    CANDIDATES=$(cat "$S4L_SANDBOX_CANDIDATES_FILE")
+    SALVAGED=0
+    QUERIES_TOTAL=0
+    DUDS_TOTAL=0
+    TWEETS_PULLED=0
+    BATCH_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]')
+fi
+
 if [ -z "$CANDIDATES" ]; then
     log "No candidates with delta scores. Marking batch expired."
     # /api/v1/twitter-candidates/expire-batch performs the same status-flip
@@ -2500,6 +2535,13 @@ except Exception as _e:
     print(f'prep: experiments stamp failed: {_e}', file=sys.stderr)
 for _c in candidates:
     _c['experiments'] = dict(_exps)
+    # Prompt-sandbox marker (2026-07-15): lets the review card + the menu bar
+    # approve flow tell a real live draft apart from a sandbox replay of a
+    # historical thread, so the latter can be flagged and blocked from ever
+    # triggering a real post. See the sandbox short-circuit near the top of
+    # this script for how S4L_SANDBOX_CANDIDATES_FILE gets here.
+    if os.environ.get('S4L_SANDBOX_CANDIDATES_FILE'):
+        _c['experiments']['sandbox'] = 'true'
     # Two-draft cards (2026-07-07; no-recommendation redesign 2026-07-08):
     # mirror Draft A onto the canonical single-draft fields (reply_text/
     # engagement_style/new_style/reply_text_en/assigned_style/assigned_mode)
