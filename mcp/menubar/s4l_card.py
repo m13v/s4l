@@ -676,28 +676,11 @@ def _expiry_secs_left(iso, platform):
         return None
 
 
-def _expiry_str(iso, platform):
-    """Minute-granular countdown for the card header ('1h22m left', '4m
-    left'), or 'expired' once past it (a laggy sync can leave a stale card
-    showing for a few seconds before the backend prune catches up and drops
-    it). None when _expiry_secs_left is None."""
-    secs_left = _expiry_secs_left(iso, platform)
-    if secs_left is None:
-        return None
-    if secs_left <= 0:
-        return "expired"
-    mins_left = secs_left // 60
-    if mins_left < 60:
-        return f"{mins_left}m left"
-    h, m = divmod(mins_left, 60)
-    return f"{h}h left" if m == 0 else f"{h}h{m:02d}m left"
-
-
 def _expiry_seconds_str(iso, platform):
     """Second-granular countdown ('1h22m03s left', '4m09s left', '38s
-    left'), or 'expired'. Only the hover popover uses this -- it visibly
-    ticks down (2026-07-15 per user) while the header label itself stays
-    minute-granular so it isn't re-laid-out every second."""
+    left'), or 'expired'. The header label re-renders this every second
+    (2026-07-15 per user: it should visibly count down in the inline card
+    itself, not just on hover) via tickAgeExpiryLabel_."""
     secs_left = _expiry_secs_left(iso, platform)
     if secs_left is None:
         return None
@@ -710,6 +693,24 @@ def _expiry_seconds_str(iso, platform):
     if m:
         return f"{m}m{s:02d}s left"
     return f"{s}s left"
+
+
+def _age_expiry_display(iso, platform):
+    """(text, urgent) for the header's age/expiry label: 'Ns ago (Xh Ym Zs
+    left)', bold+full-strength once <=15min remain or it's already expired
+    (weight, not a new color, per this repo's severity convention -- see
+    CLAUDE.md "Dashboard colors"). Shared by _render (initial paint) and
+    tickAgeExpiryLabel_ (the per-second update) so the two never drift.
+    (None, False) when there's nothing to show (no timestamp, or a platform
+    _expiry_secs_left doesn't apply to)."""
+    age = _age_str(iso)
+    secs_left = _expiry_secs_left(iso, platform)
+    expiry_seconds = _expiry_seconds_str(iso, platform)
+    if not expiry_seconds:
+        return None, False
+    text = f"{age} ago ({expiry_seconds})" if age else expiry_seconds
+    urgent = secs_left is not None and secs_left <= 900
+    return text, urgent
 
 
 # Hover popover on the header's age/expiry label (2026-07-15 per user): the
@@ -1348,30 +1349,26 @@ class _ReviewController(NSObject):
             content.addSubview_(eye)
             self._eye_btn = eye
             right_x -= 24
-        age = _age_str(stats.get("tweet_posted_at"))
-        expiry = _expiry_str(stats.get("tweet_posted_at"), d.get("platform"))
-        # Age reads as "how old is this thread"; the bracketed countdown reads
-        # as "how urgent is reviewing it" -- kept as one combined label in the
-        # header row rather than a second display elsewhere on the card
-        # (2026-07-15 per user).
-        if age and expiry:
-            age_expiry = f"{age} ({expiry})"
-        else:
-            age_expiry = age or expiry
+        # Age + a live, second-granular countdown to the Phase 0 hard-expire
+        # cutoff, combined in one header label ("10m ago (1h49m20s left)")
+        # that ticks every second via tickAgeExpiryLabel_ (2026-07-15 per
+        # user) -- no need to hover to see it counting down. Hovering still
+        # shows the fixed "why freshness matters" explanation.
+        age_expiry, urgent = _age_expiry_display(
+            stats.get("tweet_posted_at"), d.get("platform")
+        )
         if age_expiry:
             # Urgent state (<=15min left, or already past the cutoff) drops
             # the muted gray and goes bold+full-strength instead of adding a
             # color: this repo's severity convention is weight, never a new
             # chromatic accent (see CLAUDE.md "Dashboard colors").
-            _mins_only = re.fullmatch(r"(\d+)m left", expiry or "")
-            urgent = expiry == "expired" or (
-                _mins_only and int(_mins_only.group(1)) <= 15
-            )
             age_w = int(
                 NSAttributedString.alloc().initWithString_attributes_(
                     age_expiry, {NSFontAttributeName: _font(11, urgent)}
                 ).size().width
-            ) + 8
+            ) + 12  # +12 not +8: a little slack so a minute/hour rollover
+            # mid-tick (e.g. "59s left" -> "1m00s left") doesn't clip before
+            # the next full _render recomputes the exact width.
             age_label = _label(
                 NSMakeRect(right_x - age_w, H - 70, age_w, 18),
                 age_expiry,
@@ -1382,20 +1379,20 @@ class _ReviewController(NSObject):
             age_label.setAlignment_(NSTextAlignmentRight)
             content.addSubview_(age_label)
             right_x -= age_w + 4
-            if expiry:
-                # Hover shows a second-granular ticking countdown plus the
-                # freshness-matters explanation (2026-07-15 per user); the
-                # header label itself stays minute-granular so it isn't
-                # re-laid-out every second.
-                age_label.addTrackingArea_(
-                    NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
-                        age_label.bounds(),
-                        NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
-                        self,
-                        {"kind": "expiry"},
-                    )
+            age_label.addTrackingArea_(
+                NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                    age_label.bounds(),
+                    NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                    self,
+                    {"kind": "expiry"},
                 )
-                self._age_expiry_label = age_label
+            )
+            self._age_expiry_label = age_label
+            self._age_expiry_timer = (
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    1.0, self, "tickAgeExpiryLabel:", None, True
+                )
+            )
         # Platform mark (brand identification, inline with the author row):
         # Reddit's orange "r/" vs X's glyph, so a mixed-platform review queue
         # reads at a glance which network each card posts to.
