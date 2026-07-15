@@ -1028,8 +1028,9 @@ def review_drafts(plan, batch="review-queue"):
     must never be re-presented for review (approved ones proceed to post).
 
     Also excludes cards with ANY durable decision (approved, edited, rejected, or a
-    decided-but-failed post) via review_settled_ns(). approve/reject/edit are now
-    IDENTICAL: each writes a durable local record the INSTANT the user clicks, so a
+    decided-but-failed post) via _ledger_items_for_plan() below. approve/reject/edit
+    each write a durable local record via store_stamp_decision() the INSTANT the
+    user clicks (see s4l_menubar.py::_on_card_decision), so a
     decided card never re-presents even if the loopback (Claude Desktop) is down
     when the decision's plan-flag write is attempted. The main plan's
     `approved`/`terminal`/`posted` flags are only stamped once the loopback write
@@ -1396,65 +1397,6 @@ def toggle_mode():
     return write_mode(new)
 
 
-def review_reject_add(batch, n, candidate_id=None):
-    """Record a REJECT the INSTANT the user clicks, mirroring approved_queue_add.
-    Reject and approve are now IDENTICAL: both write a durable local record before
-    any loopback call, so review_drafts() suppresses the card even if the loopback
-    (Claude Desktop) is down when the reject's plan `terminal` write is attempted.
-    Dedups on (batch, n) within the CURRENT plan generation (a stale item's n
-    refers to a dead plan and must not absorb this decision); a reject is FINAL
-    and overrides any earlier status."""
-    with _approved_lock:
-        gen = _plan_generation(batch)
-        d = read_approved_queue()
-        for it in d["items"]:
-            if it.get("batch") == batch and it.get("n") == n and not _stale_for_plan(it, gen):
-                if it.get("status") != "rejected":
-                    it.update(status="rejected", error=None, ts=time_iso())
-                    _write_approved_queue(d)
-                return
-        d["items"].append({
-            "batch": batch, "n": n, "candidate_id": candidate_id,
-            "text": "", "edited": False,
-            "drop_link": False, "candidate_url": "", "status": "rejected",
-            "error": None, "ts": time_iso(),
-        })
-        _write_approved_queue(d)
-
-
-def approved_queue_add(batch, n, text="", edited=False, candidate_url="", drop_link=False,
-                       candidate_id=None):
-    """Record an approval the INSTANT the user clicks, before any posting. Dedups
-    on (batch, n) within the CURRENT plan generation: re-approving a card that's
-    still queued/posting/posted is a no-op; a previously FAILED card is reset to
-    queued so it retries. A stale item (previous plan generation, same n) must
-    not absorb the approval or the fresh card would silently never post.
-
-    candidate_id is the durable identity of the decision (twitter_candidates
-    row); n is only meaningful within one plan generation.
-
-    drop_link carries the user's "I deleted the link while editing" intent so a
-    restart-resumed post honors it too (else the poster re-appends the link)."""
-    with _approved_lock:
-        gen = _plan_generation(batch)
-        d = read_approved_queue()
-        for it in d["items"]:
-            if it.get("batch") == batch and it.get("n") == n and not _stale_for_plan(it, gen):
-                if it.get("status") == "failed":
-                    it.update(status="queued", text=text, edited=bool(edited),
-                              drop_link=bool(drop_link), error=None, ts=time_iso())
-                    _write_approved_queue(d)
-                return
-        d["items"].append({
-            "batch": batch, "n": n, "candidate_id": candidate_id,
-            "text": text, "edited": bool(edited),
-            "drop_link": bool(drop_link),
-            "candidate_url": candidate_url, "status": "queued",
-            "error": None, "ts": time_iso(),
-        })
-        _write_approved_queue(d)
-
-
 def approved_queue_set_status(batch, n, status, error=None):
     with _approved_lock:
         d = read_approved_queue()
@@ -1472,29 +1414,6 @@ def approved_queue_pending():
     menu bar on startup so a restart RESUMES the drain instead of re-presenting."""
     return [it for it in read_approved_queue()["items"]
             if it.get("status") in ("queued", "posting")]
-
-
-def approved_queue_active_ns(batch):
-    """Plan indices the user has already approved for this batch — review_drafts()
-    excludes these so an approved card is never re-shown. Covers queued/posting
-    (in flight) AND posted: relying on the plan's posted flag alone leaves a window
-    (and breaks if the plan is regenerated), so the durable queue excludes posted
-    cards independently. `failed` is intentionally NOT excluded, so a failed post
-    falls back to manual review rather than silently vanishing."""
-    gen = _plan_generation(batch)
-    return {it.get("n") for it in read_approved_queue()["items"]
-            if it.get("batch") == batch and it.get("status") in ("queued", "posting", "posted")
-            and not _stale_for_plan(it, gen)}
-
-
-def review_settled_ns(batch):
-    """Plan indices with ANY durable user DECISION for this batch — review_drafts()
-    excludes these so approve, edit, and reject behave IDENTICALLY: a decided card
-    never re-presents for review. Covers queued/posting/posted (approved, in flight
-    or landed), `rejected`, AND `failed` (a decided-but-failed post is surfaced via
-    the failure notification + dashboard, NOT by re-showing it as a fresh review
-    card — that re-show was the "I already decided these came back" bug)."""
-    return {it.get("n") for it in _ledger_items_for_plan(batch, _plan_generation(batch))}
 
 
 def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
