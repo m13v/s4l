@@ -23,7 +23,10 @@
 # the brief post-phase windows, and post_reddit.py's already_posted filter
 # prevents double-posting across overlapping cycles.
 
-REPO_DIR="$HOME/social-autoposter"
+# Honor S4L_REPO_DIR (set by the MCP-managed plist on customer boxes, where the
+# repo is the materialized package copy, not ~/social-autoposter). The fallback
+# keeps the operator Mac's hand-built plist working unchanged.
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 
