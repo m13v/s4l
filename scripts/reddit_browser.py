@@ -589,6 +589,28 @@ def post_comment(thread_url, text):
             if "login" in page.url.lower():
                 return {"ok": False, "error": "not_logged_in"}
 
+            # Tab-collision guard (2026-07-14): every reddit pipeline shares
+            # the ONE harness tab, and a concurrent scan/fetch/engage session
+            # can navigate it between our goto and the checks below. The
+            # missing comment form then misclassified as account_blocked_in_sub
+            # (a PERMANENT verdict) — 5/5 approved cards false-positived this
+            # way on 2026-07-14. Verify the tab still shows OUR thread; re-goto
+            # once if hijacked, and classify a persistent hijack as the
+            # TRANSIENT tab_contention so the row is retried, never buried.
+            import re as _re
+            _tid_m = _re.search(r"/comments/([a-z0-9]+)", old_url)
+            _tid = _tid_m.group(1) if _tid_m else None
+
+            def _tab_is_ours():
+                return bool(_tid) and f"/comments/{_tid}" in (page.url or "")
+
+            if not _tab_is_ours():
+                page.goto(old_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+                _ensure_old_reddit(page)
+                if not _tab_is_ours():
+                    return {"ok": False, "error": "tab_contention"}
+
             # Check if the top-level comment form exists at all.
             # When the sub gates top-level commenting on this account (CrowdControl,
             # AutoMod karma/age threshold, mod-approved-only, shadowban), old reddit
@@ -596,10 +618,20 @@ def post_comment(thread_url, text):
             # page. The sub itself may be public; the gate is account-level. There
             # is no error banner and no API field that exposes this, so the only
             # signal is the missing form on a logged-in page load.
-            has_comment_form = page.locator(
-                ".commentarea .usertext.cloneable, .commentarea > form.usertext"
-            ).count() > 0
+            _form_sel = ".commentarea .usertext.cloneable, .commentarea > form.usertext"
+            has_comment_form = page.locator(_form_sel).count() > 0
             if not has_comment_form:
+                # Slow-render tolerance: give the form a short explicit wait
+                # before concluding the sub gates this account (an instant
+                # count() on a slow load is another false-positive source).
+                try:
+                    page.locator(_form_sel).first.wait_for(state="attached", timeout=6000)
+                    has_comment_form = True
+                except Exception:
+                    pass
+            if not has_comment_form:
+                if not _tab_is_ours():
+                    return {"ok": False, "error": "tab_contention"}
                 return {"ok": False, "error": "account_blocked_in_sub"}
 
             # Some subs render the form but show a gate notice instead of a usable
