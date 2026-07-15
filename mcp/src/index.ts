@@ -2763,6 +2763,9 @@ tool(
         Array.isArray(snap.projects) ? snap.projects : [];
       const rtReady = !!snap.runtime_ready;
       const xConnected = !!snap.x_connected;
+      const redditConnected = !!snap.reddit_connected;
+      // Any-of platform completion: X or Reddit satisfies the platform leg.
+      const anyPlatform = xConnected || redditConnected;
       const configured = (snap.projects_ready || 0) > 0;
       return jsonContent({
         configured,
@@ -2771,6 +2774,9 @@ tool(
         x_connected: xConnected,
         x_state: snap.x_state,
         x_handle: snap.x_handle ?? null,
+        reddit_connected: redditConnected,
+        reddit_state: snap.reddit_state,
+        reddit_username: snap.reddit_username ?? null,
         setup_complete: !!snap.setup_complete,
         mcp_version: snap.version,
         latest_version: snap.latest_version,
@@ -4986,6 +4992,13 @@ async function buildSnapshot() {
   await ensureDoctorPhase(snap.x_connected ? "full" : "pre_connect");
   if (snap.runtime_ready) completeOnboardingMilestone("runtime_ready");
   if (snap.x_connected) completeOnboardingMilestone("x_connected", { state: snap.x_state || "connected" });
+  // Reddit (optional platform) heal: a live connected reading on a LATER poll
+  // is itself persistence evidence, so it may also complete reddit_verified
+  // for an install whose post-connect verify probe transiently failed.
+  if (snap.reddit_connected) {
+    completeOnboardingMilestone("reddit_connected", { state: snap.reddit_state || "connected" });
+    completeOnboardingMilestone("reddit_verified", { source: "live_snapshot" });
+  }
   if ((snap.projects_ready || 0) > 0) completeOnboardingMilestone("project_ready", { missing_count: 0 });
   if (snap.schedule_state === "ok") completeOnboardingMilestone("tasks_scheduled");
   // mode_chosen completes when the user explicitly picked a mode (mode.json
