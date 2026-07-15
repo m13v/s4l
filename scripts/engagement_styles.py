@@ -1464,29 +1464,42 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
     lines = []
 
     if assignment["mode"] == "use":
-        # Draft-prompt A/B v3 (style-as-form, 2026-07-10): the treatment_v3
-        # arm renders the style as the BINDING FORM of the draft (defining
-        # move + per-style length for EVERY assignment + end-of-block
-        # self-check + two-layer learned_preferences contract). The arm is
-        # read from the env HERE because this block is rendered inside the
-        # cycle process where run-twitter-cycle.sh assigns and exports
-        # S4L_DRAFT_PROMPT_VARIANT (stamp-at-source: that same process also
-        # stamps the arm onto every plan candidate via active_experiments).
-        # Downstream/post-time consumers never re-read this env. Unset or
-        # control_v3 (and every non-twitter caller, which never has the env)
-        # renders the legacy block below unchanged.
+        # Draft-prompt A/B v4 (voice-first, 2026-07-15 RESET of v3): v3's
+        # treatment rendered the style as the BINDING FORM of the draft
+        # (defining move + per-style length for EVERY assignment + self-check
+        # + two-layer learned_preferences contract). v4 replaces that
+        # wholesale: measured, real voice signal (the account's own corpus +
+        # voice.examples + learned_preferences, all handled in the
+        # DRAFT_DIRECTIVE built by run-twitter-cycle.sh) is meant to be the
+        # DOMINANT signal, and a generic cross-account style template
+        # dictating structure/length was competing with that. treatment_v4
+        # keeps the style as an optional idea for angle/length only, never a
+        # required shape. The arm is read from the env HERE because this
+        # block is rendered inside the cycle process where
+        # run-twitter-cycle.sh assigns and exports S4L_DRAFT_PROMPT_VARIANT
+        # (stamp-at-source: that same process also stamps the arm onto every
+        # plan candidate via active_experiments). Downstream/post-time
+        # consumers never re-read this env. Unset or control_v4 (and every
+        # non-twitter caller, which never has the env) renders the legacy
+        # block below unchanged — that block IS the v4 control arm, same as
+        # it was the v3 control arm; v1-v3 arm strings are retired and will
+        # never match here again, so this branch is now unreachable for any
+        # value except "treatment_v4".
         _dp_arm = (os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or "").strip()
-        if _dp_arm == "treatment_v3":
+        if _dp_arm == "treatment_v4":
             _tc = assignment.get("target_chars") or DEFAULT_TARGET_CHARS
             lines.append(
                 f"## Your assigned engagement style: **{assignment['style']}** "
-                "(this is the FORM of the draft, not a flavor hint)"
+                "(an optional idea for angle and length, NOT a required structure)"
             )
             lines.append("")
             lines.append(
                 f"This style was selected by the picker (weighted by live "
-                f"click-driven performance across {platform}). Use it. Do not "
-                f"swap it for a different listed style."
+                f"click-driven performance across {platform}). Draw on it for "
+                f"inspiration when it fits naturally. The voice/preferences "
+                f"priority order in the draft directive below takes precedence "
+                f"whenever it pulls in a different direction — never force this "
+                f"style's shape at the cost of that."
             )
             lines.append("")
             lines.append(f"Platform tone: {policy.get('note', '')}")
@@ -1498,40 +1511,12 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
                 lines.append(f"  Note: {assignment['note']}")
             lines.append("")
             lines.append(
-                "Commit to the form BEFORE writing. From the description and "
-                "example above, identify the style's DEFINING MOVE (the one "
-                "thing a draft in this style must contain: a specific number, "
-                "a question, a flat disagreement, a confession, whatever the "
-                "description names) and build the reply around that move. The "
-                "test: with the topic removed, a reader should be able to "
-                "identify this style from the draft's shape alone. If your "
-                "draft would read the same under any other style name, it "
-                "does not conform; rewrite it."
-            )
-            lines.append("")
-            lines.append(
                 f"**LENGTH: aim for about {int(_tc)} characters** "
                 "(this style's own winning length; within about 30% either "
-                "way is fine, never above 250). Let the target set the form: "
-                "a very short target means one clipped line, a long one can "
-                "breathe. Do NOT default to the usual two-sentence shape. "
-                "This applies to the comment text only; any link/CTA the "
-                "system appends afterward is separate."
-            )
-            lines.append("")
-            lines.append(
-                "Learned user preferences (the learned_preferences block in "
-                "the project context) apply INSIDE this form: they control "
-                "voice, wording, and what to avoid; they do not replace the "
-                "style's structure or length. If a preference seems to "
-                "conflict with the style's defining move, keep the move and "
-                "satisfy the preference within it."
-            )
-            lines.append("")
-            lines.append(
-                "SELF-CHECK before returning: (1) does the draft contain the "
-                "style's defining move? (2) is the length within about 30% "
-                "of the target? If either fails, rewrite once."
+                "way is fine, never above 250) unless the account's own real "
+                "examples run clearly shorter or longer, in which case match "
+                "them instead. This applies to the comment text only; any "
+                "link/CTA the system appends afterward is separate."
             )
         else:
             lines.append(f"## Your assigned engagement style: **{assignment['style']}**")
