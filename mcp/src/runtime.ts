@@ -74,6 +74,9 @@ const RUNTIME_DIR = path.join(STATE_DIR, "runtime");
 const VENV_DIR = path.join(RUNTIME_DIR, ".venv");
 const RUNTIME_JSON = path.join(STATE_DIR, "runtime.json");
 const PROGRESS_JSON = path.join(STATE_DIR, "install-progress.json");
+// Cross-process provisioning lock (see tryAcquireProvisionLock below).
+const PROVISION_LOCK_PATH = path.join(STATE_DIR, "provision.lock");
+const PROVISION_LOCK_STALE_MS = 60_000;
 
 // The venv's interpreter, by absolute path (no activation needed).
 const VENV_PYTHON =
@@ -596,7 +599,8 @@ function findUv(): string | null {
 
 // ---------------------------------------------------------------------------
 // Provisioning. Idempotent: re-running re-derives any missing piece. A module
-// guard prevents two concurrent runs within the same process.
+// guard (`inFlight`) prevents two concurrent runs within the same process,
+// and a lock FILE (below) prevents two concurrent runs across processes.
 // ---------------------------------------------------------------------------
 let inFlight: Promise<InstallProgress> | null = null;
 
@@ -604,18 +608,90 @@ export function isProvisioning(): boolean {
   return inFlight !== null;
 }
 
+// Cross-process guard. `inFlight` above only protects against two calls in
+// the SAME process, but a new MCP server process spawns on every host boot —
+// including every leftover/queue-worker scheduled-task tick — so two separate
+// processes could both call startProvisioning() and race on the shared
+// HARNESS_DIR checkout (one process's "delete broken checkout" cleanup
+// colliding with another's `uv tool install`, corrupting the install; seen
+// live on the MacStadium QA box 2026-07-15). Reuses the same wx-create +
+// mtime-staleness idiom as version.ts's tryProbeLock. The holder refreshes
+// the lock's mtime via the existing progress heartbeat so staleness detection
+// stays accurate across long-running steps (Chromium/Chrome downloads).
+function tryAcquireProvisionLock(): boolean {
+  const create = () => fs.closeSync(fs.openSync(PROVISION_LOCK_PATH, "wx"));
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    create();
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      try {
+        if (Date.now() - fs.statSync(PROVISION_LOCK_PATH).mtimeMs > PROVISION_LOCK_STALE_MS) {
+          fs.unlinkSync(PROVISION_LOCK_PATH); // stale: holder died mid-provision
+          create();
+          return true;
+        }
+      } catch {
+        /* raced with the holder finishing/cleaning up */
+      }
+      return false;
+    }
+    return true; // unexpected fs error — probe anyway rather than going blind
+  }
+}
+
+function touchProvisionLock(): void {
+  try {
+    const now = new Date();
+    fs.utimesSync(PROVISION_LOCK_PATH, now, now);
+  } catch {
+    /* lock may have been reclaimed as stale, or already released; ignore */
+  }
+}
+
+function releaseProvisionLock(): void {
+  try {
+    fs.unlinkSync(PROVISION_LOCK_PATH);
+  } catch {
+    /* already gone */
+  }
+}
+
+// True when a DIFFERENT process holds a fresh (non-stale) provisioning lock.
+// Used by boot-time actors other than provision() itself (e.g. the harness
+// patch step) that also touch HARNESS_DIR and must not run concurrently with it.
+export function anotherProcessProvisioning(): boolean {
+  try {
+    return (
+      fs.existsSync(PROVISION_LOCK_PATH) &&
+      Date.now() - fs.statSync(PROVISION_LOCK_PATH).mtimeMs <= PROVISION_LOCK_STALE_MS
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Kick off provisioning (or return the in-flight run). Returns immediately with
 // the initial progress snapshot; the panel polls install_status for updates.
 export function startProvisioning(): InstallProgress {
   if (!inFlight) {
+    if (!tryAcquireProvisionLock()) {
+      // A different process already holds a fresh lock and is actively
+      // provisioning — don't start a second run that would race on the same
+      // HARNESS_DIR checkout. Report whatever that process has written so far.
+      return readProgress() ?? freshProgress();
+    }
     const progress = freshProgress();
     writeProgress(progress);
     // Heartbeat: the long download steps (Chromium ~150MB, Google Chrome DMG)
     // don't call setStep for minutes, so the progress file's updated_at froze
     // and pollers couldn't tell "slow" from "hung." Re-stamp updated_at on a
-    // timer while the run is live so status always shows real motion.
+    // timer while the run is live so status always shows real motion. Also
+    // refreshes the provision lock so its staleness check stays accurate.
     const heartbeat = setInterval(() => {
       try {
+        touchProvisionLock();
         if (!progress.done) writeProgress(progress);
       } catch {
         /* best effort; never let the heartbeat throw into the timer */
@@ -624,6 +700,7 @@ export function startProvisioning(): InstallProgress {
     if (typeof heartbeat.unref === "function") heartbeat.unref();
     inFlight = provision(progress).finally(() => {
       clearInterval(heartbeat);
+      releaseProvisionLock();
       inFlight = null;
     });
   }
@@ -692,6 +769,10 @@ export function ensureRuntimeProvisioned(): boolean {
 // live without a reinstall). Best-effort; never blocks startup.
 export async function ensureHarnessPatched(): Promise<{ ok: boolean; detail: string }> {
   try {
+    // Also a boot-time actor on HARNESS_DIR (git checkout/apply below) — skip
+    // while another process is actively provisioning it (cloning/resetting/
+    // installing) rather than racing on the same checkout.
+    if (anotherProcessProvisioning()) return { ok: false, detail: "provisioning in progress elsewhere" };
     // Version marker of the CURRENT vendored patch: a symbol that exists only
     // in its newest revision (v2 added the daemon.py websocket-proxy
     // neutralization after v1's cdp_urlopen alone proved insufficient — the
