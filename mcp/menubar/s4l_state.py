@@ -197,14 +197,49 @@ def read_onboarding():
                 return "complete"
         return st
 
+    # Any-of platform completion (mirror of onboarding-ledger.cjs
+    # milestoneSatisfied, 2026-07-15): a reddit-only install must read complete.
+    # x_connected also counts when reddit_connected is complete, and
+    # profile_scanned (an X-account scan) is required only while X is the
+    # connected platform. reddit_* ids are read straight from the raw ledger
+    # dict; they are deliberately not in MILESTONES (optional, never gating).
+    def _satisfied(mid):
+        if _status(mid) == "complete":
+            return True
+        reddit_done = (ms.get("reddit_connected") or {}).get("status") == "complete"
+        if mid == "x_connected":
+            return reddit_done
+        if mid == "profile_scanned":
+            return _status("x_connected") != "complete" and reddit_done
+        return False
+
+    # Omit pristine-pending rows the other platform satisfies (reddit-only
+    # install: x_connected / profile_scanned), and append touched optional
+    # reddit rows, mirroring the server snapshot's row filtering.
     milestones = [
-        {"id": mid, **(ms.get(mid) or {}), "status": _status(mid)} for mid in MILESTONES
+        {"id": mid, **(ms.get(mid) or {}), "status": _status(mid)}
+        for mid in MILESTONES
+        if not (_status(mid) in (None, "pending") and _satisfied(mid))
     ]
-    complete = all(_status(mid) == "complete" for mid in MILESTONES)
+    for mid in ("reddit_connected", "reddit_verified"):
+        st = (ms.get(mid) or {}).get("status")
+        if st and st != "pending":
+            milestones.append({"id": mid, **(ms.get(mid) or {}), "optional": True})
+    complete = all(_satisfied(mid) for mid in MILESTONES)
+    # Blocker suppression, mirror of the server snapshot: a blocker on an
+    # optional reddit milestone or on a milestone the other platform satisfies
+    # must not flag attention.
+    blocker = d.get("current_blocker")
+    if blocker:
+        bmid = blocker.get("milestone")
+        if bmid in ("reddit_connected", "reddit_verified"):
+            blocker = None
+        elif bmid in MILESTONES and _satisfied(bmid):
+            blocker = None
     return {
         "complete": complete,
         "milestones": milestones,
-        "current_blocker": d.get("current_blocker"),
+        "current_blocker": blocker,
     }
 
 
