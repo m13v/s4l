@@ -1229,22 +1229,25 @@ REVEAL_CADENCE_DEFAULT = 3600.0
 
 
 def read_reveal_cadence():
-    """Seconds between draft-card reveals (0 = immediately, default 1 hour)."""
+    """Seconds between draft-card reveals (0 = immediately, default 1 hour,
+    -1 = "Never" — manual-only reveal via the menu's "Review N pending
+    drafts", the pending count shows in the menu bar title instead)."""
     d = read_json(MODE_FILE)
     try:
         secs = float(d.get("reveal_cadence_secs"))
     except (TypeError, ValueError, AttributeError):
         return REVEAL_CADENCE_DEFAULT
-    return max(0.0, secs)
+    return secs if secs < 0 else max(0.0, secs)
 
 
 def write_reveal_cadence(secs):
     """Persist the reveal cadence, preserving every other mode.json key.
     Returns the written value. Never raises (a menu click must not crash)."""
     try:
-        secs = max(0.0, float(secs))
+        secs = float(secs)
     except (TypeError, ValueError):
         return read_reveal_cadence()
+    secs = -1.0 if secs < 0 else max(0.0, secs)
     try:
         payload = read_json(MODE_FILE)
         if not isinstance(payload, dict):
