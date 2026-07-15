@@ -95,7 +95,7 @@ export interface RedditSource {
   spec: string;            // e.g. "chrome:Profile 1"
   browser: string;         // chrome | arc | brave | edge | chromium
   profile: string;         // Default | Profile 1 ...
-  label: string;           // "Chrome — Profile 1"
+  label: string;           // "Chrome - Profile 1"
   reddit_session: boolean; // does this profile already hold a reddit.com session?
 }
 export interface RedditSourcesResult {
