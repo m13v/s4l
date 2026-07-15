@@ -605,16 +605,16 @@ def _details_lines(d):
 
 
 # Twitter's hard-expire ceiling: skill/run-twitter-cycle.sh's FRESHNESS_HOURS,
-# a fixed constant with "NO env-var knobs" per the 2026-07-06 decision (2h
-# steady-state; widened to 48h while first-run-boost.json exists in the state
-# dir, mirroring the exact marker run-draft-and-publish.sh reads to decide the
-# same thing). The real Phase 0 gate compares discovered_at, not
-# tweet_posted_at, but logic D caps discovery freshness at 1h so the two are
-# within ~1h of each other, close enough for an on-card countdown. Reddit
-# cards never carry a `stats` dict (see _reddit_plan_to_candidates), so
-# _expiry_str never fires for them; reddit's own 24h ceiling (post_reddit.py)
-# has no card-facing clock yet.
-_TWITTER_EXPIRE_HOURS = 2
+# a fixed constant with "NO env-var knobs" per the 2026-07-06 decision (6h
+# steady-state as of 2026-07-15, raised from 2h; widened to 48h while
+# first-run-boost.json exists in the state dir, mirroring the exact marker
+# run-draft-and-publish.sh reads to decide the same thing). The real Phase 0
+# gate now compares tweet_posted_at directly (basis="tweet_posted_at" passed
+# by score_twitter_candidates.py), so this constant tracks thread age exactly,
+# not a discovery-age proxy. Reddit cards never carry a `stats` dict (see
+# _reddit_plan_to_candidates), so _expiry_str never fires for them; reddit's
+# own 24h ceiling (post_reddit.py) has no card-facing clock yet.
+_TWITTER_EXPIRE_HOURS = 6
 _TWITTER_EXPIRE_HOURS_BOOST = 48
 
 
