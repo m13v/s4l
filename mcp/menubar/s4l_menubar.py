@@ -516,6 +516,13 @@ class S4LMenuBar(rumps.App):
         self._post_worker = None
         self._review_lock = threading.Lock()
         self._panel_open = False
+        # Which review-surface module ("cards" | "canvas") is driving the
+        # CURRENTLY open panel/window, None when nothing is open. Set at
+        # presentation time from st.read_review_layout(); kept fixed for the
+        # life of that surface so flipping the "Canvas review" menu checkbox
+        # mid-session never talks to the wrong module for an already-open
+        # panel. See _review_mod().
+        self._review_mod_name = None
         # Review snooze: epoch until which draft cards must not auto-present
         # (0 = not snoozed). Loaded from disk so a menubar restart mid-snooze
         # doesn't re-pop the card the user just put away.
@@ -2781,19 +2788,38 @@ class S4LMenuBar(rumps.App):
         until = self._last_presented_at + cadence
         return until if (cadence > 0 and now < until) else 0.0
 
+    def _review_mod(self):
+        """Which review-surface module drives the review-drafts flow: the
+        module that owns the currently open panel/window when one is open
+        (so a mid-session flip of the "Canvas review" checkbox never talks to
+        the wrong surface for an already-open one), else the persisted
+        st.read_review_layout() preference for a FRESH presentation. Both
+        modules expose the exact same present_review*/extend_active/
+        prune_active/active_status/heal_active/focus_active/dismiss_active
+        surface (see s4l_card_canvas.py's module docstring), so every call
+        site below is agnostic to which one this returns."""
+        name = self._review_mod_name or st.read_review_layout()
+        if name == "canvas":
+            import s4l_card_canvas
+
+            return "canvas", s4l_card_canvas
+        import s4l_card
+
+        return "cards", s4l_card
+
     def _review_now(self, _=None):
         """Menu: bring the pending draft cards up right now. Clears any snooze;
         this is the one presentation path that may take keyboard focus (the
         user explicitly asked for the cards)."""
         self._set_snooze(0.0)
         try:
-            import s4l_card
+            _, mod = self._review_mod()
 
-            if s4l_card.active_status():
+            if mod.active_status():
                 # A card is already on screen (user clicked while one is up,
                 # perhaps parked on another display): bring it to them instead.
-                s4l_card.heal_active()
-                s4l_card.focus_active()
+                mod.heal_active()
+                mod.focus_active()
                 return
         except Exception:
             pass
