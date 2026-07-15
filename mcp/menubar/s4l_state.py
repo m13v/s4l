@@ -1263,6 +1263,43 @@ def write_reveal_cadence(secs):
     return secs
 
 
+# Review surface layout (2026-07-15): which UI presents pending drafts.
+# "cards" (default) is the one-at-a-time corner-panel carousel (s4l_card.py);
+# "canvas" is the large centered multi-select grid (s4l_card_canvas.py). Lives
+# in mode.json next to reveal_cadence_secs, same read/write shape. Additive —
+# the menu bar picks the module to call per-review based on this value, both
+# modules share the exact same drafts list and decision contract, so nothing
+# about drafting/posting/the ledger changes when this flips.
+REVIEW_LAYOUT_DEFAULT = "cards"
+REVIEW_LAYOUTS = ("cards", "canvas")
+
+
+def read_review_layout():
+    d = read_json(MODE_FILE)
+    layout = d.get("review_layout")
+    return layout if layout in REVIEW_LAYOUTS else REVIEW_LAYOUT_DEFAULT
+
+
+def write_review_layout(layout):
+    """Persist the review layout, preserving every other mode.json key. Returns
+    the written value. Never raises (a menu click must not crash)."""
+    if layout not in REVIEW_LAYOUTS:
+        return read_review_layout()
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["review_layout"] = layout
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return layout
+
+
 # --- Posting volume mode (2026-07-13) ---------------------------------------
 # Server-side per-install throttle for the twitter cycle's virality bar:
 # high|medium|low|None (None = driver default). Source of truth is
