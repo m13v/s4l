@@ -1276,7 +1276,7 @@ REVIEW_LAYOUTS = ("cards", "canvas")
 
 def read_review_layout():
     d = read_json(MODE_FILE)
-    layout = d.get("review_layout")
+    layout = d.get("review_layout") if isinstance(d, dict) else None
     return layout if layout in REVIEW_LAYOUTS else REVIEW_LAYOUT_DEFAULT
 
 
