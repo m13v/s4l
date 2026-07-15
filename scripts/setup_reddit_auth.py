@@ -232,7 +232,12 @@ def _launch_chrome() -> bool:
         PID_FILE.write_text(str(proc.pid))
     except OSError:
         pass
-    for _ in range(15):
+    # 40s poll window, wider than the twitter helper's 15s: the FIRST reddit
+    # connect creates the harness profile from scratch, and on a cold box that
+    # first launch takes >15s to bind the debug port (observed on the QA box
+    # 2026-07-15: ensure_chrome gave up at 15s, Chrome bound seconds later and
+    # the flow misreported browser_launch_failed).
+    for _ in range(40):
         if _cdp_alive():
             return True
         time.sleep(1)
