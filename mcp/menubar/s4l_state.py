@@ -48,7 +48,11 @@ except Exception:
 # both mutate it; without this a concurrent interleave would drop an approval.
 _approved_lock = threading.Lock()
 
-# Mirrors shared/onboarding-ledger.cjs MILESTONES (same order).
+# Mirrors shared/onboarding-ledger.cjs MILESTONES (same order). The ledger's
+# OPTIONAL milestones (reddit_connected / reddit_verified) are deliberately NOT
+# listed here, same as x_verified: this list drives the offline completeness
+# check and the step list, and optional platform milestones must never make an
+# X-only box read as "Setting up".
 MILESTONES = [
     "environment_checked",
     "runtime_ready",
@@ -60,7 +64,8 @@ MILESTONES = [
     "tasks_scheduled",
 ]
 
-# Mirrors panel.ts MILESTONE_LABELS.
+# Mirrors panel.ts MILESTONE_LABELS. Includes labels for optional milestones so
+# server-snapshot rows (which include them once touched) render nicely.
 MILESTONE_LABELS = {
     "environment_checked": "Environment checked",
     "runtime_ready": "Runtime ready",
@@ -70,6 +75,8 @@ MILESTONE_LABELS = {
     "project_ready": "Project ready",
     "topics_seeded": "Topics seeded",
     "tasks_scheduled": "Tasks scheduled",
+    "reddit_connected": "Reddit connected",
+    "reddit_verified": "Reddit verified",
 }
 
 # Mirrors index.ts TWITTER_AUTOPILOT_LABEL.
