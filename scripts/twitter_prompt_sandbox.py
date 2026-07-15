@@ -10,6 +10,15 @@ Usage:
   python3 scripts/twitter_prompt_sandbox.py --project fazm --status posted --limit 5 --out /tmp/sandbox.txt
   python3 scripts/twitter_prompt_sandbox.py --urls https://x.com/.../1,https://x.com/.../2 --out /tmp/sandbox.txt
 
+  # Another install's data (matched_project alone is NOT tenant-safe -- see
+  # --install-id's help text): pass --install-id, --project becomes optional
+  # (any of that install's candidates) or still scopes to one of their
+  # projects. Pair with admin_fetch_install_config.py for their real config
+  # + persona_corpus.txt too, if testing voice fidelity rather than just
+  # replaying their real threads:
+  python3 scripts/twitter_prompt_sandbox.py --install-id ba6519ca-edaf-4fee-95b9-446da86bd346 \\
+      --project PersonalBrand --out /tmp/sandbox_karol.txt
+
 Then run the cycle against it:
   S4L_SANDBOX_CANDIDATES_FILE=/tmp/sandbox.txt S4L_DRAFT_PROMPT_VARIANT=treatment_v4 \\
       bash skill/run-twitter-cycle.sh
