@@ -467,7 +467,7 @@ def _list_sources() -> "list[dict]":
             "spec": f"{p.browser}:{p.name}",
             "browser": p.browser,
             "profile": p.name,
-            "label": f"{p.browser.capitalize()} — {p.name}",
+            "label": f"{p.browser.capitalize()} - {p.name}",
             "reddit_session": _profile_has_reddit_session(p),
         })
     out.sort(key=lambda s: (s["browser"] != "chrome", not s["reddit_session"]))
