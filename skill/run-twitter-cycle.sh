@@ -1778,7 +1778,7 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # are actually different (a same-name pair defeats the whole point); INVENT
 # mode on either side is accepted immediately since an invented name is
 # definitionally distinct from a pinned one. This is orthogonal to the
-# treatment_v3/control_v3 draft-prompt A/B below (that varies WORDING of the
+# treatment_v4/control_v4 draft-prompt A/B below (that varies WORDING of the
 # directive for the whole cycle; this varies STYLE per draft slot), so neither
 # experiment disturbs the other.
 STYLE_ASSIGN_FILE_B=$(mktemp -t s4l_twitter_assign_b_XXXXXX.json)
