@@ -1926,7 +1926,38 @@ if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
         PERSONA_SKELETON_BAN=""
         PERSONA_PREFS_RELATION="(it overrides the engagement style's structural template on conflict)"
     fi
-    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+    # --- Voice-fidelity experiment (2026-07-15) ------------------------------
+    # Does making the persona's own verbatim reply examples / persona corpus
+    # outrank the freeform voice.tone description produce drafts closer to the
+    # real person's voice? voice.tone is synthesized once (LLM prose written
+    # at onboarding) and can drift from what the scanned corpus actually shows
+    # (seen in the wild: a persona's tone said "lowercase is fine" while every
+    # scanned example was properly capitalized with normal punctuation) — the
+    # directive never told the model which one wins on conflict. Per-cycle
+    # 50/50 arm, personal_brand lane only (the promotion lane has no persona
+    # corpus to be faithful to). Independent of S4L_DRAFT_PROMPT_VARIANT (a
+    # different concern: FORM/skeleton, not voice-mechanics fidelity), so
+    # neither experiment disturbs the other. Follows the S4L_EXP_ convention
+    # (scripts/active_experiments.py collect()): exporting the var is the only
+    # wiring needed, the plan writer stamps it automatically.
+    VOICE_FIDELITY_AB_RATE="${S4L_VOICE_FIDELITY_AB_RATE:-0.5}"
+    S4L_EXP_VOICE_FIDELITY=$(python3 -c "
+import random
+try:
+    rate = float('$VOICE_FIDELITY_AB_RATE')
+except Exception:
+    rate = 0.5
+rate = min(1.0, max(0.0, rate))
+print('treatment' if random.random() < rate else 'control')
+" 2>/dev/null || echo control)
+    export S4L_EXP_VOICE_FIDELITY
+    log "Voice-fidelity A/B arm: $S4L_EXP_VOICE_FIDELITY (rate=$VOICE_FIDELITY_AB_RATE)"
+    if [ "$S4L_EXP_VOICE_FIDELITY" = "treatment" ]; then
+        PERSONA_VOICE_FIDELITY_CLAUSE=" The PERSONA CORPUS and voice.examples above are VERBATIM GROUND TRUTH for how they actually write: capitalization, punctuation, contractions, sentence length, and terseness. Match those mechanics exactly. voice.tone is a supporting description, not ground truth: if it ever conflicts with what the corpus/examples actually show (for example tone says lowercase is fine but every real example is properly capitalized), follow the examples, not the tone description."
+    else
+        PERSONA_VOICE_FIDELITY_CLAUSE=""
+    fi
+    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.${PERSONA_VOICE_FIDELITY_CLAUSE} The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
 
 # 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
