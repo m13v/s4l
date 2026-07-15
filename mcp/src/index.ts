@@ -1221,8 +1221,43 @@ async function postApproved(batchId: string, plan: Plan) {
   );
   let redditPosted = 0;
   let redditFailed = 0;
+  let redditSkippedPeerDrain = false;
   if (approvedReddit.length) {
+    // Cross-instance drain gate (2026-07-14 drain storm): every one-shot MCP
+    // boot (the queue worker fires ~every minute; each boot runs the startup
+    // backlog drain) drained the SAME sticky approvals concurrently — 26
+    // drain plans in ~30 minutes, all fighting over the one reddit tab and
+    // false-positiving each other's posts. reddit-posting-active.json is the
+    // arbiter: post_reddit.py heartbeats it per row, and we stamp it around
+    // the whole drain here. A fresh flag (<120s) means a peer is mid-drain:
+    // leave the cards for it — approvals are sticky, nothing is lost.
+    const redditFlagPath = path.join(s4lStateDir(), "reddit-posting-active.json");
+    let redditPeerFresh = false;
+    try {
+      redditPeerFresh = Date.now() - fs.statSync(redditFlagPath).mtimeMs < 120_000;
+    } catch {
+      redditPeerFresh = false;
+    }
+    const stampRedditFlag = () => {
+      try {
+        fs.writeFileSync(
+          redditFlagPath,
+          JSON.stringify({ pid: process.pid, hb: Math.floor(Date.now() / 1000) })
+        );
+      } catch {
+        /* best effort */
+      }
+    };
+    if (redditPeerFresh) {
+      redditSkippedPeerDrain = true;
+      logPostEvent(
+        `postApproved_reddit_skip batch=${batchId} reason=peer_drain_active cards=${approvedReddit.length}`
+      );
+    } else {
+      stampRedditFlag();
+      try {
     for (const c of approvedReddit) {
+      stampRedditFlag();
       const cc = c as unknown as Record<string, unknown>;
       const dec = cc.reddit_decision as Record<string, unknown> | undefined;
       const meta = (cc.reddit_plan_meta || {}) as Record<string, unknown>;
@@ -1303,13 +1338,31 @@ async function postApproved(batchId: string, plan: Plan) {
         redditFailed++;
       }
     }
-    logPostEvent(
-      `postApproved_reddit batch=${batchId} attempted=${approvedReddit.length} posted=${redditPosted} failed=${redditFailed}`
-    );
+      } finally {
+        // Clear only OUR stamp; a peer that took over mid-drain keeps its own.
+        try {
+          const cur = JSON.parse(fs.readFileSync(redditFlagPath, "utf-8"));
+          if (cur && cur.pid === process.pid) fs.unlinkSync(redditFlagPath);
+        } catch {
+          /* best effort */
+        }
+      }
+      logPostEvent(
+        `postApproved_reddit batch=${batchId} attempted=${approvedReddit.length} posted=${redditPosted} failed=${redditFailed}`
+      );
+    }
   }
   if (approvedTwitter.length === 0) {
     // All-reddit batch: persist the stamps and return without touching the
     // twitter preflight/lock path.
+    if (redditSkippedPeerDrain) {
+      return {
+        attempted: 0,
+        posted: 0,
+        exit_code: 0,
+        summary: "reddit: skipped (peer drain active); cards stay approved for the next drain",
+      };
+    }
     if (approvedReddit.length) mergeApprovedStampsIntoStore(batchId, plan, approvedReddit);
     return {
       attempted: approvedReddit.length,
