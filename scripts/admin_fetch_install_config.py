@@ -39,7 +39,7 @@ def fetch_snapshot(install_id: str):
     db = get_conn()
     try:
         cur = db.execute(
-            "SELECT state_snapshot, hostname, git_email FROM installations WHERE id = %s",
+            "SELECT state_snapshot, hostname, git_email FROM installations WHERE install_id = %s",
             [install_id],
         )
         row = cur.fetchone()
