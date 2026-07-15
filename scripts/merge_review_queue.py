@@ -243,6 +243,15 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
         # never match a row there, so skip them (their freshness gating stays
         # with the reddit pipeline's own salvage/expiry lanes).
         and c.get("platform") != "reddit"
+        # Prompt-sandbox cards (experiments.sandbox=true, see
+        # run-twitter-cycle.sh's S4L_SANDBOX_CANDIDATES_FILE short-circuit)
+        # replay a REAL historical tweet_url on purpose. That row's real
+        # status is almost always 'posted' or 'skipped' (it's old), which
+        # would otherwise get read back here as "backend already retired
+        # this" and prune the sandbox card the instant it syncs. Skip the
+        # lookup for them entirely; they were never 'pending' in the live
+        # sense this freshness gate exists to catch.
+        and not (c.get("experiments") or {}).get("sandbox")
         and _thread_url(c)
     ]
     if not pending:
