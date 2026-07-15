@@ -19,9 +19,11 @@ persistent profile at ~/.claude/browser-profiles/reddit-harness (the same
 Chrome skill/lib/reddit-backend.sh launches for discovery + posting). This
 helper:
 
-  status  - probe that Chrome; if up, validate the reddit session via
-            api/me.json. If down, fall back to a read-only on-disk cookie
-            check (connected_idle) so a saved session never reads back as
+  status  - probe that Chrome; if up, do a read-only reddit_session cookie
+            check (cheap and poll-safe: never navigates the shared harness
+            tab; the authoritative me.json validation lives in `connect`).
+            If down, fall back to a read-only on-disk cookie check
+            (connected_idle) so a saved session never reads back as
             "disconnected" just because the harness isn't running.
   connect - ensure that Chrome is running; if the reddit session is already
             valid, no-op; otherwise IMPORT reddit.com cookies (reddit_session,
@@ -274,17 +276,21 @@ def _attach():
 
 
 def _has_reddit_session_cookie(send) -> bool:
+    # reddit_session ONLY: token_v2 is an anonymous-session JWT Reddit sets for
+    # every visitor (logged in or not), so keying on it false-positives the
+    # moment the harness merely VISITS reddit.com (observed on the QA box
+    # 2026-07-15). reddit_session exists only for a logged-in account.
     r = send("Network.getAllCookies")
     cks = r.get("result", {}).get("cookies", []) or []
     return any(
-        c.get("name") in ("reddit_session", "token_v2")
+        c.get("name") == "reddit_session"
         and "reddit.com" in (c.get("domain") or "")
         for c in cks
     )
 
 
 def _has_session_quick() -> bool:
-    """Read-only: reddit_session/token_v2 cookie present in the live browser?
+    """Read-only: reddit_session cookie present in the live browser?
     Never navigates, so it's safe while a pipeline run is active. A revoked
     cookie can false-positive; the me.json validation is authoritative."""
     ws, send = _attach()
@@ -383,7 +389,8 @@ def _cookies_db_path() -> "Path | None":
 
 def _profile_dir_has_session() -> bool:
     """True when the HARNESS profile's on-disk Cookies SQLite has a
-    reddit_session/token_v2 row. Presence-only (value stays encrypted), so no
+    reddit_session row (login cookie ONLY; token_v2 is set for anonymous
+    visitors too). Presence-only (value stays encrypted), so no
     macOS Safe Storage prompt. Lets `status` report connected_idle while the
     harness Chrome is down (the pipeline relaunches it with the same profile)."""
     if _cbc is None:
@@ -400,7 +407,7 @@ def _profile_dir_has_session() -> bool:
         conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
         try:
             row = conn.execute(
-                "SELECT 1 FROM cookies WHERE name IN ('reddit_session','token_v2') "
+                "SELECT 1 FROM cookies WHERE name = 'reddit_session' "
                 "AND host_key LIKE '%reddit.com' LIMIT 1"
             ).fetchone()
             return row is not None
@@ -451,7 +458,7 @@ def _profile_has_reddit_session(profile) -> bool:
         conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
         try:
             row = conn.execute(
-                "SELECT 1 FROM cookies WHERE name IN ('reddit_session','token_v2') "
+                "SELECT 1 FROM cookies WHERE name = 'reddit_session' "
                 "AND host_key LIKE '%reddit.com' LIMIT 1"
             ).fetchone()
             return row is not None
@@ -666,40 +673,38 @@ def cmd_status(args) -> dict:
             "connect_reddit to start it and check/import your session.",
             "cdp": CDP,
         }
-    fields = _validate_session()
-    if fields is None:
-        # Live browser says no valid session; a saved on-disk session may still
-        # exist mid-write. Fall back to the quick cookie check before declaring
-        # logged_out (a revoked cookie will fail the next connect validation).
-        try:
-            quick = _has_session_quick()
-        except Exception as e:
-            return {"ok": False, "connected": False, "state": "error",
-                    "username": None, "error": str(e), "cdp": CDP}
-        if quick:
-            return {
-                "ok": True,
-                "connected": True,
-                "state": "connected_idle",
-                "username": _configured_username(),
-                "note": "A reddit session cookie is present in the harness browser "
-                "but me.json could not be validated right now (transport busy or "
-                "yielding to an active posting drain).",
-                "cdp": CDP,
-            }
-        return {"ok": True, "connected": False, "state": "logged_out",
-                "username": None, "cdp": CDP}
-    if fields.get("suspended"):
+    # Live browser is up: read-only reddit_session cookie check. Deliberately
+    # NOT the me.json validation: status is polled by the snapshot/menubar and
+    # the kicker gate, and a me.json fetch navigates the ONE shared harness tab
+    # (fighting discovery/posting). The authoritative me.json validation runs
+    # inside `connect` (already-valid short-circuit, post-import, post-login).
+    # A revoked-but-present cookie can false-positive here; the next connect or
+    # pipeline run surfaces that loudly.
+    try:
+        quick = _has_session_quick()
+    except Exception as e:
+        return {"ok": False, "connected": False, "state": "error",
+                "username": None, "error": str(e), "cdp": CDP}
+    if quick:
         return {
             "ok": True,
-            "connected": False,
-            "state": "suspended",
-            "username": fields.get("username"),
-            "note": "This reddit account is suspended; posting is not possible. "
-            "Connect a different account (manual login) or resolve the suspension.",
+            "connected": True,
+            "state": "connected",
+            "username": _configured_username(),
             "cdp": CDP,
         }
-    return _connected_result("connected", fields)
+    if _profile_dir_has_session():
+        return {
+            "ok": True,
+            "connected": True,
+            "state": "connected_idle",
+            "username": _configured_username(),
+            "note": "A reddit session exists in the harness profile on disk; the "
+            "live browser has not loaded it into memory yet.",
+            "cdp": CDP,
+        }
+    return {"ok": True, "connected": False, "state": "logged_out",
+            "username": None, "cdp": CDP}
 
 
 def cmd_connect(args) -> dict:
