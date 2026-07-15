@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch
 from author_history_block import render as _render_author_history
 from project_topics import topics_for_project
+from active_experiments import collect as _collect_exps
 
 # Honor S4L_REPO_DIR so managed-package installs resolve helper scripts inside
 # the package instead of a nonexistent ~/social-autoposter (the same $HOME
@@ -43,25 +44,35 @@ RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 
 # JSON schema for the queue-routed draft turn (tag post-reddit-draft ->
 # claude_job.py type reddit-draft). One object, two arrays; posts[] entries
-# mirror the legacy JSONL "action":"post" line fields, rejects[] entries feed
-# _propose_excludes_from_rejects (thread_url + reason + proposed_excludes).
+# now carry TWO independent drafts per thread (draft_a_*/draft_b_*, mirroring
+# run-twitter-cycle.sh's PREP_SCHEMA) instead of a single `text` field, so the
+# review card can show both and let the reviewer pick (2026-07-15). rejects[]
+# entries feed _propose_excludes_from_rejects (thread_url + reason +
+# proposed_excludes).
 REDDIT_DRAFT_SCHEMA = json.dumps({
     "type": "object",
     "properties": {
         "posts": {"type": "array", "items": {"type": "object", "properties": {
             "thread_url": {"type": "string"},
             "reply_to_url": {"type": ["string", "null"]},
-            "text": {"type": "string"},
-            "thread_author": {"type": "string"},
-            "thread_title": {"type": "string"},
-            "engagement_style": {"type": "string"},
-            "search_topic": {"type": "string"},
-            "new_style": {"type": ["object", "null"], "properties": {
+            "draft_a_text": {"type": "string"},
+            "draft_a_style": {"type": "string"},
+            "draft_a_new_style": {"type": ["object", "null"], "properties": {
                 "description": {"type": "string"},
                 "example": {"type": "string"},
             }},
-        }, "required": ["thread_url", "text", "thread_author",
-                        "thread_title", "engagement_style"]}},
+            "draft_b_text": {"type": "string"},
+            "draft_b_style": {"type": "string"},
+            "draft_b_new_style": {"type": ["object", "null"], "properties": {
+                "description": {"type": "string"},
+                "example": {"type": "string"},
+            }},
+            "thread_author": {"type": "string"},
+            "thread_title": {"type": "string"},
+            "search_topic": {"type": "string"},
+        }, "required": ["thread_url", "draft_a_text", "draft_a_style",
+                        "draft_b_text", "draft_b_style", "thread_author",
+                        "thread_title"]}},
         "rejects": {"type": "array", "items": {"type": "object", "properties": {
             "thread_url": {"type": "string"},
             "reason": {"type": "string"},
@@ -1173,7 +1184,7 @@ def _prefetch_thread_digests(candidates, reddit_username=None):
 
 
 def build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                       style_assignment=None, digests=None):
+                       style_assignment_a=None, style_assignment_b=None, digests=None):
     """DRAFT phase: write comments only for ripen-survivors.
 
     `candidates` is the list of decisions that passed the delta gate, each
@@ -1181,11 +1192,16 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
     content is pre-fetched by _prefetch_thread_digests and inlined per
     candidate (tool-free turn since 2026-07-14; the model must not fetch).
 
-    2026-05-19: `style_assignment` is the pick_style_for_post() result the
-    discover phase already wrote into the plan JSON. Forwarding it here so
-    the draft phase enforces the SAME style instead of letting the model
-    free-pick (and overwhelmingly default to pattern_recognizer). When
-    omitted, get_styles_prompt() picks fresh internally (legacy callers).
+    2026-05-19: `style_assignment_a`/`style_assignment_b` are two independent
+    pick_style_for_post() results the draft phase picks up front, so the
+    model enforces the SAME two assignments instead of free-picking (and
+    overwhelmingly defaulting to pattern_recognizer).
+
+    2026-07-15: two independent drafts (A/B, mirroring run-twitter-cycle.sh's
+    Draft A/Draft B) are requested per thread instead of one, so the review
+    card can show both and the reviewer picks. Card rendering and the
+    edit-learning digest already handle a 2-element `drafts[]` generically
+    (built for twitter); this just needs to populate it.
     """
     content_angle = build_content_angle(project, config)
 
@@ -1234,7 +1250,7 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
         )
     candidates_block = "\n".join(candidate_lines)
 
-    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to draft comments for the ones where you can write something genuinely useful to that audience. Lean toward DRAFTING when the audience overlaps even partially with the project's user, and only OMIT on clear no-bridge cases.
+    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to draft TWO independent comments (Draft A and Draft B, one under Draft A's assigned style and one under Draft B's assigned style below) for the ones where you can write something genuinely useful to that audience. Do not judge or rank them, the reviewer reads both and picks. Lean toward DRAFTING when the audience overlaps even partially with the project's user, and only OMIT on clear no-bridge cases.
 
 Content angle: {content_angle}
 {recent_ctx}{top_ctx}
@@ -1285,18 +1301,22 @@ Each candidate above carries a THREAD CONTENT block (OP + top comments), already
 ## Content rules
 {get_content_rules("reddit")}
 
-{get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
+## DRAFT A: assigned style
+{get_styles_prompt("reddit", context="posting", assignment=style_assignment_a)}
+
+## DRAFT B: assigned style
+{get_styles_prompt("reddit", context="posting", assignment=style_assignment_b)}
 
 {_learned_prefs_block(project)}
 {get_voice_relationship_rule()}
 
 ## OUTPUT FORMAT
-Return ONE JSON object with two arrays (a JSON schema is enforced on this session):
+Return ONE JSON object with two arrays (a JSON schema is enforced on this session). Both draft_a_text and draft_b_text are REQUIRED for every posts[] entry — write both, under their respective assigned styles above, applying the CRITICAL CONTENT RULES and Content rules to each independently:
 
 {{"posts": [...], "rejects": [...]}}
 
 Each posts[] entry is one thread that PASSES the SELECTION GATE:
-{{"thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "{(style_assignment or {}).get('style') or 'style_name'}", "search_topic": "the seed concept", "new_style": null}}
+{{"thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "draft_a_text": "your Draft A comment here", "draft_a_style": "{(style_assignment_a or {}).get('style') or 'style_name'}", "draft_a_new_style": null, "draft_b_text": "your Draft B comment here", "draft_b_style": "{(style_assignment_b or {}).get('style') or 'style_name'}", "draft_b_new_style": null, "thread_author": "username", "thread_title": "thread title", "search_topic": "the seed concept"}}
 
 For threads that FAIL the gate, simply leave them out of posts. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads). When nothing passes, return {{"posts": [], "rejects": []}}.
 
@@ -2415,11 +2435,15 @@ def _draft_iteration(plan, config, reddit_username):
     # to the assigned style → embed the assignment block in the prompt →
     # JSON example shows the literal assigned style name. End-to-end
     # adherence comes from those three lined-up signals.
-    style_assignment = pick_style_for_post("reddit", context="posting")
-    picked_style = style_assignment.get("style")
-    print(f"[post_reddit] draft style assigned: mode={style_assignment['mode']} "
-          f"style={picked_style or '(invent)'}")
-    top_report = get_top_performers(project_name, style=picked_style)
+    style_assignment_a = pick_style_for_post("reddit", context="posting")
+    style_assignment_b = pick_style_for_post("reddit", context="posting")
+    picked_style_a = style_assignment_a.get("style")
+    picked_style_b = style_assignment_b.get("style")
+    print(f"[post_reddit] draft style A assigned: mode={style_assignment_a['mode']} "
+          f"style={picked_style_a or '(invent)'}")
+    print(f"[post_reddit] draft style B assigned: mode={style_assignment_b['mode']} "
+          f"style={picked_style_b or '(invent)'}")
+    top_report = get_top_performers(project_name, style=picked_style_a)
     recent_comments = get_recent_comments()
     # We don't have a Reddit equivalent of top_search_topics_report in
     # the draft phase (the discover phase loads it for the search step).
@@ -2447,7 +2471,8 @@ def _draft_iteration(plan, config, reddit_username):
         return plan
 
     prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                                style_assignment=style_assignment, digests=digests)
+                                style_assignment_a=style_assignment_a,
+                                style_assignment_b=style_assignment_b, digests=digests)
 
     # Build the generation_trace audit blob: what Claude is about to see.
     # Captured BEFORE the Claude call so we never end up with a post row
