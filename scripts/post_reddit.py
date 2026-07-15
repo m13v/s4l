@@ -135,7 +135,43 @@ _TRANSIENT_CDP_ERRORS = {
     "all_attempts_failed",
     "comment_box_not_found",
     "not_logged_in",
+    # A concurrent reddit pipeline navigated the shared harness tab out from
+    # under the poster (2026-07-14: 5/5 approvals misclassified as
+    # account_blocked_in_sub this way). Always retryable.
+    "tab_contention",
 }
+
+# ---- posting-active flag (2026-07-14, mirrors twitter's posting-active) ----
+# Stamped for the whole --phase post run and heartbeated per row. Readers:
+# run-reddit-search.sh (skips a cycle fire while fresh) and reddit-backend.sh's
+# pre-launch defer hook (skips every other reddit pipeline's fire), so scans
+# and engagement never grab the ONE shared harness tab mid-post. A stale file
+# (heartbeat older than ~120s) never blocks anyone: a killed poster must not
+# wedge the fleet.
+_S4L_STATE_DIR = os.path.expanduser(os.environ.get("S4L_STATE_DIR") or "~/.social-autoposter-mcp")
+POSTING_ACTIVE_FILE = os.path.join(_S4L_STATE_DIR, "reddit-posting-active.json")
+
+
+def _stamp_posting_active():
+    try:
+        os.makedirs(_S4L_STATE_DIR, exist_ok=True)
+        with open(POSTING_ACTIVE_FILE, "w") as f:
+            json.dump({"pid": os.getpid(), "hb": time.time()}, f)
+    except Exception:
+        pass
+
+
+def _clear_posting_active():
+    try:
+        with open(POSTING_ACTIVE_FILE) as f:
+            if json.load(f).get("pid") != os.getpid():
+                return  # a peer poster owns the flag now; not ours to clear
+    except Exception:
+        pass
+    try:
+        os.remove(POSTING_ACTIVE_FILE)
+    except Exception:
+        pass
 
 from engagement_styles import (
     VALID_STYLES, get_styles_prompt, get_content_rules, validate_or_register,
@@ -2585,6 +2621,10 @@ def _post_iteration(plan, reddit_username):
     failed = 0
 
     for i, decision in enumerate(decisions):
+        # Heartbeat the posting-active flag per row so readers see a fresh
+        # stamp for the whole drain (rows are ~45s + 180s inter-post sleeps;
+        # the reader freshness window is 120s, so re-stamp before EACH row).
+        _stamp_posting_active()
         thread_url = decision["thread_url"]
         reply_to_url = decision.get("reply_to_url")
         text = decision["text"]
@@ -2885,9 +2925,11 @@ def main():
                       f"posting. stderr: {(_chk.stderr or '').strip()[:300]}", file=sys.stderr)
                 sys.exit(3)
         try:
+            _stamp_posting_active()
             posted, failed = _post_iteration(plan, reddit_username)
             print(f"[post_reddit] phase=post project={plan.get('project_name')} posted={posted} failed={failed}")
         finally:
+            _clear_posting_active()
             # Clean up the generation_trace temp file. By this point every
             # post that landed has the trace JSONB persisted to its row,
             # so the on-disk file is redundant. Best-effort delete.
