@@ -123,6 +123,26 @@ cleanup_harness_tabs() {
     hc_cleanup_tabs 9557 reddit-harness
 }
 
+_reddit_defer_if_posting() {
+    # Posting-active defer (2026-07-14, mirrors twitter's posting-active flag):
+    # a poster mid-drain owns the ONE shared harness tab; a pipeline that
+    # grabs it mid-post navigates the tab out from under the poster and the
+    # comment-form check false-positives as account_blocked_in_sub. When the
+    # flag is fresh (heartbeat < 120s; post_reddit.py re-stamps per row), skip
+    # this fire via the reserved code 78 — the launchd job re-fires on its
+    # next cadence. A stale flag never blocks (a killed poster must not wedge
+    # every reddit pipeline).
+    local _f="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/reddit-posting-active.json"
+    [ -f "$_f" ] || return 0
+    local _age
+    _age=$(( $(date +%s) - $(stat -f %m "$_f" 2>/dev/null || stat -c %Y "$_f" 2>/dev/null || echo 0) ))
+    if [ "$_age" -lt 120 ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] reddit posting-active (age ${_age}s); skipping this fire (rc=78) so the poster keeps the tab" >&2
+        return 78
+    fi
+    return 0
+}
+
 ensure_reddit_browser_for_backend() {
     HC_PLATFORM=reddit \
     HC_PORT=9557 \
@@ -132,6 +152,7 @@ ensure_reddit_browser_for_backend() {
     HC_LAUNCH_URL="about:blank" \
     HC_WINDOW_POS="${BH_REDDIT_WINDOW_POS:-2131,-1032}" \
     HC_WINDOW_SIZE="${BH_REDDIT_WINDOW_SIZE:-911,1016}" \
+    HC_PRE_LAUNCH_HOOK=_reddit_defer_if_posting \
     hc_ensure_browser
 }
 
