@@ -196,6 +196,10 @@ const MILESTONE_LABELS: Record<string, string> = {
   project_ready: "Project ready",
   topics_seeded: "Topics seeded",
   tasks_scheduled: "Tasks scheduled",
+  // Optional platform milestones: the ledger only includes them in the
+  // snapshot once touched, and they never gate completion.
+  reddit_connected: "Reddit connected",
+  reddit_verified: "Reddit verified",
 };
 
 function milestoneGlyph(status: MilestoneStatus): string {
