@@ -1511,13 +1511,6 @@ class S4LMenuBar(rumps.App):
             pass
         return dirs
 
-    @classmethod
-    def _claude_user_data_dir(cls):
-        """First custom --user-data-dir among running instances, or None.
-        Prefer _claude_user_data_dirs when relaunching after a kill — the
-        kill takes every profile down, not just this one."""
-        return next((d for d in cls._claude_user_data_dirs() if d), None)
-
     @staticmethod
     def _claude_running():
         """True while a Claude Desktop main process is alive. pgrep -x matches
