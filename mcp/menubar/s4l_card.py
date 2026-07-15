@@ -537,6 +537,29 @@ _TWITTER_EXPIRE_HOURS = 2
 _TWITTER_EXPIRE_HOURS_BOOST = 48
 
 
+def _age_str(iso):
+    """Thread age since tweet_posted_at, minute-granular for fresh threads
+    ('38m'); rolls to hours/days only when minutes would be absurd."""
+    if not iso:
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        mins = int(
+            (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60
+        )
+    except Exception:
+        return None
+    mins = max(mins, 0)
+    if mins < 100:
+        return f"{mins}m"
+    hours = mins // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
 def _first_run_boost_active():
     try:
         from pathlib import Path
@@ -1201,31 +1224,40 @@ class _ReviewController(NSObject):
             content.addSubview_(eye)
             self._eye_btn = eye
             right_x -= 24
+        age = _age_str(stats.get("tweet_posted_at"))
         expiry = _expiry_str(stats.get("tweet_posted_at"), d.get("platform"))
-        if expiry:
+        # Age reads as "how old is this thread"; the bracketed countdown reads
+        # as "how urgent is reviewing it" -- kept as one combined label in the
+        # header row rather than a second display elsewhere on the card
+        # (2026-07-15 per user).
+        if age and expiry:
+            age_expiry = f"{age} ({expiry})"
+        else:
+            age_expiry = age or expiry
+        if age_expiry:
             # Urgent state (<=15min left, or already past the cutoff) drops
             # the muted gray and goes bold+full-strength instead of adding a
             # color: this repo's severity convention is weight, never a new
             # chromatic accent (see CLAUDE.md "Dashboard colors").
-            _mins_only = re.fullmatch(r"(\d+)m left", expiry)
+            _mins_only = re.fullmatch(r"(\d+)m left", expiry or "")
             urgent = expiry == "expired" or (
                 _mins_only and int(_mins_only.group(1)) <= 15
             )
-            expiry_w = int(
+            age_w = int(
                 NSAttributedString.alloc().initWithString_attributes_(
-                    expiry, {NSFontAttributeName: _font(11, urgent)}
+                    age_expiry, {NSFontAttributeName: _font(11, urgent)}
                 ).size().width
             ) + 8
-            expiry_label = _label(
-                NSMakeRect(right_x - expiry_w, H - 70, expiry_w, 18),
-                expiry,
+            age_label = _label(
+                NSMakeRect(right_x - age_w, H - 70, age_w, 18),
+                age_expiry,
                 size=11,
                 bold=urgent,
                 muted=not urgent,
             )
-            expiry_label.setAlignment_(NSTextAlignmentRight)
-            content.addSubview_(expiry_label)
-            right_x -= expiry_w + 4
+            age_label.setAlignment_(NSTextAlignmentRight)
+            content.addSubview_(age_label)
+            right_x -= age_w + 4
         # Platform mark (brand identification, inline with the author row):
         # Reddit's orange "r/" vs X's glyph, so a mixed-platform review queue
         # reads at a glance which network each card posts to.
