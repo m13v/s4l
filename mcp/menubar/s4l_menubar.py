@@ -1070,6 +1070,21 @@ class S4LMenuBar(rumps.App):
     def _toggle_promotion(self, _=None):
         self._toggle_lane(st.MODE_PROMOTION)
 
+    def _toggle_canvas_review(self, _=None):
+        """Menu: flip which review surface presents pending drafts. Persisted
+        (st.write_review_layout), so it survives a restart; an already-open
+        surface keeps driving through whichever module it started with
+        (_review_mod_name) -- this only changes what the NEXT presentation
+        uses. See _review_mod()."""
+        current = st.read_review_layout()
+        st.write_review_layout("cards" if current == "canvas" else "canvas")
+        self._sig = None
+        try:
+            self._tick(None)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] canvas toggle rebuild failed: {e}\n")
+            sys.stderr.flush()
+
     # Personal-brand share presets for the both-lanes-on state. rumps has no
     # slider, so the "Lane split" submenu offers these fixed points; the
     # dashboard's slider can set anything in between and the checkmark simply
@@ -3553,6 +3568,14 @@ class S4LMenuBar(rumps.App):
                 it.state = 1 if round(share * 100) == round(preset * 100) else 0
                 split_menu.add(it)
             items.append(split_menu)
+
+        # Review surface layout: the one-at-a-time corner card (default) vs.
+        # the large centered multi-select canvas (2026-07-15). Always visible
+        # for the same reason as the lane checkmarks above — a standing
+        # preference, not tied to whether anything is pending right now.
+        canvas_item = rumps.MenuItem("Canvas review", callback=self._toggle_canvas_review)
+        canvas_item.state = 1 if st.read_review_layout() == "canvas" else 0
+        items.append(canvas_item)
 
         # Reveal cadence: how often fresh draft cards may pop (the drafting
         # pipeline is unchanged; this only paces the pop-up). Always offered:
