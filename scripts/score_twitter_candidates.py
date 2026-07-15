@@ -41,10 +41,21 @@ from project_topics import topics_for_project  # noqa: E402
 # pending rows to status='expired'. Sourced from the FRESHNESS_HOURS env the
 # cycle exports (run-twitter-cycle.sh) so the expiry ceiling is configured in
 # ONE place. Falls back to 18 when unset (e.g. ad-hoc / --expire-only runs) to
-# preserve the historical default. NOTE: the gate is on discovered_at
-# (discovery age), not tweet_posted_at; for logic D (≤1h discovery freshness)
-# the two are within ~1h of each other.
+# preserve the historical default.
+#
+# 2026-07-15: the gate now measures thread age (tweet_posted_at), not
+# discovery age (discovered_at) — see EXPIRE_BASIS below. It used to be
+# discovered_at; that was harmless while discovery was capped at 1h (the two
+# stayed within ~1h of each other), but wrong once discovery widened to 6h
+# alongside this ceiling (a discovered_at-based gate would then let real
+# thread age reach ~12h before expiring).
 EXPIRE_FRESHNESS_HOURS = int(os.environ.get("FRESHNESS_HOURS") or "18")
+
+# Opt-in basis param for the expire-stale route (see
+# ~/social-autoposter-website twitter-candidates/expire-stale): the route
+# defaults to discovered_at for every other install, so this is passed
+# explicitly rather than changing the route's default.
+EXPIRE_BASIS = "tweet_posted_at"
 
 
 # Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
@@ -599,7 +610,10 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     # Expire old pending candidates past the freshness window. This is a
     # freshness GATE (status flip), not a delete — we keep the row forever
     # for analytics.
-    api_post("/api/v1/twitter-candidates/expire-stale", {"freshness_hours": EXPIRE_FRESHNESS_HOURS})
+    api_post(
+        "/api/v1/twitter-candidates/expire-stale",
+        {"freshness_hours": EXPIRE_FRESHNESS_HOURS, "basis": EXPIRE_BASIS},
+    )
 
     # NO PRUNING. We keep every twitter_candidates row forever (chosen, skipped,
     # expired) so we can audit project routing, skip reasons, growth dynamics,
@@ -664,7 +678,7 @@ def main():
         # it off and prints the count.
         resp = api_post(
             "/api/v1/twitter-candidates/expire-stale",
-            {"freshness_hours": EXPIRE_FRESHNESS_HOURS},
+            {"freshness_hours": EXPIRE_FRESHNESS_HOURS, "basis": EXPIRE_BASIS},
         )
         expired = (resp.get("data") or {}).get("expired_count", 0)
         print(f"Expired {expired} old pending candidates (no row deletion)")
