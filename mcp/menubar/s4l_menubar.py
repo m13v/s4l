@@ -2875,14 +2875,17 @@ class S4LMenuBar(rumps.App):
         if self._review_active:
             if self._panel_open:
                 try:
-                    import s4l_card
+                    # _review_mod_name is already pinned to whichever module
+                    # actually opened this panel (set below); _review_mod()
+                    # returns that same module, not a fresh preference read.
+                    _, mod = self._review_mod()
 
                     prev_ns = {n for n, _ in (self._last_review_sig or ())}
                     cur_ns = {d.get("n") for d in drafts}
                     vanished = prev_ns - cur_ns
                     if vanished:
-                        s4l_card.prune_active(vanished)
-                    s4l_card.extend_active(drafts)
+                        mod.prune_active(vanished)
+                    mod.extend_active(drafts)
                 except Exception as e:
                     sys.stderr.write(f"[s4l-menubar] extend cards failed: {e}\n")
                     sys.stderr.flush()
@@ -2908,6 +2911,9 @@ class S4LMenuBar(rumps.App):
             self._review_active = True
             self._panel_open = True
         try:
+            layout_name, mod = self._review_mod()
+            self._review_mod_name = layout_name
+
             import s4l_card
 
             # present_feedback (the menu bar's feedback item) falls back to
@@ -2915,14 +2921,23 @@ class S4LMenuBar(rumps.App):
             # card shows. Same pattern for the title bar's "Discard all…"
             # button (moved out of the dropdown 2026-07-10), which reuses the
             # bulk-discard handler wholesale, confirmation alert included.
+            # Both are s4l_card-only surfaces (the standalone feedback panel
+            # and the corner card's title-bar accessory; the canvas has no
+            # equivalent title-bar button — "Select all" + "Discard
+            # selected" already cover that case natively), so this stays
+            # unconditional on s4l_card regardless of which layout is about
+            # to present, and never goes stale if the layout is switched.
             s4l_card.set_feedback_handler(self._on_feedback_text)
             s4l_card.set_discard_all_handler(self._discard_all_pending)
-            s4l_card.present_review(
-                drafts,
+            present_kwargs = dict(
                 on_decision=lambda d: self._on_card_decision(batch, d),
                 on_complete=lambda decisions: self._on_review_closed(batch, decisions),
                 focus=focus,
             )
+            if layout_name == "canvas":
+                mod.present_review_canvas(drafts, **present_kwargs)
+            else:
+                mod.present_review(drafts, **present_kwargs)
             # Record as shown only AFTER the cards are actually up, so a transient
             # card-UI failure never permanently suppresses this pending set.
             self._last_review_sig = sig
@@ -2933,11 +2948,12 @@ class S4LMenuBar(rumps.App):
             # notifies once per episode); a stderr line keeps fresh stacks
             # greppable.
             n = len(drafts)
-            sys.stderr.write(f"[s4l-menubar] presented {n} draft card(s)\n")
+            sys.stderr.write(f"[s4l-menubar] presented {n} draft{'s' if n != 1 else ''} ({layout_name})\n")
         except Exception as e:
-            # Card UI unavailable — don't strand the batch; chat review still works.
+            # Review UI unavailable — don't strand the batch; chat review still works.
             self._review_active = False
             self._panel_open = False
+            self._review_mod_name = None
             sys.stderr.write(f"[s4l-menubar] review cards failed: {e}\n")
             sys.stderr.flush()
             _capture(e, phase="review_cards")
@@ -2952,9 +2968,9 @@ class S4LMenuBar(rumps.App):
         once per episode; after REVIEW_UNATTENDED_SENTRY_SECONDS emit one
         Sentry event so ignored review surfaces are visible fleet-wide."""
         try:
-            import s4l_card
+            _, mod = self._review_mod()
 
-            status = s4l_card.active_status()
+            status = mod.active_status()
         except Exception:
             return
         if not status or not status.get("pending"):
@@ -2978,7 +2994,7 @@ class S4LMenuBar(rumps.App):
             self._review_heal_at = now
             healed = False
             try:
-                healed = s4l_card.heal_active()
+                healed = mod.heal_active()
             except Exception as e:
                 sys.stderr.write(f"[s4l-menubar] review heal failed: {e}\n")
                 sys.stderr.flush()
@@ -3151,6 +3167,10 @@ class S4LMenuBar(rumps.App):
         # isn't re-presented as a fresh batch.
         with self._review_lock:
             self._panel_open = False
+            # The surface is confirmed gone: release the pin so the NEXT
+            # presentation re-resolves from st.read_review_layout() (picks up
+            # a "Canvas review" toggle flipped while this one was open).
+            self._review_mod_name = None
             if self._posts_outstanding <= 0:
                 self._review_active = False
                 self._reset_posting_progress_locked()
@@ -3248,13 +3268,14 @@ class S4LMenuBar(rumps.App):
 
         threading.Thread(target=_persist_discard, daemon=True).start()
         try:
-            import s4l_card
+            _, mod = self._review_mod()
 
-            s4l_card.dismiss_active()
+            mod.dismiss_active()
         except Exception:
             pass
         with self._review_lock:
             self._panel_open = False
+            self._review_mod_name = None
             if self._posts_outstanding <= 0:
                 self._review_active = False
                 self._reset_posting_progress_locked()
