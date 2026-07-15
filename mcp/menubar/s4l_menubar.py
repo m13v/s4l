@@ -1087,6 +1087,7 @@ class S4LMenuBar(rumps.App):
         (1800, "Every 30 minutes"),
         (3600, "Every hour"),
         (14400, "Every 4 hours"),
+        (-1, "Never (menu bar count only)"),
     )
 
     # Posting volume (2026-07-13): server-side per-install throttle for the
@@ -1116,10 +1117,14 @@ class S4LMenuBar(rumps.App):
     def _on_cadence_preset(self, secs, _sender=None):
         """Menu callback shim: rumps passes the clicked MenuItem last."""
         written = st.write_reveal_cadence(secs)
-        self._notify(
-            "S4L draft cards",
-            f"New draft cards will show: {self._cadence_label(written).lower()}",
-        )
+        if written < 0:
+            msg = (
+                "Cards won’t pop up anymore — check the pending count in "
+                "the menu bar, or click “Review N pending drafts” to see them."
+            )
+        else:
+            msg = f"New draft cards will show: {self._cadence_label(written).lower()}"
+        self._notify("S4L draft cards", msg)
         self._sig = None
         try:
             self._tick(None)
@@ -2479,9 +2484,17 @@ class S4LMenuBar(rumps.App):
         # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
         self._stalled = attention
 
+        # Pending draft-card count, for the bulk-discard menu item (visibility +
+        # label) AND the concise inline count on the menu bar title itself
+        # (2026-07-15, so a glance at the bar shows the backlog without opening
+        # the dropdown — most useful with the reveal cadence set to "Never").
+        # Cheap local JSON reads, same source _maybe_start_review uses.
+        _, pending_drafts = self._pending_review()
+        pending_count = len(pending_drafts)
+
         # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
         if not busy:
-            self._render_title(setup_complete, ob, blocker, attention)
+            self._render_title(setup_complete, ob, blocker, attention, pending_count)
 
         # Blocker notification only on transition into a new blocker.
         if blocker and blocker_code != self._last_blocker_code:
@@ -2595,10 +2608,7 @@ class S4LMenuBar(rumps.App):
             if ob
             else 0
         )
-        # Pending draft-card count, for the bulk-discard menu item (visibility +
-        # label). Cheap local JSON reads, same source _maybe_start_review uses.
-        _, pending_drafts = self._pending_review()
-        pending_count = len(pending_drafts)
+        # pending_count was already computed above (before _render_title).
 
         # _update_available / _latest_version are in the signature so a freshly
         # detected update rebuilds the menu (adding "Update now & restart Claude Desktop") even mid-run.
@@ -2756,15 +2766,18 @@ class S4LMenuBar(rumps.App):
 
     def _reveal_hold_until(self, pending_count):
         """Epoch until which the reveal cadence is actually holding fresh cards
-        back (0.0 = no hold). A hold only exists while there is something to
-        hold: pending drafts, no review in flight, and not snoozed (the snooze
-        label and gate take precedence)."""
+        back (0.0 = no hold, -1.0 = held indefinitely — the "Never" preset, cards
+        only reveal via an explicit "Review N pending drafts" click). A hold only
+        exists while there is something to hold: pending drafts, no review in
+        flight, and not snoozed (the snooze label and gate take precedence)."""
         if pending_count <= 0 or self._review_active:
             return 0.0
         now = time.time()
         if now < self._review_snooze_until:
             return 0.0
         cadence = st.read_reveal_cadence()
+        if cadence < 0:
+            return -1.0
         until = self._last_presented_at + cadence
         return until if (cadence > 0 and now < until) else 0.0
 
@@ -2858,6 +2871,10 @@ class S4LMenuBar(rumps.App):
         # stamped on a hold, so the same set still presents fresh when due.
         if not focus:
             cadence = st.read_reveal_cadence()
+            if cadence < 0:
+                # "Never" preset: cards never auto-pop, only an explicit
+                # "Review N pending drafts" click (focus=True) reveals them.
+                return
             if cadence > 0 and time.time() - self._last_presented_at < cadence:
                 return
         with self._review_lock:
@@ -3312,16 +3329,21 @@ class S4LMenuBar(rumps.App):
                         self._reset_posting_progress_locked()
                 self._post_q.task_done()
 
-    def _render_title(self, setup_complete, ob, blocker, attention=False):
+    def _render_title(self, setup_complete, ob, blocker, attention=False, pending_count=0):
         if blocker or attention:
-            self.title = "S4L ⚠"  # warning (setup blocked OR autopilot needs attention)
+            base = "S4L ⚠"  # warning (setup blocked OR autopilot needs attention)
         elif not setup_complete and ob and not ob.get("complete"):
             done = sum(1 for m in ob["milestones"] if m.get("status") == "complete")
-            self.title = f"S4L {done}/{len(ob['milestones'])}"
+            base = f"S4L {done}/{len(ob['milestones'])}"
         elif self._update_available:
-            self.title = "S4L ⬆"  # update available — open the menu to update
+            base = "S4L ⬆"  # update available — open the menu to update
         else:
-            self.title = "S4L"
+            base = "S4L"
+        # Concise inline backlog count, right on the bar (not just the dropdown's
+        # "Review N pending drafts") — per user request 2026-07-15, most useful
+        # when the reveal cadence is "Never" and this count is the only signal
+        # that drafts are waiting.
+        self.title = f"{base} · {pending_count}" if pending_count > 0 else base
 
     # ---- menu construction ------------------------------------------------
     def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, attention=False, schedule_state="ok", pending_count=0):
@@ -3658,10 +3680,13 @@ class S4LMenuBar(rumps.App):
             )
         else:
             # Reveal-cadence hold: the backlog exists but the pop-up is being
-            # paced. Same courtesy line as the snooze; "Review N pending
-            # drafts" above shows them right now regardless.
+            # paced, or suppressed entirely ("Never"). Same courtesy line as
+            # the snooze; "Review N pending drafts" above shows them right
+            # now regardless.
             hold_until = self._reveal_hold_until(pending_count)
-            if hold_until:
+            if hold_until < 0:
+                items.append(self._label("Cards hidden — see count in the menu bar"))
+            elif hold_until:
                 items.append(
                     self._label(
                         "Next cards around "
