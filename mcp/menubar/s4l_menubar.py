@@ -3148,17 +3148,19 @@ class S4LMenuBar(rumps.App):
         self._ship_review_event(batch, decision)
         if not decision.get("approved"):
             n = decision.get("n")
-            # Durable local record FIRST, mirroring approved_queue_add for approvals.
+            # Durable local record FIRST, mirroring the approve branch below.
             # review_drafts() consults this, so the rejected card is suppressed from
             # re-review IMMEDIATELY and even if the loopback is down when the
             # background plan-flag write below runs. Without this, a reject was a
             # fire-and-forget loopback call with a swallowed exception, so rejects
             # silently vanished and the card "came back" — unlike durable approvals.
+            # A failure here is captured (not silently swallowed) so a broken
+            # durable write is visible instead of looking identical to success.
             try:
                 st.store_stamp_decision(batch, decision)
                 self._session_decisions.append(dict(decision))
-            except Exception:
-                pass
+            except Exception as e:
+                _capture(e, phase="reject_stamp_decision")
 
             def _persist_reject():
                 try:
@@ -3173,8 +3175,15 @@ class S4LMenuBar(rumps.App):
         # restart resumes the drain instead of stranding it and re-presenting the
         # card. The in-memory _post_q below is just the fast path; this file is the
         # source of truth review_drafts() consults to avoid re-showing it.
-        st.store_stamp_decision(batch, decision)
-        self._session_decisions.append(dict(decision))
+        # Same try/except shape as the reject branch above (was previously
+        # unguarded here, an asymmetry with no intentional reason): a failure is
+        # captured, not silently swallowed, and the post still gets enqueued below
+        # either way — this write is a resume/dedup aid, not a gate on posting.
+        try:
+            st.store_stamp_decision(batch, decision)
+            self._session_decisions.append(dict(decision))
+        except Exception as e:
+            _capture(e, phase="approve_stamp_decision")
         with self._review_lock:
             self._posts_outstanding += 1
             self._posting_batch_total += 1
