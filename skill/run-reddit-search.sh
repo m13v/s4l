@@ -218,6 +218,23 @@ log "Cycle batch_id=$BATCH_ID"
 DRAFT_ONLY_FLAG="$(python3 "$REPO_DIR/scripts/s4l_mode.py" draft-only 2>/dev/null || echo 1)"
 log "Draft-only flag: $DRAFT_ONLY_FLAG"
 
+# Posting-active defer (2026-07-14, mirrors run-draft-and-publish.sh): an
+# MCP-approval poster mid-drain owns the ONE shared harness tab; running the
+# cycle's discovery/prefetch now would navigate the tab out from under it and
+# false-positive the poster's comment-form check. The backend-level defer
+# hook can't cover THIS script (its ensure failure falls back to
+# ensure_browser_healthy and proceeds), so check explicitly and skip the
+# whole fire; launchd re-fires in 15 minutes. Stale flags (heartbeat older
+# than 120s) never block.
+_S4L_PA_FILE="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/reddit-posting-active.json"
+if [ -f "$_S4L_PA_FILE" ]; then
+    _S4L_PA_AGE=$(( $(date +%s) - $(stat -f %m "$_S4L_PA_FILE" 2>/dev/null || echo 0) ))
+    if [ "$_S4L_PA_AGE" -lt 120 ]; then
+        log "Reddit posting-active (age ${_S4L_PA_AGE}s); skipping this cycle fire."
+        exit 0
+    fi
+fi
+
 # Merge a drafted plan into the review cards (draft-only lanes). $1 = plan
 # file, $2 = lane label. merge_review_queue consumes (deletes) the plan file.
 _merge_reddit_drafts_to_cards() {
