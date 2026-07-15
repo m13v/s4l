@@ -1337,6 +1337,7 @@ class _ReviewController(NSObject):
         self._close_stats_popover()
         self._eye_btn = None
         self._details_btn = None
+        self._age_expiry_label = None
         if _engagement_line(stats):
             # y is nudged 2px above the label row: the label's 12pt text draws
             # top-aligned in its 18px frame while the button centers its image,
@@ -1381,6 +1382,20 @@ class _ReviewController(NSObject):
             age_label.setAlignment_(NSTextAlignmentRight)
             content.addSubview_(age_label)
             right_x -= age_w + 4
+            if expiry:
+                # Hover shows a second-granular ticking countdown plus the
+                # freshness-matters explanation (2026-07-15 per user); the
+                # header label itself stays minute-granular so it isn't
+                # re-laid-out every second.
+                age_label.addTrackingArea_(
+                    NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                        age_label.bounds(),
+                        NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                        self,
+                        {"kind": "expiry"},
+                    )
+                )
+                self._age_expiry_label = age_label
         # Platform mark (brand identification, inline with the author row):
         # Reddit's orange "r/" vs X's glyph, so a mixed-platform review queue
         # reads at a glance which network each card posts to.
@@ -1707,6 +1722,17 @@ class _ReviewController(NSObject):
         except Exception:
             pass
         self._stats_popover = None
+        # The expiry popover's live tick is the only popover that owns a
+        # timer; every close path (hover-out, card advance, window close)
+        # already routes through here, so stopping it here means one
+        # dangling repeating NSTimer can't outlive its popover.
+        if self._expiry_timer is not None:
+            try:
+                self._expiry_timer.invalidate()
+            except Exception:
+                pass
+            self._expiry_timer = None
+        self._expiry_secs_label = None
 
     @objc.python_method
     def _show_popover(self, content, anchor, what):
@@ -1781,6 +1807,81 @@ class _ReviewController(NSObject):
     def _show_details_popover(self):
         lines = _details_lines(self._drafts[self._idx])
         self._show_popover(lines, self._details_btn, "details")
+
+    @objc.python_method
+    def _show_expiry_popover(self):
+        """Hover popover for the header's age/expiry label: a live,
+        second-granular countdown (ticked by an NSTimer, unlike the header's
+        own minute-granular text) paired with the fixed explanation of why
+        freshness matters (2026-07-15 per user). Bypasses the generic
+        _show_popover helper because that one renders static text only; this
+        needs to keep a reference to the countdown label so the timer can
+        update it in place."""
+        if self._age_expiry_label is None or (
+            self._stats_popover is not None and self._stats_popover.isShown()
+        ):
+            return
+        d = self._drafts[self._idx]
+        stats = d.get("stats") or {}
+        seconds_str = _expiry_seconds_str(stats.get("tweet_posted_at"), d.get("platform"))
+        if not seconds_str:
+            return
+        rows = [seconds_str, _EXPIRY_EDUCATION_TEXT]
+        font = NSFont.systemFontOfSize_(12)
+        heights = []
+        pw = 0
+        for row in rows:
+            s = NSAttributedString.alloc().initWithString_attributes_(
+                row, {NSFontAttributeName: font}
+            )
+            measured = s.boundingRectWithSize_options_(NSMakeSize(260, 10_000), 1)
+            heights.append(int(measured.size.height) + 3)
+            pw = max(pw, int(measured.size.width))
+        pw += 34
+        row_gap = 8
+        ph = sum(heights) + row_gap + 16
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
+        y = ph - 8 - heights[0]
+        secs_label = _label(NSMakeRect(13, y, pw - 26, heights[0]), seconds_str, size=12, bold=True)
+        view.addSubview_(secs_label)
+        y -= row_gap + heights[1]
+        view.addSubview_(
+            _label(NSMakeRect(13, y, pw - 26, heights[1]), _EXPIRY_EDUCATION_TEXT, size=12, muted=True)
+        )
+        vc = NSViewController.alloc().init()
+        vc.setView_(view)
+        pop = NSPopover.alloc().init()
+        pop.setBehavior_(NSPopoverBehaviorApplicationDefined)
+        pop.setContentViewController_(vc)
+        pop.setContentSize_((pw, ph))
+        try:
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        pop.showRelativeToRect_ofView_preferredEdge_(
+            self._age_expiry_label.frame(), self._age_expiry_label.superview(), 1
+        )
+        self._stats_popover = pop
+        self._expiry_secs_label = secs_label
+        self._expiry_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.0, self, "tickExpiryPopover:", None, True
+        )
+        _log("expiry popover shown")
+
+    def tickExpiryPopover_(self, timer):
+        """NSTimer target (2026-07-15): re-renders the popover's seconds-left
+        label every second so the reviewer visibly sees it counting down.
+        Not a python_method -- NSTimer invokes this through the ObjC runtime."""
+        if self._expiry_secs_label is None:
+            return
+        try:
+            d = self._drafts[self._idx]
+            stats = d.get("stats") or {}
+            seconds_str = _expiry_seconds_str(stats.get("tweet_posted_at"), d.get("platform"))
+            if seconds_str:
+                self._expiry_secs_label.setStringValue_(seconds_str)
+        except Exception:
+            pass
 
     # Click on an eye SHOWS its popover, never toggles it closed: a click is
     # physically preceded by hover (mouseEntered already opened it), so a
