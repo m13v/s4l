@@ -20,8 +20,11 @@ _release_reddit_lease() {
 python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
     echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
 trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
-if ! ensure_reddit_browser_for_backend 2>&1; then
-    echo "[audit-reddit-resurrect] WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1
+_ensure_rc=$?
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    echo "[audit-reddit-resurrect] WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 acquire_lock "audit-reddit-resurrect" 3600
