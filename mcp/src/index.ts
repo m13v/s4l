@@ -1649,9 +1649,28 @@ async function postApproved(batchId: string, plan: Plan) {
         c.terminal = false;
         if (r.our_url) c.our_url = r.our_url;
         touchedPlan = true;
-      } else if (r.outcome === "skipped" || r.outcome === "failed") {
+      } else if (r.outcome === "skipped") {
+        // twitter_post_plan.py only returns "skipped" for reasons it has
+        // already decided are conclusive (reply_restricted, tweet_unavailable,
+        // blocked_by_author, tweet_not_found, rate_limited, reply_box_not_found
+        // — see its own PERMANENT/skip comment) or a captured-URL edge case
+        // it explicitly doesn't want re-attempted (duplicate risk). Terminal
+        // is correct here.
         c.terminal = true;
         c.terminal_reason = r.reason || r.outcome;
+        touchedPlan = true;
+      } else if (r.outcome === "failed") {
+        // "failed" is twitter_post_plan.py's catch-all for everything it did
+        // NOT classify as conclusive — timeouts, parse errors, exceptions,
+        // and browser_mutex contention ("Twitter browser locked by session
+        // ... waited 45s, giving up."). None of those mean the draft is
+        // doomed, only that this attempt didn't get a turn with the shared
+        // browser. Leave the card sticky (approved && !posted && !terminal)
+        // so the next post_drafts call retries it, mirroring Reddit's
+        // _TRANSIENT_CDP_ERRORS handling. Unconditionally marking terminal
+        // here (found 2026-07-16) silently and permanently discarded 7 real
+        // approved drafts on nothing worse than lock contention — Reddit's
+        // equivalent transient failures self-healed on the very next drain.
         touchedPlan = true;
       }
     });
