@@ -251,10 +251,10 @@ def ensure_chrome(launch: bool = True) -> bool:
 # --- CDP attach + login validation (mirrors restore_twitter_session.py) -----
 
 def _attach():
-    targets = json.load(urllib.request.urlopen(f"{CDP}/json", timeout=10))
+    targets = json.load(_cdp_urlopen(f"{CDP}/json", timeout=10))
     page = next((t for t in targets if t.get("type") == "page"), None)
     if not page:
-        page = json.load(urllib.request.urlopen(
+        page = json.load(_cdp_urlopen(
             urllib.request.Request(f"{CDP}/json/new?about:blank", method="PUT"), timeout=10))
     ws = create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
     state = {"id": 0}
