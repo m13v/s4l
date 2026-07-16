@@ -107,6 +107,17 @@ def _atomic_write(path: str, obj) -> None:
 
 def _dedup_key(c: dict) -> str:
     """Match submit_drafts: dedup by the thread/candidate URL, else candidate_id."""
+    # Sandbox cards (experiments.sandbox=true) replay real historical threads
+    # ON PURPOSE, including ones already dealt with for real -- that's the
+    # whole point of testing against past data. Namespace their key so they
+    # never collide with (and get silently swallowed by) a real card for the
+    # same URL, and keep the reply text IN the key so two different prompt
+    # variants drafting the same thread both surface as distinct cards
+    # instead of the second dropping as "already seen" (identical reruns
+    # still naturally dedupe against each other, which is fine).
+    if (c.get("experiments") or {}).get("sandbox"):
+        url = c.get("candidate_url") or c.get("tweet_url") or c.get("thread_url") or ""
+        return f"sandbox:{url}:{(c.get('reply_text') or '')[:80]}"
     for k in ("candidate_url", "tweet_url", "thread_url", "candidate_id"):
         v = c.get(k)
         if v:
