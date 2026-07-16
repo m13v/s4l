@@ -2023,7 +2023,35 @@ DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
 if [ -n "${S4L_DRAFT_PROMPT_VARIANT:-}" ]; then
     log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (forced via env, no coin flip)"
 else
-    S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
+    # Server-side per-install pin (2026-07-16): lets the operator remotely pin
+    # ONE specific install to always draft under one arm (e.g. Nhat's real
+    # account -> treatment_v4), via POST /api/v1/installations/draft-prompt-variant.
+    # Mirrors the posting_mode precedent (2026-07-13) exactly: NULL/unset is
+    # the default for every install, so the 50/50 A/B holdback (2026-07-06:
+    # every install runs a real split so treatment can always be measured
+    # against control) stays intact unless explicitly overridden here. This
+    # pins DRAFTING ONLY; it does not change discovery, posting, or anything
+    # else. Fetch failure fails OPEN to the random coin flip below, same
+    # fail-open contract as the VIRALITY_THRESHOLD fetch elsewhere in this
+    # phase -- a down/slow API must never block or bias drafting.
+    S4L_DRAFT_PROMPT_VARIANT_PIN=$(python3 -c "
+import os, sys
+_repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(_repo, 'scripts'))
+from http_api import api_get
+try:
+    r = api_get('/api/v1/installations/draft-prompt-variant')
+    v = (r or {}).get('data', {}).get('variant')
+    if v:
+        print(v)
+except BaseException:
+    pass
+" 2>/dev/null || echo "")
+    if [ -n "${S4L_DRAFT_PROMPT_VARIANT_PIN:-}" ]; then
+        S4L_DRAFT_PROMPT_VARIANT="$S4L_DRAFT_PROMPT_VARIANT_PIN"
+        log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (server-side pin for this install, no coin flip)"
+    else
+        S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
     rate = float('$DRAFT_PROMPT_AB_RATE')
@@ -2032,7 +2060,8 @@ except Exception:
 rate = min(1.0, max(0.0, rate))
 print('treatment_v4' if random.random() < rate else 'control_v4')
 " 2>/dev/null || echo treatment_v4)
-    log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
+        log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
+    fi
 fi
 export S4L_DRAFT_PROMPT_VARIANT
 # v4 RESET (2026-07-15, replaces v3 wholesale): v3 tested whether the
