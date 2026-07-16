@@ -57,11 +57,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from http_api import api_get, api_post, load_env  # noqa: E402
-
-CONFIG_PATH = os.environ.get(
-    "S4L_CONFIG_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"),
-)
 # Stable namespace for deterministic event uuids. Never change this value:
 # a new namespace would re-mint every historical fact as a "new" event.
 EVENT_NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://s4l.ai/platform-strike-events")
@@ -89,8 +84,11 @@ def _parse_ts(raw) -> datetime.datetime | None:
 
 
 def _load_config() -> dict:
+    """Same resolution as the digester (state-dir first, symlinks resolved),
+    so producer scope and digest scope can never disagree."""
     try:
-        return json.loads(Path(CONFIG_PATH).read_text())
+        from config import config_path
+        return json.loads(Path(config_path()).read_text())
     except Exception:
         return {}
 
