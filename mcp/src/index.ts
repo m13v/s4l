@@ -467,19 +467,22 @@ const server = new McpServer(
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
       "project is fully configured with seeded search topics, AT LEAST ONE platform is connected " +
-      "(X with its real handle is the DEFAULT first suggestion; Reddit via connect_reddit counts " +
-      "equally if the user prefers it or X connection fails or is skipped), AND " +
+      "(ASK the user up front which platform(s) to connect — X, Reddit, or both — before connecting " +
+      "anything; X is a reasonable default to SUGGEST, but do not connect it, or any platform, without " +
+      "the user's answer. Connect exactly what they choose via project_config action:'connect_x' " +
+      "and/or action:'connect_reddit'), AND " +
       "the two draft-autopilot scheduled tasks have been created via queue_setup and are firing " +
       "(see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
       "ITSELF automatically on boot — you do NOT install it. Just poll runtime action:'status' until it " +
       "reports ready; only call runtime action:'install' or action:'doctor' to TROUBLESHOOT if status " +
       "shows the boot provision failed or stalled. Do not ask whether to inspect " +
-      "status, repair a failed runtime, choose an auto-detected browser profile, connect " +
-      "X, scan the profile, research the product website, save conservative inferred fields, or seed " +
+      "status, repair a failed runtime, choose an auto-detected browser profile, scan the profile, " +
+      "research the product website, save conservative inferred fields, or seed " +
       "topics. Do those things. The " +
       "explicit setup request authorizes runtime repair and importing ONLY x.com/" +
       "twitter.com session cookies into the managed browser: warn that macOS keychain prompts may " +
-      "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
+      "appear, then proceed without a separate yes/no turn. Besides the platform-choice question " +
+      "above, ask at most one MORE bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
       "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup. " +
       "DO schedule the draft autopilot as the final step (once running it only queues drafts for " +
@@ -507,16 +510,16 @@ const server = new McpServer(
       "old 'social-autoposter-autopilot' task — it is deprecated. Do NOT ask the user to review drafts " +
       "or pause for input mid-onboarding; once the tasks are created and firing, setup is done. If the " +
       "host exposes no create_scheduled_task tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
-      "REDDIT IS AN EQUAL, OPTIONAL PLATFORM. Setup is complete with AT LEAST ONE platform " +
-      "connected: X-only, Reddit-only, or both. X stays the default first suggestion; offer Reddit " +
-      "as an add-on after X setup completes, OR standalone when the user prefers Reddit or X " +
-      "connection fails or is skipped. `project_config` action:'connect_reddit' imports the user's " +
-      "reddit.com session into the autoposter's managed reddit browser, same confirm-first flow and " +
-      "keychain heads-up as connect_x. Once connected, reddit discovery and drafting run on the same " +
-      "draft-only queue and review cards as X; nothing posts without approval. If the result carries " +
-      "a `warning` (fresh or low-karma account), relay it so the user knows AutoMod may gate early " +
-      "replies. Never make Reddit a requirement, and never nag a happily X-only (or reddit-only) " +
-      "user about the other platform.\n\n" +
+      "REDDIT IS AN EQUAL PLATFORM CHOICE, ASKED ALONGSIDE X. Setup is complete with AT LEAST ONE " +
+      "platform connected: X-only, Reddit-only, or both — whichever the user picked when you asked " +
+      "up front. If they chose both, connect them one at a time (either order) in the same setup " +
+      "flow. `project_config` action:'connect_reddit' imports the user's reddit.com session into the " +
+      "autoposter's managed reddit browser, same confirm-first flow and keychain heads-up as " +
+      "connect_x. Once connected, reddit discovery and drafting run on the same draft-only queue and " +
+      "review cards as X; nothing posts without approval. If the result carries a `warning` (fresh or " +
+      "low-karma account), relay it so the user knows AutoMod may gate early replies. Never make " +
+      "either platform a requirement, and never nag a user who deliberately chose only one about the " +
+      "other.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: point it out to the user — the draft autopilot runs " +
@@ -527,7 +530,8 @@ const server = new McpServer(
       "release, call the `runtime` tool (action:'version'). If `update_available` is true, tell the " +
       "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
       "surfaces `update_available` and an `update_hint`.\n\n" +
-      "TYPICAL FLOW: `project_config` (connect X + scan the profile) -> `engagement_mode` (after the " +
+      "TYPICAL FLOW: ASK which platform(s) to connect (X, Reddit, or both) -> `project_config` " +
+      "(connect the chosen platform(s) + scan the profile) -> `engagement_mode` (after the " +
       "profile scan: personal-brand is ON by default, so ASK the user the ONE question — do they ALSO " +
       "want to promote a product? — and call action:'set' with personal_brand:true and " +
       "promotion:true|false; this provisions the persona) -> IF they wanted promotion, `project_config` " +
