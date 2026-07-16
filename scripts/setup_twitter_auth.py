@@ -46,6 +46,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 # websocket-client is needed for CDP (status/connect). It is NOT needed for
@@ -114,6 +115,29 @@ ABP_PYTHON = Path.home() / "ai-browser-profile" / ".venv" / "bin" / "python"
 
 # --- Chrome lifecycle -------------------------------------------------------
 
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _cdp_urlopen(url, timeout=15):
+    """urlopen for CDP endpoints: never send loopback traffic through a proxy.
+
+    Mirrors browser_harness.admin.cdp_urlopen (same fix, same reason): urllib's
+    default opener honors proxy env vars AND macOS system proxy settings (scutil
+    --proxy). On a box with a system-wide proxy (e.g. a local gost/ISP forwarder)
+    every 127.0.0.1 CDP probe gets routed to the proxy and fails, even though
+    Chrome is genuinely up and curl (env proxies only) works fine. Loopback must
+    always connect direct; a non-loopback CDP URL (S4L_TWITTER_CDP_URL override
+    pointed at a remote endpoint) keeps the default proxy behavior.
+    """
+    # Accept a plain URL string OR a urllib.request.Request (e.g. a PUT to
+    # .../json/new) — both are valid `url` args to opener.open()/urlopen().
+    raw_url = url.full_url if isinstance(url, urllib.request.Request) else url
+    host = (urllib.parse.urlsplit(raw_url).hostname or "").lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return _NO_PROXY_OPENER.open(url, timeout=timeout)
+    return urllib.request.urlopen(url, timeout=timeout)
+
+
 def _port_open(port: int) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.5)
@@ -130,7 +154,7 @@ def _cdp_alive() -> bool:
     if not _port_open(PORT):
         return False
     try:
-        with urllib.request.urlopen(f"{CDP}/json/version", timeout=1.5) as r:
+        with _cdp_urlopen(f"{CDP}/json/version", timeout=1.5) as r:
             return r.status == 200
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
