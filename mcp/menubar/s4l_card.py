@@ -1066,14 +1066,24 @@ class _ReviewController(NSObject):
         """One stderr line + a review-state.json refresh per surface event
         (presented / moved / occlusion_changed / extended / decision / healed).
         This is the positive confirmation layer: silence in the log used to be
-        ambiguous between "being reviewed" and "invisible for hours"."""
+        ambiguous between "being reviewed" and "invisible for hours".
+
+        Grid tiles (self._host_view is not None) skip the review-state.json
+        write: that file is a SINGLE shared snapshot the unattended-review
+        watchdog reads, and a tile is one of several simultaneously-open
+        cards inside the canvas's own window -- the canvas controller (a
+        different module, a different global) owns that snapshot for the
+        whole session. A tile stomping it on every decision would corrupt
+        the watchdog's view of the actually-open canvas. The stderr
+        breadcrumb still fires either way; it's just a log line."""
         s = self.status_dict()
         _log(
             f"{event}: {s['pending']} pending of {s['total']}, "
             f"frame={s['frame']} screen={s['screen']} "
             f"visible={s['occlusion_visible']}"
         )
-        _write_review_state(controller=self, last_event=event)
+        if self._host_view is None:
+            _write_review_state(controller=self, last_event=event)
 
     def windowDidMove_(self, notification):
         # Timestamped move history. The unanswerable question of the 2026-07-02
@@ -2491,6 +2501,23 @@ class _ReviewController(NSObject):
         global _active
         self._close_stats_popover()
         self._stop_age_expiry_timer()
+        if self._host_view is not None:
+            # Grid tile: no panel to close, no module-level `_active`
+            # singleton (that's this file's corner-card global -- a tile has
+            # nothing to do with it), and no shared review-state.json write
+            # (the canvas controller, in a DIFFERENT module with its OWN
+            # global, owns that narrative for the whole session; a tile
+            # stomping it here would corrupt the watchdog's view of an
+            # unrelated, still-open canvas window). Just hand the decision(s)
+            # back to whoever created this tile so it can be replaced.
+            cb, self._on_complete = self._on_complete, None
+            if cb is not None:
+                try:
+                    cb(list(self._decisions))
+                except Exception:
+                    pass
+            _log(f"tile closed: {len(self._decisions)} decided of {len(self._drafts)}")
+            return
         try:
             if self._panel is not None:
                 self._panel.setDelegate_(None)
