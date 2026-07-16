@@ -1209,9 +1209,17 @@ def main() -> int:
         try:
             import twitter_browser as _tb  # S4L_LOCK_ROLE=post already set above
             _tb._acquire_browser_lock()    # preempts a live scan; sys.exit(1) if contended
-            os.environ["S4L_LOCK_OWNER"] = _tb._LOCK_SESSION_ID
+            # _MUTEX.session_id, NOT the pre-2026-07-14 module global
+            # _LOCK_SESSION_ID: the mutex refactor (db02eed1) removed that
+            # symbol, and the stale reference made this line raise
+            # AttributeError on EVERY batch. The parent then held the lock it
+            # had just acquired while its own children (unable to inherit,
+            # forbidden to preempt a post-role holder) each burned the full
+            # 45s wait and failed, until the 180s POST_LOCK_EXPIRY freed the
+            # tail: operator-box posting fell ~95% for two days (S4L-62).
+            os.environ["S4L_LOCK_OWNER"] = _tb._MUTEX.session_id
             _batch_lock_held = True
-            print(f"[post] batch lock held by {_tb._LOCK_SESSION_ID} (role=post); "
+            print(f"[post] batch lock held by {_tb._MUTEX.session_id} (role=post); "
                   f"{_total} candidate(s) inherit it", flush=True)
         except SystemExit:
             # _acquire_browser_lock exits when a LIVE non-preemptable peer (another
