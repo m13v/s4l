@@ -256,6 +256,20 @@ if [ "${SCAN_ONLY:-0}" = "1" ]; then
     SA_PREFLIGHT_SCRIPT="run-twitter-cycle-scan"
     preflight_skip_if_jetsam_pressure
     preflight_acquire_slot_or_skip "twitter-scan" 1
+elif [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    # Same reasoning as the SCAN_ONLY branch above: a sandbox run does none of
+    # the discovery/scraping the "twitter-cycle" pool exists to rate-limit
+    # (Phase 0/1 are skipped entirely), so it gets its OWN pool rather than
+    # queueing behind -- or blocking -- a live production cycle. Real
+    # serialization still happens correctly at the resources that actually
+    # matter: the twitter-browser lock (FIFO queue, acquire_lock waits its
+    # turn rather than bailing) and the claude_job.py queue (the s4l-worker
+    # drains one job at a time regardless of how many callers enqueued).
+    # Still capped at 1 so two sandbox runs of my own don't overlap each
+    # other. Still respects the claude-quota and jetsam-pressure gates below.
+    preflight_skip_if_claude_blocked
+    preflight_skip_if_jetsam_pressure
+    preflight_acquire_slot_or_skip "twitter-cycle-sandbox" 1
 else
     preflight_skip_if_claude_blocked
     preflight_skip_if_jetsam_pressure
