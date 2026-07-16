@@ -2154,7 +2154,14 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 # of stale phase2a (20-min budget). Without this stamp, mid-Phase-2b runs get
 # wrongly salvaged once 20 min elapse past phase2a's start, creating false
 # phase2b_silent run-monitor rows even when posts succeeded.
-python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
+# Sandbox short-circuit: skip so a sandbox run never auto-creates a
+# twitter_batches row (advance's own "auto-creates the row if start was
+# missed" fallback would otherwise silently do it, since sandbox mode never
+# calls 'start' — found live 2026-07-15, a stray sandbox-* row landed in
+# production twitter_batches from this exact call).
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
+fi
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 2b-prep"
@@ -2700,7 +2707,10 @@ fi
 # phase2b-gen has the longest budget (60 min) because the SEO landing-page
 # build can legitimately run 10-40 min. Stamping it here is what protects
 # this cycle from being salvaged out from under itself.
-python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-gen 2>&1 | tee -a "$LOG_FILE" || true
+# Same sandbox short-circuit as the phase2b-prep advance above.
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-gen 2>&1 | tee -a "$LOG_FILE" || true
+fi
 log "Phase 2b-gen: generating SEO pages for $PLAN_COUNT candidate(s) without holding the browser lock..."
 python3 "$REPO_DIR/scripts/twitter_gen_links.py" --plan "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"
 GEN_EXIT=${PIPESTATUS[0]:-1}
@@ -2781,7 +2791,10 @@ fi
 # Stamp phase2b-post (15-min budget) before the browser-side reply loop. After
 # 2b-gen's potentially long run, peer cycles' 20-min phase2a fallback would
 # already be tripping if we left the row at phase2a.
-python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
+# Same sandbox short-circuit as the phase2b-prep advance above.
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
+fi
 # Always re-acquire: the lock was released right after thread-media capture
 # (before Claude drafting), well before 2b-gen, so it is never still held here.
 log "Re-acquiring twitter-browser lock for Phase 2b-post..."
