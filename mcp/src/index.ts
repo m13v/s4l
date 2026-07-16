@@ -3284,7 +3284,21 @@ tool(
       });
     }
 
-    const result = await postApproved(batch_id, plan);
+    // postApproved now arms the cross-instance posting flag before the Reddit
+    // drain (see its own comment), not just before the Twitter phase. Every
+    // op inside that drain is already individually best-effort try/caught, so
+    // this is belt-and-suspenders: if something still throws past all of
+    // that, clear the flag before it escapes rather than leave this MCP
+    // instance's posting permanently gated behind a flag nothing will ever
+    // reset.
+    let result;
+    try {
+      result = await postApproved(batch_id, plan);
+    } catch (e) {
+      postingActive = false;
+      stopPostingFlagHeartbeat();
+      throw e;
+    }
     // Report the REAL posted count from the pipeline, not the approved count.
     // A run can approve N yet land 0 (browser/session failure); reporting
     // approve.size here told the agent "posted: N" on a total failure.
@@ -6181,6 +6195,10 @@ async function drainApprovedBacklog(): Promise<void> {
     await postApproved(REVIEW_QUEUE_ID, plan!);
   } catch (e: any) {
     console.error("[post] drainApprovedBacklog error:", e?.message || e);
+    // Same reasoning as the other postApproved call site: don't let an
+    // escaped exception leave the cross-instance posting flag stuck true.
+    postingActive = false;
+    stopPostingFlagHeartbeat();
   }
 }
 
