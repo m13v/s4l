@@ -809,6 +809,47 @@ def discard_all_pending(drafts):
     return _store_update(mutate) or 0
 
 
+def approve_all_pending(decisions):
+    """Bulk-approve an entire pending set (the canvas control card's
+    "Approve All"), durably and atomically in ONE lock acquisition --
+    mirrors discard_all_pending's shape exactly, just for the approve
+    direction. `decisions` is the same per-draft decision dict shape
+    _on_card_decision/_record already produce (n, candidate_id, text,
+    edited, drop_link, loved, draft_choice).
+
+    Doing this as N separate store_stamp_decision() calls (one full
+    lock-acquire/read/write cycle EACH) is what caused the visible UI hang
+    on a real backlog (2026-07-16 user report: "when I approved All, it
+    hung for a second"). One bulk write fixes that the same way
+    discard_all_pending already avoided it -- see _approve_all_pending in
+    s4l_menubar.py, which still does the cheap per-draft posting-queue
+    enqueue afterward (that part was never the slow one)."""
+
+    def mutate(data):
+        done = 0
+        for decision in decisions:
+            c = _match_candidate(data, decision.get("n"), decision.get("candidate_id"))
+            if c is None:
+                continue
+            c["approved"] = True
+            c.pop("post_failed", None)
+            c.pop("post_error", None)
+            c["decision"] = {
+                "approved": True,
+                "text": decision.get("text") or "",
+                "edited": bool(decision.get("edited")),
+                "drop_link": bool(decision.get("drop_link")),
+                "loved": bool(decision.get("loved")),
+                "reject_category": None,
+                "draft_choice": decision.get("draft_choice"),
+                "decided_at": time_iso(),
+            }
+            done += 1
+        return done
+
+    return _store_update(mutate) or 0
+
+
 def flip_discarded_candidates_skipped(candidate_ids):
     """Flip each bulk-discarded candidate's twitter_candidates row to
     status='skipped', skip_reason='human_discarded_all' — the same DB effect a
