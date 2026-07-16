@@ -373,7 +373,13 @@ _VER_TTL = 55.0
 # the update banner. Failures (version=None) are cached too, same rationale as
 # _ver_cache. Keep the file shape in lockstep with version.ts::SharedCache:
 # {"at": <epoch s>, "channel": ..., "version": ..., "tag": ..., "etag": ...}
-_SHARED_TTL = 600.0  # banner latency ceiling: a new release surfaces within 10 min
+_SHARED_TTL = 120.0  # banner latency ceiling: a new release surfaces within ~2 min.
+# Safe because probes are conditional (If-None-Match): with a persisted ETag a
+# probe is a free 304, so frequency barely matters. The TTL is the worst-case
+# request rate for the ETAG-LESS modes (staging list-endpoint fallback writes
+# etag=null): 120s -> 30 req/h, half the anonymous 60/h-per-IP quota. Do NOT
+# drop to 60s: etag-less probing would then consume the ENTIRE quota, which is
+# the exact 2026-07-13 failure mode this cache was built to prevent.
 _PROBE_LOCK_STALE = 30.0
 
 
