@@ -2053,6 +2053,25 @@ if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
 else
     DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 fi
+# Draft A/B divergence note (2026-07-16, treatment_v4 only): style assignment
+# is otherwise the ONLY instructed reason draft_a_text and draft_b_text ever
+# differ (see the fixed "they must diverge... because they follow different
+# style templates" line below) -- confirmed live on Nhat's PersonalBrand
+# project: Draft B's engagement style is picked in INVENT mode as often as
+# not (a fresh model-invented style, not a vetted registry entry), and that
+# invention kept landing on the exact formulaic "'X' is the Y" reframe opener
+# her learned_preferences.draft_style_notes explicitly bans, regardless of
+# the invented style's name. Style alone isn't a reliable enough divergence
+# mechanism when the style itself is freshly improvised. This does NOT touch
+# style assignment (both slots still get a picked/assigned style exactly as
+# before); it adds genuine distinctness as its OWN explicit requirement,
+# independent of style, so the two drafts stay real alternatives even when
+# style differences alone fail to force them apart. control_v4 is unaffected.
+if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
+    DRAFT_B_DIVERGENCE_NOTE=" Beyond following different style templates: draft_a_text and draft_b_text must be genuinely distinct takes on this thread -- think of them as variant 1a and variant 1b: different entry point, different specific detail seized on, different rhetorical move -- not two phrasings of the same underlying observation dressed in different style language. If 1a and 1b would say essentially the same thing, pick a different angle entirely for 1b rather than just rewording 1a."
+else
+    DRAFT_B_DIVERGENCE_NOTE=""
+fi
 # Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by s4l_mode.py):
 # replace the product-framed directive entirely. This lane is pure organic
 # growth: no product, no link, no CTA. The reply must add real value grounded in
@@ -2373,7 +2392,7 @@ For each chosen candidate:
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim as draft_a_text/draft_a_style (set is_reused_draft=true, draft_b_text=null, draft_b_style=null). Do NOT call log_draft.py; do NOT redraft; do NOT write a second variant, prior cycle already paid the LLM cost for the one draft you have.
    - Otherwise (fresh candidate, is_reused_draft=false): write TWO independent drafts. Do NOT judge, rank, or pick a favorite between them, both are shown to the reviewer, who decides.
      - draft_a_text: follow the DRAFT A style block above (its own description/example/note/length limit).
-     - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move because they follow different style templates, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.
+     - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move because they follow different style templates, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.$DRAFT_B_DIVERGENCE_NOTE
    - $DRAFT_DIRECTIVE (applies to both drafts on fresh candidates; each still obeys its OWN style's length limit, not a shared one).
 3a. PERSIST DRAFT A (skip entirely for reused drafts):
      python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'DRAFT_A_TEXT' --style DRAFT_A_STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
