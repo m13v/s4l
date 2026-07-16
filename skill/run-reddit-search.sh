@@ -287,19 +287,10 @@ python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30
 ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
 _ensure_rc="${PIPESTATUS[0]}"
 if [ "$_ensure_rc" = "78" ]; then
-    # Reserved skip code (harness-common.sh:182-185): the pre-launch hook
-    # deliberately deferred because a poster is mid-drain on the ONE shared
-    # tab. This is NOT a bootstrap failure — falling back to
-    # ensure_browser_healthy here (as this used to, treating ANY nonzero rc
-    # as broken) is wrong on two counts: it misreports a clean defer as a
-    # warning, and ensure_browser_healthy checks the pre-harness
-    # browser-profiles/reddit path (dead since the 2026-05-29 migration), so
-    # it is pure wasted work every time cycles overlap around an active post
-    # (routine — see the "double-fork wrapper" note above BATCH_ID).
-    log "reddit-harness bootstrap deferred (rc=78, poster active elsewhere); skipping this cycle so the poster keeps the tab."
     python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
-    exit 0
-elif [ "$_ensure_rc" != "0" ]; then
+fi
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
     log "WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
