@@ -89,7 +89,6 @@ from s4l_card import (
     NSWindowStyleMaskNonactivatingPanel,
     W as TILE_W,
     H as TILE_H,
-    M as TILE_M,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review,
@@ -394,59 +393,10 @@ class _CanvasController(NSObject):
         lbl.setAlignment_(NSTextAlignmentCenter)
         view.addSubview_(lbl)
 
-    @objc.python_method
-    def _build_control_card(self, view):
-        """Persistent bulk-action card (2026-07-16 product direction: "a
-        card with a button to discard all and approve all", not header
-        buttons). Discard All reuses the EXACT SAME confirm-and-clear-
-        everything flow the corner card's own title-bar "Discard all…"
-        button already drives (s4l_menubar._discard_all_pending, wired via
-        set_discard_all_handler exactly like s4l_card.py's accessory
-        button); Approve All is new (s4l_menubar._approve_all_pending) but
-        mirrors that same confirm-first shape. Both act on every pending
-        draft in the session -- the ones showing now AND everything still
-        queued in the backlog, matching _discard_all_pending's own scope
-        (it reads the full store-level pending set, not just what's
-        rendered)."""
-        w, h = view.frame().size.width, view.frame().size.height
-        m = TILE_M
-        view.addSubview_(
-            _label(NSMakeRect(m, h - 44, w - 2 * m, 24), "Bulk actions", size=15, bold=True)
-        )
-        self._control_count_label = _label(
-            NSMakeRect(m, h - 68, w - 2 * m, 18), "", size=12, muted=True
-        )
-        view.addSubview_(self._control_count_label)
-        view.addSubview_(
-            _label(
-                NSMakeRect(m, h - 210, w - 2 * m, 130),
-                "Applies to every pending draft in this session — the ones "
-                "showing now and everything still queued behind them. Both "
-                "ask for confirmation first.",
-                size=11,
-                muted=True,
-            )
-        )
-        approve_btn = NSButton.alloc().initWithFrame_(NSMakeRect(m, 90, w - 2 * m, 34))
-        approve_btn.setTitle_("Approve All")
-        approve_btn.setBezelStyle_(NSBezelStyleRounded)
-        approve_btn.setFont_(NSFont.systemFontOfSize_(13))
-        approve_btn.setTarget_(self)
-        approve_btn.setAction_("approveAllClicked:")
-        view.addSubview_(approve_btn)
-
-        discard_btn = NSButton.alloc().initWithFrame_(NSMakeRect(m, 46, w - 2 * m, 34))
-        discard_btn.setTitle_("Discard All")
-        discard_btn.setBezelStyle_(NSBezelStyleRounded)
-        try:
-            discard_btn.setHasDestructiveAction_(True)
-        except Exception:
-            pass
-        discard_btn.setFont_(NSFont.systemFontOfSize_(13))
-        discard_btn.setTarget_(self)
-        discard_btn.setAction_("discardAllClicked:")
-        view.addSubview_(discard_btn)
-
+    # Approve All / Discard All buttons live in the header row (see
+    # _render()), not a dedicated card -- these two actions just target the
+    # module-level handlers (registered by the menu bar) regardless of where
+    # the buttons that trigger them physically sit.
     def approveAllClicked_(self, sender):
         cb = _approve_all_handler
         if cb is None:
@@ -506,11 +456,6 @@ class _CanvasController(NSObject):
         except Exception:
             pass
         try:
-            plural = "s" if total != 1 else ""
-            self._control_count_label.setStringValue_(f"{total} pending draft{plural}")
-        except Exception:
-            pass
-        try:
             self._panel.setTitle_(f"s4l · Review {total} drafts (canvas)")
         except Exception:
             pass
@@ -524,8 +469,7 @@ class _CanvasController(NSObject):
         never-yet-activated slot un-hides the same way, see _fill_slot).
         Existing slots/tiles are never touched -- an in-progress edit on
         screen is never disturbed, mirroring the corner card's own
-        extend_drafts. Slot 0 is the persistent control card, never part of
-        this rotation."""
+        extend_drafts."""
         if self._panel is None:
             return 0
         have = self._known_ns()
@@ -535,8 +479,6 @@ class _CanvasController(NSObject):
         added.sort(key=_sort_key, reverse=True)
         self._backlog.extend(added)
         for i, slot in enumerate(self._slots):
-            if i == 0:
-                continue
             if slot["tile"] is None and self._backlog:
                 self._fill_slot(i)
         self._refresh_header()
