@@ -2265,12 +2265,16 @@ tool(
       "products (call once per product, identified by name); fill or edit a project's fields " +
       "INCREMENTALLY across several calls — pass whatever you have, it merges and tells you what's " +
       "still missing.\n" +
-      "2) Connect X/Twitter (action:'connect_x'): the autoposter posts through its OWN managed Chrome, " +
+      "2) Connect X/Twitter (action:'connect_x'), ONLY once the user has told you they want X connected " +
+      "(the top-level setup flow asks which platform(s) — X, Reddit, or both — before this tool is " +
+      "called for either): the autoposter posts through its OWN managed Chrome, " +
       "which needs your logged-in x.com session. This imports x.com/twitter.com cookies from your " +
       "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into that browser — nothing else is " +
-      "touched. An explicit setup/connect request is authorization: briefly warn that macOS Safe " +
-      "Storage prompts may appear, then call action:'connect_x', confirm:true immediately. Use " +
-      "action:'detect_x_sources' first and choose its recommendation instead of asking the user.\n" +
+      "touched. Once the user has said they want X, briefly warn that macOS Safe " +
+      "Storage prompts may appear, then call action:'connect_x', confirm:true immediately — no further " +
+      "round-trip needed for THIS decision, it was already made. Use " +
+      "action:'detect_x_sources' first and choose its recommendation instead of asking the user which " +
+      "browser profile to import from.\n" +
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
       "whether X is connected. Use config, conversation context, profile_scan, and website research " +
       "before asking for fields. Ask only if no product can be identified or an interactive login is " +
@@ -2306,9 +2310,10 @@ tool(
             "the USER'S OWN register (their phrases, vibe, profession), then save a conservative best " +
             "draft without requiring a confirmation round-trip. Returns {profile, posts, comments, " +
             "grounding_instructions}. " +
-            "connect_reddit = OPTIONAL equal platform (setup completes with X-only, Reddit-only, or " +
-            "both; offer Reddit after X setup, or standalone when the user prefers it or X fails/is " +
-            "skipped): import/validate the user's reddit.com session in the " +
+            "connect_reddit = call ONLY once the user has said they want Reddit connected (setup " +
+            "completes with X-only, Reddit-only, or both — whichever they picked when asked up front; " +
+            "if X connection fails after they chose it, offer Reddit as a fallback): import/validate " +
+            "the user's reddit.com session in the " +
             "autoposter's managed reddit browser, same confirm-first shape as connect_x. " +
             "detect_reddit_sources = list the browsers/profiles the Reddit session can be imported " +
             "from (read-only, no keychain prompt)."
