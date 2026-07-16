@@ -122,7 +122,22 @@ _hc_capture_wedge_diagnostics() {
         uptime
     } > "$_wd_out" 2>&1 || true
     if [ -n "$_wd_pid" ]; then
-        sample "$_wd_pid" 3 -mayDie -file "${_wd_out%.txt}.sample.txt" >/dev/null 2>&1 || true
+        # Sample WHILE a third probe runs (v2, 2026-07-16). The first capture
+        # photographed a perfectly healthy Chrome ~40s after the failed
+        # handshakes — post-seizure. Sampling concurrently with a live
+        # handshake catches the DevTools thread in the failing act, and the
+        # third probe's own verdict is the transient-vs-dead discriminator:
+        # READY here means the "wedge" clears within ~a minute and the right
+        # fix is a wider strike window, not a kill.
+        sample "$_wd_pid" 10 -mayDie -file "${_wd_out%.txt}.sample.txt" >/dev/null 2>&1 &
+        local _wd_sampler=$!
+        local _wd_v3=""
+        if _wd_v3=$(hc_cdp_ready "http://127.0.0.1:${_wd_port}"); then
+            echo "--- third probe DURING sample: READY (wedge is TRANSIENT): ${_wd_v3}" >> "$_wd_out"
+        else
+            echo "--- third probe DURING sample: STILL FAILING: ${_wd_v3}" >> "$_wd_out"
+        fi
+        wait "$_wd_sampler" 2>/dev/null || true
     fi
     echo "[$(_hc_ts)] wedge diagnostics captured: $_wd_out" >&2
     # Prune: keep the 10 newest captures (2 files each).
