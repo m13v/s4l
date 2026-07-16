@@ -3388,6 +3388,96 @@ class S4LMenuBar(rumps.App):
         st.clear_review_request()
         self._notify("S4L", f"Discarded {n} pending draft(s).")
 
+    def _approve_all_pending(self, _=None):
+        """Bulk-approve every pending draft with its DEFAULT text (Draft A /
+        the single reply, unedited, no loved level) -- the canvas control
+        card's counterpart to _discard_all_pending; no corner-card
+        equivalent exists ("approve everything with zero individual review"
+        only makes sense once several drafts are visible at once). Each
+        draft is routed through the SAME _on_card_decision every normal
+        single-card approve uses (durable persistence, review event,
+        posting-queue enqueue) -- built here instead of read off a live
+        card's textview, since none was ever shown for these."""
+        batch, drafts = self._pending_review()
+        if not batch or not drafts:
+            return
+        n = len(drafts)
+        choice = _show_alert(
+            title="Approve all pending drafts?",
+            message=(
+                f"Posts all {n} pending draft(s) right now, exactly as "
+                "drafted (no edits, no individual review). This cannot be "
+                "undone once posting starts."
+            ),
+            ok="Approve All", cancel="Cancel",
+        )
+        if choice != 1:
+            return
+        for d in drafts:
+            link = d.get("link_url")
+            drafts_field = d.get("drafts")
+            dual = isinstance(drafts_field, list) and len(drafts_field) == 2
+            # Tail link baked at draft time is normally already in the text
+            # (same _compose logic the review cards apply before ever
+            # showing a box); only append when genuinely missing.
+            text = (drafts_field[0].get("text") or "") if dual else (d.get("reply_text") or "")
+            if link and link not in text:
+                text = f"{text} {link}"
+            text = re.sub(r"[ \t]{2,}", " ", text).strip()
+            draft_choice = None
+            if dual:
+                chosen, other = drafts_field[0], drafts_field[1]
+                draft_choice = {
+                    "variant": "a",
+                    "index": 0,
+                    "auto_selected": True,
+                    "style": chosen.get("style") or None,
+                    "unchosen_text": (other.get("text") or "").strip() or None,
+                    "unchosen_style": other.get("style") or None,
+                    "hover_a_ms": 0,
+                    "hover_b_ms": 0,
+                    "visited_other": False,
+                }
+            decision = {
+                "n": d.get("n"),
+                "approved": True,
+                "loved": False,
+                "text": text,
+                "edited": False,
+                "original_text": None,
+                "drop_link": False,
+                "reject_category": None,
+                "reject_note": None,
+                "interactions": [],
+                "dwell_ms": None,
+                "candidate_id": d.get("candidate_id"),
+                "platform": d.get("platform"),
+                "project": d.get("project"),
+                "thread_url": d.get("thread_url"),
+                "thread_author": d.get("thread_author"),
+                "language": d.get("language"),
+                "draft_variant": "a" if dual else None,
+                "draft_index": 0 if dual else None,
+                "draft_auto_selected": bool(dual),
+                "draft_choice": draft_choice,
+            }
+            self._on_card_decision(batch, decision)
+        try:
+            _, mod = self._review_mod()
+
+            mod.dismiss_active()
+        except Exception:
+            pass
+        with self._review_lock:
+            self._panel_open = False
+            self._review_mod_name = None
+            if self._posts_outstanding <= 0:
+                self._review_active = False
+                self._reset_posting_progress_locked()
+        self._last_review_sig = None
+        st.clear_review_request()
+        self._notify("S4L", f"Approving {n} pending draft(s)…")
+
     def _ensure_post_worker(self):
         # One persistent daemon worker drains the approved-card queue. It never
         # exits (avoids an enqueue-vs-exit race) — an idle parked thread is cheap.
