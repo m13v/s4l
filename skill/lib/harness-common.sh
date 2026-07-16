@@ -103,8 +103,16 @@ hc_cdp_ready() {
     # an http-only probe when playwright is not importable, so a bare-python3
     # platform never false-wedges on a ModuleNotFoundError). Prints the probe's
     # one-line JSON verdict on stdout; exit status is the verdict.
+    #
+    # Timeout history: born at 8000ms on 2026-07-12 as "fail fast instead of
+    # Playwright's 180s default hang" during the Chrome 150 crash storm — a
+    # direction, not a calibration. On a loaded-but-healthy machine (load 10-20
+    # is normal on the operator Mac) an 8s handshake can time out twice and
+    # false-wedge a live browser (2026-07-16 02:27, zero crashes on Beta 151).
+    # 20s keeps the fail-fast intent (9x under the old hang) with headroom;
+    # HC_CDP_READY_TIMEOUT_MS overrides per box via harness-local.env.
     "${S4L_PYTHON:-python3}" "$_BH_REPO_DIR/scripts/cdp_ready_check.py" \
-        "${1:?cdp url}" 8000 2>/dev/null
+        "${1:?cdp url}" "${HC_CDP_READY_TIMEOUT_MS:-20000}" 2>/dev/null
 }
 
 hc_record_health() {
