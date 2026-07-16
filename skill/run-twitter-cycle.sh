@@ -1606,6 +1606,25 @@ else
     DUDS_TOTAL=0
     TWEETS_PULLED=0
     BATCH_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]')
+    # Phase 1 normally sets this (query-bank routing signal); skipped here, so
+    # default it under `set -u` (line 31) -- otherwise Phase 2b-gen's payload
+    # build below hits "TOP_QUERIES_PER_PROJECT_JSON: unbound variable" (found
+    # live 2026-07-15; non-fatal thanks to that call's own `|| echo '{}'`
+    # fallback, but noisy and worth defaulting properly).
+    TOP_QUERIES_PER_PROJECT_JSON='{}'
+    # Hard force, NOT just a default (2026-07-15): a sandbox run must NEVER
+    # reach Phase 2b-post, full stop. A prior test run without an explicit
+    # DRAFT_ONLY=1 raced straight through Phase 2b-prep/2b-gen to Phase
+    # 2b-post and actually attempted a real post -- it was only skipped
+    # because that specific historical candidate happened to already be
+    # posted-to in reality (an incidental dedup hit, not a real safety net).
+    # scripts/twitter_post_plan.py's post_one() now also hard-refuses any
+    # experiments.sandbox candidate regardless of this, but that is
+    # defense-in-depth, not a substitute for stopping before Phase 2b-post
+    # even runs. This also happens to be the only way a sandbox run ever
+    # produces a reviewable draft instead of skipping straight to a post
+    # attempt.
+    export DRAFT_ONLY=1
 fi
 
 if [ -z "$CANDIDATES" ]; then
