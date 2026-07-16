@@ -2205,23 +2205,29 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
     python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
 fi
-log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
-acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
-log "twitter-browser lock held (pid=$$) Phase 2b-prep"
-# Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
-
 # Thread-media capture (2026-06-03, gated by S4L_TWITTER_CAPTURE_MEDIA, default
-# OFF). Now that the browser lock is held and the harness Chrome is up, do ONE
-# cheap deterministic pass over every candidate thread to pull its media
-# (images/videos/GIFs/link-cards), persist each into
+# OFF). When enabled, does ONE cheap deterministic pass over every candidate
+# thread to pull its media (images/videos/GIFs/link-cards), persist each into
 # twitter_candidates.thread_media, and build a MEDIA CONTEXT block injected into
 # the prep prompt so the reply-writer can react to what the tweet visually shows
 # instead of replying text-blind. Must be deterministic (Python pre-fetch) because
 # the prep prompt forbids the model from calling twitter_browser.py. Entirely
 # best-effort: any failure leaves MEDIA_BLOCK empty and the cycle proceeds.
+#
+# The twitter-browser lock exists SOLELY to guard this capture step, so it is
+# now gated by the same flag (2026-07-16): acquiring it unconditionally meant
+# every cycle -- sandbox or live -- contended for the browser lock even when
+# nothing in this phase touches the browser, which is the default state (media
+# capture off). Found live: a sandbox test run waited ~6 minutes in the FIFO
+# lock queue behind a real cycle for a lock it never ended up needing.
 MEDIA_BLOCK=""
 if [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
+    log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
+    acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+    log "twitter-browser lock held (pid=$$) Phase 2b-prep"
+    # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
+    ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+
     if [ -s "$MEDIA_URLS_FILE" ]; then
         log "Phase 2b-prep: capturing thread media for $(wc -l < "$MEDIA_URLS_FILE" | tr -d ' ') candidate(s)..."
         MEDIA_BLOCK=$(python3 "$REPO_DIR/scripts/capture_thread_media.py" --urls-file "$MEDIA_URLS_FILE" --scroll 1 2>>"$LOG_FILE" || true)
@@ -2231,28 +2237,29 @@ if [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA
             log "Phase 2b-prep: no media captured (none found or capture skipped)."
         fi
     fi
-else
-    log "Phase 2b-prep: thread-media capture disabled (S4L_TWITTER_CAPTURE_MEDIA not set)."
-fi
-rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
+    rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 
-# Release the twitter-browser lock now. Thread-media capture above was the
-# ONLY browser-touching step in Phase 2b-prep; the Claude drafting call below
-# is architecturally browser-free (--strict-mcp-config omits the
-# twitter-harness MCP, so the model can never reach the CDP Chrome even if it
-# tried) and, since the 2026-06-23 queue migration, "run-twitter-cycle-prep"
-# routes through claude_job.py to an independent worker process that can
-# block for up to S4L_CLAUDE_QUEUE_TIMEOUT (1800s default). Holding the
-# browser lock across that wait made this process a preemption target for
-# any post that needed the browser: the post-vs-scan hijack fix SIGKILLs
-# whoever holds the lock (see docs/twitter_browser_lock.md), which killed
-# this process mid-wait while the worker kept drafting in the background,
-# stranding the finished result until the salvage reconciler's 35-min window
-# (scripts/salvage_orphaned_prep_results.py) picked it up. Releasing here
-# removes this whole phase from being a SIGKILL target for the rest of the
-# drafting wait. Phase 2b-post re-acquires unconditionally below.
-log "Releasing twitter-browser lock before Claude drafting (drafting never touches the browser)..."
-release_lock "twitter-browser" 2>>"$LOG_FILE"
+    # Release the twitter-browser lock now. Thread-media capture above was the
+    # ONLY browser-touching step in Phase 2b-prep; the Claude drafting call below
+    # is architecturally browser-free (--strict-mcp-config omits the
+    # twitter-harness MCP, so the model can never reach the CDP Chrome even if it
+    # tried) and, since the 2026-06-23 queue migration, "run-twitter-cycle-prep"
+    # routes through claude_job.py to an independent worker process that can
+    # block for up to S4L_CLAUDE_QUEUE_TIMEOUT (1800s default). Holding the
+    # browser lock across that wait made this process a preemption target for
+    # any post that needed the browser: the post-vs-scan hijack fix SIGKILLs
+    # whoever holds the lock (see docs/twitter_browser_lock.md), which killed
+    # this process mid-wait while the worker kept drafting in the background,
+    # stranding the finished result until the salvage reconciler's 35-min window
+    # (scripts/salvage_orphaned_prep_results.py) picked it up. Releasing here
+    # removes this whole phase from being a SIGKILL target for the rest of the
+    # drafting wait. Phase 2b-post re-acquires unconditionally below.
+    log "Releasing twitter-browser lock before Claude drafting (drafting never touches the browser)..."
+    release_lock "twitter-browser" 2>>"$LOG_FILE"
+else
+    log "Phase 2b-prep: thread-media capture disabled (S4L_TWITTER_CAPTURE_MEDIA not set); skipping the twitter-browser lock entirely."
+    rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
+fi
 
 # --- ACCOUNT VOICE CORPUS injection (both lanes, 2026-07-15) -----------------
 # build_persona.py apply / voice_exemplars.py write a raw first-hand corpus
