@@ -269,6 +269,7 @@ hc_ensure_browser() {
                 # twitter_access_gate; bin/server.js parses the twitter one).
                 echo "${_marker}: detected url=${_def_url} action=restart" >&2
                 hc_record_health wedge_restart "$_ready_verdict"
+                _hc_capture_wedge_diagnostics "$_port" "$_prof"
                 _hc_reap_profile_owners "$_prof"
             fi
         else
