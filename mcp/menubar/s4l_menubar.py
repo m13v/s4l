@@ -997,25 +997,32 @@ class S4LMenuBar(rumps.App):
                             continue
                         if not (d.get("isApiErrorMessage") or d.get("error")):
                             continue  # marker was content, not a real error line
+                        # Epoch of this error, for the window gate AND the
+                        # recovery comparison below. Unparseable/missing ts ->
+                        # treat as "now" (fail loud, not silent: an unordered
+                        # error can neither age out nor be cancelled early).
+                        err_epoch = now
                         ts = d.get("timestamp")
                         if ts:
                             try:
                                 import datetime as _dt
-                                t = _dt.datetime.fromisoformat(
+                                err_epoch = _dt.datetime.fromisoformat(
                                     ts.replace("Z", "+00:00")
                                 ).timestamp()
-                                if t < cutoff:
+                                if err_epoch < cutoff:
                                     continue  # old error; the session recovered
                             except Exception:
-                                pass  # unparseable ts -> keep (fail loud, not silent)
+                                err_epoch = now  # unparseable ts -> keep (fail loud)
                         # 'resets 4:30pm (America/Los_Angeles)' style prose rides
                         # inside the error message on both shapes; surface it so
                         # the menu can say WHEN instead of just "rate limited".
                         m = re.search(r"resets [^\"\\]{0,40}", line)
                         resets = " — " + m.group(0).strip().rstrip(".") if m else ""
                         if d.get("apiErrorStatus") == 429 or d.get("error") == "rate_limit":
-                            limit_msg = "Claude rate limit reached (429)" + resets
-                            break
+                            if err_epoch >= limit_epoch:
+                                limit_epoch = err_epoch
+                                limit_msg = "Claude rate limit reached (429)" + resets
+                            continue
                         # Non-429 API errors only count with weekly/usage-limit
                         # prose in them; a plain 401/500 is NOT a usage limit.
                         if (
@@ -1023,14 +1030,64 @@ class S4LMenuBar(rumps.App):
                             or "usage limit" in low
                             or "hit your limit" in low
                         ):
-                            limit_msg = (
-                                m.group(0).strip().rstrip(".")
-                                if m
-                                else "Claude usage limit reached"
-                            )
-                            break
-                if limit_msg:
-                    break
+                            if err_epoch >= limit_epoch:
+                                limit_epoch = err_epoch
+                                limit_msg = (
+                                    m.group(0).strip().rstrip(".")
+                                    if m
+                                    else "Claude usage limit reached"
+                                )
+            # RECOVERY CANCEL — only consulted when a fresh limit error was found.
+            # A 'type':'assistant' line WITHOUT the SDK's top-level error fields
+            # is only ever written when a model turn actually came back — the
+            # same only-the-SDK-writes-it property the error verdict rests on,
+            # so this stays immune to markers-as-content (a limited account's
+            # transcript contains ZERO such lines; verified 2026-07-15). Newest
+            # clean assistant line beating the newest limit error = Claude turns
+            # are flowing; drop the verdict instead of waiting out the window.
+            if limit_msg:
+                ok_epoch = 0.0
+                for f in recent[:10]:
+                    try:
+                        fh = open(f)
+                    except Exception:
+                        continue
+                    cands = []
+                    with fh:
+                        for line in fh:
+                            if '"type":"assistant"' not in line:
+                                continue
+                            if '"isapierrormessage":true' in line.lower():
+                                continue
+                            cands.append(line)
+                    # Lines are chronological: walk backwards, the first line
+                    # that parses clean is this file's newest success.
+                    for line in reversed(cands):
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        if (
+                            d.get("type") != "assistant"
+                            or d.get("isApiErrorMessage")
+                            or d.get("error")
+                        ):
+                            continue
+                        ts = d.get("timestamp")
+                        if not ts:
+                            continue
+                        try:
+                            import datetime as _dt
+                            t = _dt.datetime.fromisoformat(
+                                ts.replace("Z", "+00:00")
+                            ).timestamp()
+                        except Exception:
+                            continue
+                        if t > ok_epoch:
+                            ok_epoch = t
+                        break
+                if ok_epoch > limit_epoch:
+                    limit_msg = None
         except Exception:
             pass
         return ran, limit_msg
