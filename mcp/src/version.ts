@@ -132,7 +132,13 @@ type SharedCache = {
   tag: string | null;
   etag: string | null;
 };
-const SHARED_TTL_S = 600; // banner latency ceiling: a new release surfaces within 10 min
+// Banner latency ceiling: a new release surfaces within ~2 min. Safe because
+// probes are conditional (If-None-Match): with a persisted ETag a probe is a
+// free 304. The TTL bounds the worst-case rate for ETAG-LESS modes (staging
+// list-endpoint fallback writes etag=null): 120s -> 30 req/h, half the
+// anonymous 60/h-per-IP quota. Do NOT drop to 60s (etag-less probing would eat
+// the whole quota, the 2026-07-13 failure mode). Lockstep: snapshot.py::_SHARED_TTL.
+const SHARED_TTL_S = 120;
 const PROBE_LOCK_STALE_MS = 30_000;
 
 function sharedCachePath(): string {
