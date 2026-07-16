@@ -38,6 +38,14 @@ Loved approvals (the stronger emoji in the card's inline approve row:
 strength as an approve_level_N interaction, and are surfaced to the model
 as strong positive evidence.
 
+Platform-derived events (2026-07-16): each run first invokes
+scripts/platform_strike_events.py to sweep fresh moderation outcomes into the
+ledger (posts flipped to removed/deleted -> decision='platform_removed',
+project-scoped; community bans -> decision='platform_banned', project NULL).
+Project-scoped strikes flow through the normal per-project fetch; project-less
+bans ride along into every project's prompt like overall feedback, rendered in
+their own block. The prompt weighs both separately from human decisions.
+
 Failure handling: a Claude failure or unparseable plan leaves the events
 unprocessed for the next run. A run-level flock prevents concurrent digests.
 
@@ -459,13 +467,14 @@ def digest_project(project: dict, platform: str, dry_run: bool,
             f"count={len(no_reason)} threshold={BULK_NO_REASON_THRESHOLD} "
             f"event_ids=[{ids}] (volume signal, logged regardless of whether "
             "the digest model finds a shared textual pattern below)")
-    if not overall_events and not any(_is_actionable(e) for e in events):
+    if not overall_events and not platform_events and not any(_is_actionable(e) for e in events):
         log(f"project={name} platform={platform} events={len(events)} "
             "plain_approvals_only, no digest (they ride along with the next actionable event)")
         return True
-    prompt = build_prompt(project, events, overall_events)
+    prompt = build_prompt(project, events, overall_events, platform_events)
     if dry_run:
-        log(f"project={name} platform={platform} events={len(events)} overall={len(overall_events)} DRY RUN prompt below")
+        log(f"project={name} platform={platform} events={len(events)} overall={len(overall_events)} "
+            f"platform_ridealong={len(platform_events)} DRY RUN prompt below")
         print(prompt)
     ok, out, err = call_claude(prompt)
     if not ok:
@@ -593,6 +602,18 @@ def main() -> int:
         except Exception as e:
             log(f"learned_preferences migration error (non-fatal): {e}")
 
+    # Platform-strike sweep (2026-07-16): pull fresh moderation outcomes
+    # (removed/deleted posts, community bans) into the ledger before reading
+    # it, so this very run digests them. Idempotent (deterministic
+    # event_uuid), non-fatal, and skipped on --dry-run (which promises to
+    # change nothing).
+    if not args.dry_run:
+        try:
+            import platform_strike_events
+            platform_strike_events.sweep()
+        except Exception as e:
+            log(f"platform_strike_sweep_error (non-fatal): {e}")
+
     cfg = load_config()
     by_name = {p.get("name"): p for p in (cfg.get("projects") or [])}
 
@@ -603,20 +624,28 @@ def main() -> int:
     # button / menu bar "Send feedback…"): fetched once, folded into EVERY
     # configured project's prompt, and marked processed only after all
     # attempted digests succeed (apply_mutations dedups any re-digest).
+    # Project-less platform events (community bans, account-level by nature)
+    # ride along the same way but render in their own prompt block.
     overall_events: list[dict] = []
+    platform_events: list[dict] = []
     try:
         oresp = api_get("/api/v1/review-events",
                         {"unprocessed": "true", "limit": "100"})
-        overall_events = [
-            e for e in (((oresp or {}).get("data") or {}).get("events") or [])
-            if e.get("decision") == "feedback" and not e.get("project")
-        ]
+        for e in (((oresp or {}).get("data") or {}).get("events") or []):
+            if e.get("project"):
+                continue
+            if e.get("decision") == "feedback":
+                overall_events.append(e)
+            elif str(e.get("decision") or "").startswith("platform_"):
+                platform_events.append(e)
     except Exception as e:
         log(f"overall_feedback_fetch_error={e}")
     if overall_events:
         log(f"overall feedback notes pending: {len(overall_events)}")
+    if platform_events:
+        log(f"account-level platform events pending: {len(platform_events)}")
 
-    if not counts and not overall_events:
+    if not counts and not overall_events and not platform_events:
         log("no unprocessed review events")
         return 0
 
@@ -629,12 +658,13 @@ def main() -> int:
         n = int(row.get("unprocessed") or 0)
         if args.project and name != args.project:
             continue
-        # Explicit overall feedback shouldn't wait on the card-event threshold.
-        if n < args.min_events and not overall_events:
+        # Explicit overall feedback / platform events shouldn't wait on the
+        # card-event threshold.
+        if n < args.min_events and not overall_events and not platform_events:
             log(f"project={name} platform={platform} events={n} below_min={args.min_events}, waiting")
             continue
         todo[(name, platform)] = n
-    if overall_events:
+    if overall_events or platform_events:
         for name in by_name:
             if args.project and name != args.project:
                 continue
@@ -649,28 +679,30 @@ def main() -> int:
             continue
         attempted += 1
         try:
-            if not digest_project(proj, platform, args.dry_run, overall_events):
+            if not digest_project(proj, platform, args.dry_run, overall_events,
+                                  platform_events):
                 failures += 1
         except Exception as e:
             failures += 1
             log(f"project={name} digest_error={e}")
 
-    if overall_events and not args.dry_run:
+    ridealong = overall_events + platform_events
+    if ridealong and not args.dry_run:
         if attempted and not failures:
-            ids = [int(e["id"]) for e in overall_events
+            ids = [int(e["id"]) for e in ridealong
                    if str(e.get("id", "")).isdigit() or isinstance(e.get("id"), int)]
             try:
                 presp = api_patch("/api/v1/review-events",
                                   {"ids": ids, "action": "mark_processed",
                                    "processed_batch": f"digest-overall-{_now_stamp()}"})
                 marked = ((presp or {}).get("data") or {}).get("updated") or 0
-                log(f"overall feedback marked processed: {marked}")
+                log(f"overall/platform ride-along events marked processed: {marked}")
             except Exception as e:
                 log(f"overall mark_processed_failed={e} (re-digested next run; apply dedups)")
         elif attempted:
-            log("overall feedback left unprocessed (a project digest failed; next run retries)")
+            log("overall/platform events left unprocessed (a project digest failed; next run retries)")
         else:
-            log("overall feedback pending but no configured project to digest into; left unprocessed")
+            log("overall/platform events pending but no configured project to digest into; left unprocessed")
     return 0
 
 
