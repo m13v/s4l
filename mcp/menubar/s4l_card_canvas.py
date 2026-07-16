@@ -240,8 +240,39 @@ class _CanvasController(NSObject):
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
 
         header_y = h - HEADER_H
+        # Bulk actions live INLINE with the "Showing N of Total pending"
+        # count, not their own dedicated card -- a whole grid slot spent on
+        # a heading + description paragraph + two big buttons was more than
+        # this needs (2026-07-16 user direction: "just two buttons ... that's
+        # it"). Buttons on the right, count label filling the space to their
+        # left.
+        btn_w, btn_h, btn_gap = 110.0, 26.0, 8.0
+        btn_y = header_y + (HEADER_H - btn_h) / 2.0
+        approve_x = w - WIN_MARGIN - btn_w
+        discard_x = approve_x - btn_gap - btn_w
+
+        discard_btn = NSButton.alloc().initWithFrame_(NSMakeRect(discard_x, btn_y, btn_w, btn_h))
+        discard_btn.setTitle_("Discard All")
+        discard_btn.setBezelStyle_(NSBezelStyleRounded)
+        try:
+            discard_btn.setHasDestructiveAction_(True)
+        except Exception:
+            pass
+        discard_btn.setFont_(NSFont.systemFontOfSize_(12))
+        discard_btn.setTarget_(self)
+        discard_btn.setAction_("discardAllClicked:")
+        content.addSubview_(discard_btn)
+
+        approve_btn = NSButton.alloc().initWithFrame_(NSMakeRect(approve_x, btn_y, btn_w, btn_h))
+        approve_btn.setTitle_("Approve All")
+        approve_btn.setBezelStyle_(NSBezelStyleRounded)
+        approve_btn.setFont_(NSFont.systemFontOfSize_(12))
+        approve_btn.setTarget_(self)
+        approve_btn.setAction_("approveAllClicked:")
+        content.addSubview_(approve_btn)
+
         self._count_label = _label(
-            NSMakeRect(WIN_MARGIN, header_y + 10, w - 2 * WIN_MARGIN, 20),
+            NSMakeRect(WIN_MARGIN, header_y + 10, discard_x - WIN_MARGIN - 12, 20),
             "",
             size=13,
             bold=True,
@@ -302,12 +333,7 @@ class _CanvasController(NSObject):
 
         scroll.setDocumentView_(doc)
 
-        # Position 0 is a persistent bulk-action card (Approve All / Discard
-        # All), never part of the draft-filling rotation below -- ONE card
-        # with two buttons, not a header button bar (2026-07-16 product
-        # direction).
-        self._build_control_card(self._slots[0]["view"])
-        for i in range(1, len(self._slots)):
+        for i in range(len(self._slots)):
             self._fill_slot(i)
         self._refresh_header()
 
