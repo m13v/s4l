@@ -519,7 +519,7 @@ class S4LMenuBar(rumps.App):
         # Which review-surface module ("cards" | "canvas") is driving the
         # CURRENTLY open panel/window, None when nothing is open. Set at
         # presentation time from st.read_review_layout(); kept fixed for the
-        # life of that surface so flipping the "Canvas review" menu checkbox
+        # life of that surface so switching the "View" submenu (Cards/Canvas)
         # mid-session never talks to the wrong module for an already-open
         # panel. See _review_mod().
         self._review_mod_name = None
@@ -1136,19 +1136,20 @@ class S4LMenuBar(rumps.App):
     def _toggle_promotion(self, _=None):
         self._toggle_lane(st.MODE_PROMOTION)
 
-    def _toggle_canvas_review(self, _=None):
-        """Menu: flip which review surface presents pending drafts. Persisted
-        (st.write_review_layout), so it survives a restart; an already-open
-        surface keeps driving through whichever module it started with
-        (_review_mod_name) -- this only changes what the NEXT presentation
-        uses. See _review_mod()."""
-        current = st.read_review_layout()
-        st.write_review_layout("cards" if current == "canvas" else "canvas")
+    def _on_review_layout_preset(self, layout, _sender=None):
+        """Menu callback shim (mirrors _on_split_preset): rumps passes the
+        clicked MenuItem last. Persisted (st.write_review_layout), so it
+        survives a restart; an already-open surface keeps driving through
+        whichever module it started with (_review_mod_name) -- this only
+        changes what the NEXT presentation uses. See _review_mod()."""
+        if st.read_review_layout() == layout:
+            return
+        st.write_review_layout(layout)
         self._sig = None
         try:
             self._tick(None)
         except Exception as e:
-            sys.stderr.write(f"[s4l-menubar] canvas toggle rebuild failed: {e}\n")
+            sys.stderr.write(f"[s4l-menubar] review layout switch rebuild failed: {e}\n")
             sys.stderr.flush()
 
     # Personal-brand share presets for the both-lanes-on state. rumps has no
@@ -2872,7 +2873,7 @@ class S4LMenuBar(rumps.App):
     def _review_mod(self):
         """Which review-surface module drives the review-drafts flow: the
         module that owns the currently open panel/window when one is open
-        (so a mid-session flip of the "Canvas review" checkbox never talks to
+        (so a mid-session switch of the "View" submenu never talks to
         the wrong surface for an already-open one), else the persisted
         st.read_review_layout() preference for a FRESH presentation. Both
         modules expose the exact same present_review*/extend_active/
@@ -3250,7 +3251,7 @@ class S4LMenuBar(rumps.App):
             self._panel_open = False
             # The surface is confirmed gone: release the pin so the NEXT
             # presentation re-resolves from st.read_review_layout() (picks up
-            # a "Canvas review" toggle flipped while this one was open).
+            # a "View" submenu switch made while this one was open).
             self._review_mod_name = None
             if self._posts_outstanding <= 0:
                 self._review_active = False
@@ -3635,14 +3636,6 @@ class S4LMenuBar(rumps.App):
                 split_menu.add(it)
             items.append(split_menu)
 
-        # Review surface layout: the one-at-a-time corner card (default) vs.
-        # the large centered multi-select canvas (2026-07-15). Always visible
-        # for the same reason as the lane checkmarks above — a standing
-        # preference, not tied to whether anything is pending right now.
-        canvas_item = rumps.MenuItem("Canvas review", callback=self._toggle_canvas_review)
-        canvas_item.state = 1 if st.read_review_layout() == "canvas" else 0
-        items.append(canvas_item)
-
         # Reveal cadence: how often fresh draft cards may pop (the drafting
         # pipeline is unchanged; this only paces the pop-up). Always offered:
         # it is the "don't interrupt me every few minutes" control.
@@ -3805,6 +3798,20 @@ class S4LMenuBar(rumps.App):
                 callback=self._review_now,
             )
         ]
+        # Which review surface "Review N pending drafts" opens: the one-at-a-
+        # time corner card, or the large centered multi-select canvas
+        # (2026-07-15). A submenu of checkmarked options (same pattern as
+        # "Lane split" above), not a standalone on/off checkbox, and grouped
+        # with the review action itself rather than the always-visible
+        # engagement-lane toggles, since it only matters while there's
+        # something to review.
+        view_menu = rumps.MenuItem("View")
+        layout_now = st.read_review_layout()
+        for key, label in (("cards", "Cards"), ("canvas", "Canvas")):
+            it = rumps.MenuItem(label, callback=functools.partial(self._on_review_layout_preset, key))
+            it.state = 1 if layout_now == key else 0
+            view_menu.add(it)
+        items.append(view_menu)
         if time.time() < self._review_snooze_until:
             items.append(
                 self._label(
