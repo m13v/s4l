@@ -96,6 +96,39 @@ _resolve_chrome_bin() {
     echo ""; return 1
 }
 
+_hc_capture_wedge_diagnostics() {
+    # Photograph a wedged Chrome BEFORE the reap kills it (2026-07-16): the
+    # ws-handshake wedge survived the Chrome 150→151 jump and the 8s→20s
+    # probe widening, hits all three harness ports ~hourly, and correlates
+    # with zero renderer crashes — so stop theorizing and capture (a) a 3s
+    # thread-stack sample of the browser process (what is the DevTools accept
+    # path stuck on?) and (b) an open-connection census of the CDP port
+    # (client/socket pile-up?). Written to skill/logs/wedge-diag/, pruned to
+    # the last 10 wedges. Read-only, best-effort, ~4s added to a restart that
+    # was already happening. sample(1) is Darwin-only.
+    local _wd_port="${1:?port}" _wd_prof="${2:?profile dir}"
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    local _wd_dir="$_BH_REPO_DIR/skill/logs/wedge-diag"
+    mkdir -p "$_wd_dir" 2>/dev/null || return 0
+    local _wd_ts _wd_pid _wd_out
+    _wd_ts=$(date -u +%Y%m%dT%H%M%SZ)
+    _wd_out="$_wd_dir/wedge-${_wd_port}-${_wd_ts}.txt"
+    _wd_pid=$(lsof -nP -iTCP:"$_wd_port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+    {
+        echo "=== wedge diagnostics port=${_wd_port} pid=${_wd_pid:-none} ts=${_wd_ts} profile=${_wd_prof} ==="
+        echo "--- open TCP connections on ${_wd_port} ---"
+        lsof -nP -iTCP:"$_wd_port" 2>/dev/null
+        echo "--- system load ---"
+        uptime
+    } > "$_wd_out" 2>&1 || true
+    if [ -n "$_wd_pid" ]; then
+        sample "$_wd_pid" 3 -mayDie -file "${_wd_out%.txt}.sample.txt" >/dev/null 2>&1 || true
+    fi
+    echo "[$(_hc_ts)] wedge diagnostics captured: $_wd_out" >&2
+    # Prune: keep the 10 newest captures (2 files each).
+    ls -t "$_wd_dir"/wedge-* 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
+}
+
 hc_cdp_ready() {
     # Real CDP readiness: complete an actual connect_over_cdp handshake against
     # the harness. /json/version alone is a liveness probe that a WEDGED Chrome
