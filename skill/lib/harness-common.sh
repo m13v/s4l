@@ -296,6 +296,15 @@ hc_ensure_browser() {
         # 2026-07-14/15 EXC_BREAKPOINT (deliberate internal abort) crash dumps
         # arriving ~once per cycle with zero jetsam/OOM evidence. Playwright
         # and Puppeteer both launch with it for exactly this reason.
+        # With --no-startup-window (focus-steal prevention: Chrome creates NO
+        # window at launch, so macOS has nothing to activate; the first
+        # pipeline op mints its tab via the background Target.createTarget
+        # path) a positional URL argument would force a window and defeat the
+        # flag — drop the launch URL in that mode.
+        local _launch_url="${HC_LAUNCH_URL:-about:blank}"
+        case " ${HC_EXTRA_FLAGS:-} " in
+            *" --no-startup-window "*) _launch_url="" ;;
+        esac
         launch_harness_chrome "$_chrome_bin" "$_prof" \
             --remote-debugging-port="$_port" \
             --user-data-dir="$_prof" \
@@ -305,7 +314,7 @@ hc_ensure_browser() {
             --disable-backgrounding-occluded-windows \
             ${HC_EXTRA_FLAGS:-} \
             ${_os_extra} \
-            "${HC_LAUNCH_URL:-about:blank}"
+            ${_launch_url}
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             curl -sf --max-time 2 -o /dev/null "${_def_url}/json/version" 2>/dev/null && break
             sleep 1
