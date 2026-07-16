@@ -1090,6 +1090,14 @@ class _ReviewController(NSObject):
 
     @objc.python_method
     def _build(self):
+        if self._host_view is not None:
+            # Grid tile: no window of its own, no snooze/discard-all title
+            # bar accessory (those are corner-panel-only chrome), no
+            # module-level singleton bookkeeping -- the canvas controller
+            # (a different module, different global) owns the whole
+            # session's window/state narrative. Just render into the slot.
+            self._render()
+            return
         frame = _corner_frame(_mouse_screen())
         style = (
             NSWindowStyleMaskTitled
@@ -1151,6 +1159,38 @@ class _ReviewController(NSObject):
             tv.setEditable_(True)
             tv.setSelectable_(True)
             panel.makeFirstResponder_(tv)
+        except Exception:
+            pass
+
+    @objc.python_method
+    def _mount_content(self, content):
+        """Attach `content` (a freshly-built NSView, already sized WxH) as
+        the visible card body -- the panel's content view for the corner
+        card, or a subview filling the caller-supplied grid slot
+        (self._host_view) for a canvas tile. The only branch point between
+        the two hosting modes; every other rendering method (approve/reject,
+        popovers, draft A/B, decision recording) is unaware which one it's
+        in. See _seat_first_responder for the matching caret-focus branch."""
+        frosted = _frosted(content)
+        if self._host_view is not None:
+            for sv in list(self._host_view.subviews()):
+                sv.removeFromSuperview()
+            frosted.setFrame_(self._host_view.bounds())
+            self._host_view.addSubview_(frosted)
+        else:
+            self._panel.setContentView_(frosted)
+
+    @objc.python_method
+    def _seat_first_responder(self, view):
+        """Make `view` (a text field/view already in the mounted content)
+        the key responder -- the corner card's own panel, or the canvas's
+        shared window (self._host_window) for a grid tile, which owns no
+        window of its own."""
+        win = self._host_window if self._host_view is not None else self._panel
+        if win is None or view is None:
+            return
+        try:
+            win.makeFirstResponder_(view)
         except Exception:
             pass
 
@@ -1722,30 +1762,38 @@ class _ReviewController(NSObject):
             content.addSubview_(scroll)
         self._textview = tv
 
-        self._panel.setContentView_(_frosted(content))
+        self._mount_content(content)
         if dual:
             # Layer border properties set before a view is attached to its
             # eventual window get silently dropped when AppKit backs the view
             # for real on attach, so the accent outline must be (re)applied
-            # only after setContentView_ installs the view tree, not during
+            # only after the mount installs the view tree, not during
             # construction above.
             self._update_draft_borders()
-        # Counter lives in the native title bar, not inside the content, with
-        # the product name so a stray card is identifiable at a glance.
-        self._panel.setTitle_(
-            f"s4l · Review draft {self._idx + 1} of {len(self._drafts)}"
-        )
-        # setContentView_ rebuilds the view tree, so the caret would otherwise
-        # default to the Approve button. Re-seat it in the reply field for every
-        # card the user is ACTIVELY reviewing (they opened the stack from the
-        # menu, or already decided/touched something), so each one is
-        # immediately editable. NOT on the initial auto-presented render:
-        # focusReply_ activates the app, and yanking the caret out of whatever
-        # the user was typing was the 2026-07-09 "too distracting" complaint.
-        # An untouched card's field becomes editable on first click instead.
-        if self._focus or self._decisions or self._last_interaction_at is not None:
-            self._panel.makeFirstResponder_(tv)
-            self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
+        if self._host_view is not None:
+            # Grid tile: no title bar to carry the "X of N" counter (each
+            # tile is always a single draft anyway). Always seat the caret --
+            # a tile only exists because the reviewer already explicitly
+            # opened the canvas window, unlike the corner card's auto-
+            # presented case below that must not steal focus mid-typing.
+            self._seat_first_responder(tv)
+        else:
+            # Counter lives in the native title bar, not inside the content, with
+            # the product name so a stray card is identifiable at a glance.
+            self._panel.setTitle_(
+                f"s4l · Review draft {self._idx + 1} of {len(self._drafts)}"
+            )
+            # setContentView_ rebuilds the view tree, so the caret would otherwise
+            # default to the Approve button. Re-seat it in the reply field for every
+            # card the user is ACTIVELY reviewing (they opened the stack from the
+            # menu, or already decided/touched something), so each one is
+            # immediately editable. NOT on the initial auto-presented render:
+            # focusReply_ activates the app, and yanking the caret out of whatever
+            # the user was typing was the 2026-07-09 "too distracting" complaint.
+            # An untouched card's field becomes editable on first click instead.
+            if self._focus or self._decisions or self._last_interaction_at is not None:
+                self._seat_first_responder(tv)
+                self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
 
     @objc.python_method
     def _stop_age_expiry_timer(self):
@@ -2393,8 +2441,8 @@ class _ReviewController(NSObject):
         self._reason_field = note
 
         self._textview = None
-        self._panel.setContentView_(_frosted(content))
-        self._panel.makeFirstResponder_(note)
+        self._mount_content(content)
+        self._seat_first_responder(note)
 
     @objc.python_method
     def _reason_note(self):
