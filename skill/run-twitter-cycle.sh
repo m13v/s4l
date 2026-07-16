@@ -2014,7 +2014,16 @@ DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
 # DRAFT_PROMPT_VARIANT_DEFS, scripts/active_experiments.py DESCRIPTIONS, and the
 # treatment_v4 gate in scripts/engagement_styles.py get_assigned_style_prompt in
 # sync).
-S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
+# Explicit override (2026-07-16): if a caller (the sandbox tooling, or
+# anyone else) already exported S4L_DRAFT_PROMPT_VARIANT, respect it instead
+# of overwriting it with a fresh coin flip -- lets a sandbox run force
+# treatment_v4 or control_v4 deliberately instead of leaving it to a random
+# 50/50, which is the whole point of an A/B comparison tool. No real caller
+# ever pre-sets this var today, so live cycles are unaffected.
+if [ -n "${S4L_DRAFT_PROMPT_VARIANT:-}" ]; then
+    log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (forced via env, no coin flip)"
+else
+    S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
     rate = float('$DRAFT_PROMPT_AB_RATE')
@@ -2023,8 +2032,9 @@ except Exception:
 rate = min(1.0, max(0.0, rate))
 print('treatment_v4' if random.random() < rate else 'control_v4')
 " 2>/dev/null || echo treatment_v4)
+    log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
+fi
 export S4L_DRAFT_PROMPT_VARIANT
-log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
 # v4 RESET (2026-07-15, replaces v3 wholesale): v3 tested whether the
 # assigned engagement style should be a binding structural FORM. v4 tests a
 # different, bigger claim: that real, measured voice signal (the account's
