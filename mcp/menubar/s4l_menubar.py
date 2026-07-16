@@ -3212,12 +3212,20 @@ class S4LMenuBar(rumps.App):
             sys.stderr.write(f"[s4l-menubar] feedback composer failed: {e}\n")
             _capture(e, phase="feedback_composer")
 
-    def _on_card_decision(self, batch, decision):
+    def _on_card_decision(self, batch, decision, already_stamped=False):
         # Runs on the main thread the INSTANT a card is approved/rejected. An
         # approved card is enqueued for immediate posting; a REJECTED card is
         # persisted (marked done so it's never re-shown for review) on a quick
         # background thread. We never block inline here — posting can take minutes
         # and would freeze the card UI while the user reviews the rest of the stack.
+        #
+        # already_stamped=True (Approve All only): the store write already
+        # happened as ONE bulk st.approve_all_pending() call before this ran
+        # per-draft (see _approve_all_pending) -- doing it here too, once per
+        # draft, would be exactly the N-separate-lock-cycles hang this was
+        # built to avoid (2026-07-16 user report). Every other consequence of
+        # a decision (review event, posting-queue enqueue) still happens
+        # here, per draft, same as the normal single-card path.
         self._ship_review_event(batch, decision)
         if not decision.get("approved"):
             n = decision.get("n")
@@ -3252,11 +3260,16 @@ class S4LMenuBar(rumps.App):
         # unguarded here, an asymmetry with no intentional reason): a failure is
         # captured, not silently swallowed, and the post still gets enqueued below
         # either way — this write is a resume/dedup aid, not a gate on posting.
-        try:
-            st.store_stamp_decision(batch, decision)
+        # Skipped when already_stamped (Approve All already did this draft's
+        # write as part of one bulk call).
+        if already_stamped:
             self._session_decisions.append(dict(decision))
-        except Exception as e:
-            _capture(e, phase="approve_stamp_decision")
+        else:
+            try:
+                st.store_stamp_decision(batch, decision)
+                self._session_decisions.append(dict(decision))
+            except Exception as e:
+                _capture(e, phase="approve_stamp_decision")
         with self._review_lock:
             self._posts_outstanding += 1
             self._posting_batch_total += 1
@@ -3333,23 +3346,13 @@ class S4LMenuBar(rumps.App):
         of them. A normal per-card reject always ships one (feeding the
         feedback-digest -> learned_preferences rail, see _ship_review_event);
         this bulk "clear the backlog" action carries no per-card judgment
-        signal, so it must never reach that rail (user-specified 2026-07-08)."""
+        signal, so it must never reach that rail (user-specified 2026-07-08).
+        No confirmation dialog (user-specified 2026-07-16): one click, acts
+        immediately."""
         batch, drafts = self._pending_review()
         if not batch or not drafts:
             return
         n = len(drafts)
-        choice = _show_alert(
-            title="Discard all pending drafts?",
-            message=(
-                f"Discards all {n} pending draft(s) right now, with no reason "
-                "given. None of them will post or be shown for review again. "
-                "This does not feed the AI feedback loop (learned_preferences) "
-                "the way an individual reject does."
-            ),
-            ok="Discard All", cancel="Cancel",
-        )
-        if choice != 1:
-            return
         try:
             st.discard_all_pending(drafts)
         except Exception as e:
@@ -3393,26 +3396,25 @@ class S4LMenuBar(rumps.App):
         the single reply, unedited, no loved level) -- the canvas control
         card's counterpart to _discard_all_pending; no corner-card
         equivalent exists ("approve everything with zero individual review"
-        only makes sense once several drafts are visible at once). Each
-        draft is routed through the SAME _on_card_decision every normal
-        single-card approve uses (durable persistence, review event,
-        posting-queue enqueue) -- built here instead of read off a live
+        only makes sense once several drafts are visible at once). No
+        confirmation dialog (user-specified 2026-07-16): one click, acts
+        immediately.
+
+        The durable store write happens ONCE, in bulk (st.approve_all_pending,
+        one lock-acquire/read/write cycle), NOT via N separate
+        _on_card_decision calls -- that used to mean N separate lock cycles
+        and was the visible multi-second UI hang on a real backlog
+        (2026-07-16 user report: "when I approved All, it hung for a
+        second"). _on_card_decision still runs once per draft afterward
+        (already_stamped=True skips its own write) for the cheap parts every
+        normal single-card approve also needs: the review event and the
+        posting-queue enqueue -- built here instead of read off a live
         card's textview, since none was ever shown for these."""
         batch, drafts = self._pending_review()
         if not batch or not drafts:
             return
         n = len(drafts)
-        choice = _show_alert(
-            title="Approve all pending drafts?",
-            message=(
-                f"Posts all {n} pending draft(s) right now, exactly as "
-                "drafted (no edits, no individual review). This cannot be "
-                "undone once posting starts."
-            ),
-            ok="Approve All", cancel="Cancel",
-        )
-        if choice != 1:
-            return
+        decisions = []
         for d in drafts:
             link = d.get("link_url")
             drafts_field = d.get("drafts")
