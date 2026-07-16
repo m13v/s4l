@@ -174,8 +174,11 @@ PROMPT_EOF
 log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py pre-flight acquire failed; proceeding (claude will retry per-post)."
-if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
-    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    log "WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
