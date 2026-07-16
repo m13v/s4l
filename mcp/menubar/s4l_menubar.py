@@ -551,6 +551,7 @@ class S4LMenuBar(rumps.App):
         self._posting_batch_done = 0
         self._spin_i = 0
         self._spinner = None  # fast rumps.Timer animating the title while busy
+        self._setup_staging_status_item()
         # Durable posting progress, derived from the review-queue PLAN rather than
         # this process's in-memory burst queue. The in-memory counter dies on a
         # menu bar restart and is blind to posts driven by the autopilot/agent, so
@@ -3473,6 +3474,56 @@ class S4LMenuBar(rumps.App):
                         self._review_active = False
                         self._reset_posting_progress_locked()
                 self._post_q.task_done()
+
+    def _setup_staging_status_item(self):
+        """Second, INDEPENDENT menu bar icon, staging-channel boxes only:
+        shows the detailed drafting/scanning/posting activity text that used
+        to compete with the primary title's pending-draft count (2026-07-16
+        user direction: end users should always see the count; the detailed
+        pipeline status is a debugging aid for staging/dev boxes, not a
+        customer-facing signal, and shouldn't need its own on/off toggle --
+        it simply doesn't exist outside staging). rumps.App manages exactly
+        one status item automatically; this is raw AppKit sitting alongside
+        it, created once here at launch and left for the life of the
+        process (no teardown beyond normal quit). Channel is read via the
+        SAME scripts/s4l_channel.py every other update surface uses, so this
+        follows whatever `s4l_channel.py set staging/stable` last set --
+        never re-checked live, since flipping channel already restarts the
+        app (self._staging_status_item stays None -- and _set_dev_status a
+        silent no-op -- on any failure, including import failure on an old
+        AppKit)."""
+        self._staging_status_item = None
+        try:
+            import s4l_channel
+
+            if not s4l_channel.is_staging():
+                return
+        except Exception:
+            return
+        try:
+            from AppKit import NSStatusBar, NSVariableStatusItemLength
+
+            item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+                NSVariableStatusItemLength
+            )
+            item.button().setTitle_("S4L·dev")
+            item.setVisible_(True)
+            self._staging_status_item = item
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] staging status item unavailable: {e}\n")
+            sys.stderr.flush()
+
+    def _set_dev_status(self, text):
+        """Write to the staging-only dev status item (_setup_staging_status_item);
+        a silent no-op on stable-channel boxes, where that item never
+        exists."""
+        item = getattr(self, "_staging_status_item", None)
+        if item is None:
+            return
+        try:
+            item.button().setTitle_(text)
+        except Exception:
+            pass
 
     def _render_title(self, setup_complete, ob, blocker, attention=False, pending_count=0):
         if blocker or attention:
