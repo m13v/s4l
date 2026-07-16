@@ -100,7 +100,7 @@ from AppKit import (
     NSLinkAttributeName,
     NSWindowOcclusionStateVisible,
     NSBackingStoreBuffered,
-    NSFloatingWindowLevel,
+    NSNormalWindowLevel,
     NSApplicationActivationPolicyAccessory,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
@@ -314,8 +314,13 @@ class _CanvasController(NSObject):
         # that overlapped the header row under the title bar (2026-07-16 user
         # report). Keep the real content size around for _render().
         self._content_size = NSMakeSize(frame.size.width, frame.size.height)
-        panel.setLevel_(NSFloatingWindowLevel)
-        panel.setFloatingPanel_(True)
+        # Normal window level, NOT floating (2026-07-16 user report): this is
+        # a large, deliberate review session the reviewer works IN, unlike
+        # the corner card's small always-on-top notification -- it should
+        # behave like any other window (other apps can come to front over
+        # it) rather than staying glued above everything.
+        panel.setLevel_(NSNormalWindowLevel)
+        panel.setFloatingPanel_(False)
         panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setHidesOnDeactivate_(False)
         panel.setReleasedWhenClosed_(False)
