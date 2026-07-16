@@ -1612,6 +1612,16 @@ else
     # live 2026-07-15; non-fatal thanks to that call's own `|| echo '{}'`
     # fallback, but noisy and worth defaulting properly).
     TOP_QUERIES_PER_PROJECT_JSON='{}'
+    # Same reasoning as TOP_QUERIES_PER_PROJECT_JSON above: all three are
+    # Phase-1-only outputs (query-bank routing / dud-query / supply-signal
+    # reports), referenced later in the same Phase 2b-gen payload build.
+    # Discovered incrementally across two live sandbox runs -- `set -u`
+    # only reports the FIRST unbound reference it hits per expansion, so
+    # fixing one revealed the next; defaulting all three here at once
+    # instead of one more round-trip each.
+    SUPPLY_SIGNAL_JSON='[]'
+    DUD_QUERIES_JSON='[]'
+    TOP_TOPICS_JSON='[]'
     # Hard force, NOT just a default (2026-07-15): a sandbox run must NEVER
     # reach Phase 2b-post, full stop. A prior test run without an explicit
     # DRAFT_ONLY=1 raced straight through Phase 2b-prep/2b-gen to Phase
