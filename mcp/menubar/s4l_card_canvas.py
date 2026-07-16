@@ -982,10 +982,6 @@ class _CanvasController(NSObject):
             except Exception:
                 pass
         try:
-            row["discard_btn"].setHidden_(True)
-        except Exception:
-            pass
-        try:
             row["status_label"].setStringValue_("Approved ✓" if approved else "Discarded ✕")
             row["status_label"].setHidden_(False)
         except Exception:
@@ -1033,13 +1029,17 @@ class _CanvasController(NSObject):
         self._sorted.extend(added)
         doc = self._doc
         doc_w = doc.frame().size.width
+        content_w = _content_w_for(doc_w)
+        geoms = [_row_geometry(d, content_w) for d in added]
         base_idx = len(self._rows)
-        new_h = ROW_PAD + (base_idx + len(added)) * (ROW_H + ROW_GAP)
-        doc.setFrameSize_(NSMakeSize(doc_w, new_h))
+        y = self._doc_bottom
         for j, d in enumerate(added):
             i = base_idx + j
-            row_y = ROW_PAD + i * (ROW_H + ROW_GAP)
-            self._add_row(doc, d, i, NSMakeRect(0, row_y, doc_w, ROW_H))
+            g = geoms[j]
+            self._add_row(doc, d, i, NSMakeRect(0, y, doc_w, g["row_h"]), g)
+            y += g["row_h"] + ROW_GAP
+        self._doc_bottom = y
+        doc.setFrameSize_(NSMakeSize(doc_w, y))
         self._refresh_header()
         self._log_surface("extended")
         return len(added)
@@ -1145,6 +1145,11 @@ class _CanvasController(NSObject):
     @objc.python_method
     def _finish(self):
         global _active
+        self._close_stats_popover()
+        try:
+            NSNotificationCenter.defaultCenter().removeObserver_(self)
+        except Exception:
+            pass
         try:
             if self._panel is not None:
                 self._panel.setDelegate_(None)
@@ -1252,6 +1257,14 @@ def dismiss_active():
     c = _active
     if c is None or c._panel is None:
         return False
+    try:
+        c._close_stats_popover()
+    except Exception:
+        pass
+    try:
+        NSNotificationCenter.defaultCenter().removeObserver_(c)
+    except Exception:
+        pass
     try:
         c._panel.setDelegate_(None)
         c._panel.close()
