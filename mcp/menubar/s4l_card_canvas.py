@@ -433,7 +433,7 @@ class _CanvasController(NSObject):
         scroll.setDocumentView_(doc)
 
     @objc.python_method
-    def _add_row(self, doc, d, idx, frame):
+    def _add_row(self, doc, d, idx, frame, geom):
         row_view = NSView.alloc().initWithFrame_(frame)
         _round_rect(row_view)
         try:
@@ -443,7 +443,7 @@ class _CanvasController(NSObject):
         doc.addSubview_(row_view)
 
         rw, rh = frame.size.width, frame.size.height
-        rm = 14
+        rm = ROW_RM
 
         checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(rm, rh - 30, 20, 20))
         checkbox.setButtonType_(NSButtonTypeSwitch)
@@ -453,8 +453,8 @@ class _CanvasController(NSObject):
         checkbox.setAction_("rowCheckToggled:")
         row_view.addSubview_(checkbox)
 
-        content_x = rm + 28
-        content_w = rw - content_x - rm
+        content_x = rm + CHECKBOX_COL_W
+        content_w = _content_w_for(rw)
 
         handle = (d.get("thread_author") or "").lstrip("@").strip()
         followers = _followers_str(d.get("stats"))
@@ -491,32 +491,27 @@ class _CanvasController(NSObject):
             age_label.setAlignment_(NSTextAlignmentRight)
             row_view.addSubview_(age_label)
 
-        tooltip_bits = []
+        # Eye icon: click/hover opens the SAME popover content the corner
+        # card's two eye icons show (engagement stats + drafting details),
+        # combined into one icon/popover per row here instead of two.
         eng = _engagement_line(d.get("stats"))
-        if eng:
-            tooltip_bits.append(eng)
-        tooltip_bits.extend(_details_lines(d))
-        if tooltip_bits:
-            info_btn = NSButton.alloc().initWithFrame_(NSMakeRect(content_x, rh - 50, 18, 16))
-            if NSBezelStyleInline is not None:
-                try:
-                    info_btn.setBezelStyle_(NSBezelStyleInline)
-                except Exception:
-                    pass
-            info_btn.setTitle_("ⓘ")
-            info_btn.setFont_(NSFont.systemFontOfSize_(10))
-            try:
-                info_btn.setToolTip_("\n".join(tooltip_bits))
-            except Exception:
-                pass
-            row_view.addSubview_(info_btn)
+        details = _details_lines(d)
+        eye_btn = None
+        if eng or details:
+            eye_btn = self._build_eye_button(NSMakeRect(content_x, rh - 50, 18, 16), idx)
+            row_view.addSubview_(eye_btn)
 
-        thread_top = rh - 54
-        thread_h = 56
+        # Thread quote: full text, never truncated -- sized to its own
+        # measured height (geom["thread_h"], capped at MAX_THREAD_H with
+        # in-place scrolling beyond that), not a fixed box that would cut
+        # long threads off or leave dead space under short ones.
+        thread_h = geom["thread_h"]
+        thread_top = rh - TOP_CHROME_H
         thread_scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(content_x, thread_top - thread_h, content_w, thread_h)
         )
-        thread_scroll.setHasVerticalScroller_(False)
+        thread_scroll.setHasVerticalScroller_(True)
+        thread_scroll.setAutohidesScrollers_(True)
         thread_scroll.setDrawsBackground_(False)
         thread_scroll.setBorderType_(0)
         tcs = thread_scroll.contentSize()
@@ -525,6 +520,9 @@ class _CanvasController(NSObject):
         thread_tv.setSelectable_(True)
         thread_tv.setDrawsBackground_(False)
         thread_tv.setDelegate_(self)
+        thread_tv.setVerticallyResizable_(True)
+        thread_tv.setMinSize_(NSMakeSize(0, tcs.height))
+        thread_tv.setMaxSize_(NSMakeSize(1e7, 1e7))
         thread_tv.textContainer().setWidthTracksTextView_(True)
         thread_scroll.setDocumentView_(thread_tv)
         row_view.addSubview_(thread_scroll)
@@ -532,7 +530,7 @@ class _CanvasController(NSObject):
         # shown here so the reviewer reads English; the editable box below
         # always keeps the ORIGINAL-language reply_text, which is what posts.
         thread_text = (d.get("thread_text_en") or d.get("thread_text") or "").strip()
-        _fit_thread_body(thread_tv, thread_text, d.get("thread_url"), font_size=12, step=15, floor=10)
+        _set_thread_text(thread_tv, thread_text, d.get("thread_url"))
 
         row = {
             "d": d,
@@ -543,43 +541,42 @@ class _CanvasController(NSObject):
             "selected": False,
             "decided": False,
             "hidden": False,
-            "dual": False,
+            "dual": geom["dual"],
+            "touched": False,  # has the reviewer actually picked A/B yet
             "armed_slot": 0,
             "outlines": {},
             "textviews": {},
             "orig_texts": {},
             "thread_tv": thread_tv,
             "thread_url": d.get("thread_url"),
+            "eye_btn": eye_btn,
             "interactions": [],
-            "discard_btn": None,
             "status_label": None,
         }
 
+        dual = row["dual"]
         drafts_field = d.get("drafts")
-        dual = isinstance(drafts_field, list) and len(drafts_field) == 2
-        row["dual"] = dual
         link = d.get("link_url")
 
         def _compose(text):
             text = text or ""
             return text if (not link or link in text) else f"{text} {link}"
 
-        bottom_bar_h = 26
-        edit_bottom = bottom_bar_h + 4
-        edit_top = thread_top - thread_h - 8
-        label_h = 14 if dual else 0
-        edit_h = edit_top - edit_bottom - label_h
+        label_h = geom["label_h"]
+        draft_top = thread_top - thread_h - THREAD_GAP
+        box_top = draft_top - label_h
+        box_y = box_top - DRAFT_BOX_H
 
         if dual:
             gap2 = 10
             box_w = (content_w - gap2) / 2.0
             for slot in (0, 1):
                 box_x = content_x + slot * (box_w + gap2)
-                outline = NSView.alloc().initWithFrame_(NSMakeRect(box_x, edit_bottom, box_w, edit_h))
+                outline = NSView.alloc().initWithFrame_(NSMakeRect(box_x, box_y, box_w, DRAFT_BOX_H))
                 _round_rect(outline)
                 inset = 4
                 escroll, etv = _editable_scroll(
-                    NSMakeRect(inset, inset, box_w - 2 * inset, edit_h - 2 * inset),
+                    NSMakeRect(inset, inset, box_w - 2 * inset, DRAFT_BOX_H - 2 * inset),
                     _compose(drafts_field[slot].get("text")),
                 )
                 etv.setDelegate_(self)
@@ -587,7 +584,7 @@ class _CanvasController(NSObject):
                 row_view.addSubview_(outline)
                 row_view.addSubview_(
                     _label(
-                        NSMakeRect(box_x, edit_bottom + edit_h, box_w, label_h),
+                        NSMakeRect(box_x, box_top, box_w, label_h),
                         "Draft A" if slot == 0 else "Draft B",
                         size=10,
                         muted=True,
@@ -597,11 +594,11 @@ class _CanvasController(NSObject):
                 row["textviews"][slot] = etv
                 row["orig_texts"][slot] = (drafts_field[slot].get("text") or "").strip()
         else:
-            outline = NSView.alloc().initWithFrame_(NSMakeRect(content_x, edit_bottom, content_w, edit_h))
+            outline = NSView.alloc().initWithFrame_(NSMakeRect(content_x, box_y, content_w, DRAFT_BOX_H))
             _round_rect(outline)
             inset = 4
             escroll, etv = _editable_scroll(
-                NSMakeRect(inset, inset, content_w - 2 * inset, edit_h - 2 * inset),
+                NSMakeRect(inset, inset, content_w - 2 * inset, DRAFT_BOX_H - 2 * inset),
                 _compose(d.get("reply_text")),
             )
             etv.setDelegate_(self)
@@ -611,28 +608,11 @@ class _CanvasController(NSObject):
             row["textviews"][0] = etv
             row["orig_texts"][0] = (d.get("reply_text") or "").strip()
 
-        discard_btn = NSButton.alloc().initWithFrame_(NSMakeRect(content_x, 2, 90, 22))
-        discard_btn.setTitle_("Discard")
-        if NSBezelStyleInline is not None:
-            try:
-                discard_btn.setBezelStyle_(NSBezelStyleInline)
-            except Exception:
-                discard_btn.setBezelStyle_(NSBezelStyleRounded)
-        else:
-            discard_btn.setBezelStyle_(NSBezelStyleRounded)
-        try:
-            discard_btn.setHasDestructiveAction_(True)
-        except Exception:
-            pass
-        discard_btn.setFont_(NSFont.systemFontOfSize_(11))
-        discard_btn.setTag_(idx)
-        discard_btn.setTarget_(self)
-        discard_btn.setAction_("rowDiscard:")
-        row_view.addSubview_(discard_btn)
-        row["discard_btn"] = discard_btn
-
+        # No per-row Discard button: redundant with the checkbox + header's
+        # "Discard selected" (check just this row and click that). Only a
+        # post-decision status line remains, non-interactive.
         status_label = _label(
-            NSMakeRect(content_x + 100, 2, content_w - 100, 22), "", size=11, bold=True
+            NSMakeRect(content_x, 2, content_w, 20), "", size=11, bold=True
         )
         status_label.setHidden_(True)
         row_view.addSubview_(status_label)
