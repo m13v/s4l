@@ -2493,7 +2493,17 @@ echo "$PREP_OUTPUT" >> "$LOG_FILE"
 # The old DRAFT_ONLY=1 -> POST_TOP_N=0 special-case was removed on purpose, so the
 # human reviews the exact same one highest-Virality draft the autopilot would post.
 # Override with S4L_TWITTER_POST_TOP_N (default 1; 0 = no cap, env opt-out only).
-POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
+# Sandbox default is 0 (no cap): the top-1 rule above exists so a human
+# reviewer sees exactly what autopilot would post, which is meaningless when
+# nothing is ever posted -- a sandbox test wants every model-approved draft
+# visible for comparison, not just the single highest-virality one. Still
+# overridable with S4L_TWITTER_POST_TOP_N if someone wants the production cap
+# reproduced in sandbox mode too.
+if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-0}"
+else
+    POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
+fi
 
 # --- ROLLING VIRALITY BAR (2026-07-02) --------------------------------------
 # Fetch THIS install's trailing-24h virality percentile so the parse step posts
@@ -2516,10 +2526,21 @@ POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
 # reach-recovery: quality over volume): single source of truth, no env
 # var, no fallback, one path (every install behaves identically regardless of how
 # its plist was generated). Sample floor S4L_TWITTER_VIRALITY_MIN_SAMPLE default 200.
-VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.99" \
-    S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
-    S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
-    python3 -c "
+if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    # The fetch below reads /api/v1/twitter-candidates/virality-threshold under
+    # THIS machine's own identity (http_api.py's X-Installation), so it would
+    # reflect the OPERATOR's trailing-24h candidate pool -- the wrong baseline
+    # entirely when replaying another install's (e.g. Karol's, Nhat's)
+    # candidates. A sandbox test also wants every model-approved draft
+    # visible, not gated to only the top-1 that would clear a live posting
+    # cadence bar which, again, doesn't apply since nothing is ever posted.
+    VIRALITY_THRESHOLD=""
+    log "Virality bar OFF for sandbox mode (would reflect the operator's own pool, not the replayed install's; every model-approved draft stays visible)."
+else
+    VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.99" \
+        S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+        S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
+        python3 -c "
 import os, sys
 _repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
 sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.join(_repo, 'scripts'))
@@ -2536,10 +2557,11 @@ try:
 except BaseException as e:
     sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
 " 2>>"$LOG_FILE" || echo "")
-if [ -n "$VIRALITY_THRESHOLD" ]; then
-    log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
-else
-    log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
+    if [ -n "$VIRALITY_THRESHOLD" ]; then
+        log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
+    else
+        log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
+    fi
 fi
 
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
