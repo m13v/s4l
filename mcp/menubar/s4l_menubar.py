@@ -3463,7 +3463,17 @@ class S4LMenuBar(rumps.App):
                 "draft_auto_selected": bool(dual),
                 "draft_choice": draft_choice,
             }
-            self._on_card_decision(batch, decision)
+            decisions.append(decision)
+        try:
+            st.approve_all_pending(decisions)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] approve all pending failed: {e}\n")
+            sys.stderr.flush()
+            _capture(e, phase="approve_all_pending")
+            self._alert("Approve failed", str(e)[:200])
+            return
+        for decision in decisions:
+            self._on_card_decision(batch, decision, already_stamped=True)
         try:
             _, mod = self._review_mod()
 
