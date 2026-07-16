@@ -69,7 +69,6 @@ import objc
 from Foundation import (
     NSObject,
     NSMakeRect,
-    NSMakeRange,
     NSMakeSize,
     NSAttributedString,
     NSMutableAttributedString,
@@ -332,83 +331,41 @@ def _truncate(s, n=320):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _fit_thread_body(thread_tv, text, link_url, *, font_size=12, step=15, floor=10):
-    """Set the thread-quote text on `thread_tv` ('text… ↗' when link_url is
-    given), shrinking `text` -- never the trailing link -- until the arrow
-    actually lands inside the view's visible box.
-
-    thread_tv is fixed-height and not vertically resizable, with no
-    scrollview around it, so a glyph laid out below its frame is simply
-    never drawn and never clickable. The old fixed `_truncate(text, 200)`
-    assumed ~4 lines always fit 200 characters, which holds most of the
-    time but not when word/URL lengths wrap more per line -- the trailing
-    ↗ link, the card's only way to open the source thread, could then sit
-    past the visible box (2026-07-15 user report: link "sometimes appears
-    outside the visible area", "doesn't fit into the card"). Checking the
-    arrow glyph's own bounding rect (rather than comparing total laid-out
-    height to the box) is what makes this correct whether or not the text
-    container itself turns out to be height-bounded."""
+def _set_thread_text(thread_tv, text, link_url, *, font_size=12):
+    """Set the thread-quote text on `thread_tv`: the FULL text, never
+    trimmed (2026-07-16 user direction -- the box scrolls instead when it
+    doesn't fit; see its NSScrollView wrapper in _render()). A leading
+    '↗ ' link opens the source thread when one is given, placed at the
+    START rather than trailing the text, so it's always visible regardless
+    of how long the thread is or where the box happens to be scrolled to
+    (the old trailing-link placement could end up scrolled out of view, or
+    -- before scrolling existed at all -- get silently truncated off the
+    end; see the superseded _fit_thread_body this replaced)."""
     text = (text or "").strip()
-    box_h = thread_tv.frame().size.height
-    try:
-        inset = thread_tv.textContainerInset()
-        available_h = box_h - 2 * inset.height
-    except Exception:
-        available_h = box_h
-
-    def _attributed(shown_text):
-        b = NSMutableAttributedString.alloc().initWithString_attributes_(
-            shown_text,
+    body = NSMutableAttributedString.alloc().initWithString_attributes_("", {})
+    if link_url:
+        body.appendAttributedString_(
+            NSAttributedString.alloc().initWithString_attributes_(
+                "↗ ",
+                {
+                    NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
+                    # Delegate (textView:clickedOnLink:atIndex:) tracks the
+                    # click as a thread_click interaction, then opens the
+                    # URL itself via NSWorkspace.
+                    NSLinkAttributeName: NSURL.URLWithString_(link_url),
+                },
+            )
+        )
+    body.appendAttributedString_(
+        NSAttributedString.alloc().initWithString_attributes_(
+            text,
             {
                 NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
                 NSForegroundColorAttributeName: NSColor.labelColor(),
             },
         )
-        if link_url:
-            b.appendAttributedString_(
-                NSAttributedString.alloc().initWithString_attributes_(
-                    " ↗",
-                    {
-                        NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
-                        # Delegate (textView:clickedOnLink:atIndex:) tracks the
-                        # click as a thread_click interaction, then opens the
-                        # URL itself via NSWorkspace.
-                        NSLinkAttributeName: NSURL.URLWithString_(link_url),
-                    },
-                )
-            )
-        return b
-
-    length = min(len(text), 200)
-    lm = thread_tv.layoutManager()
-    tc = thread_tv.textContainer()
-    # Bounded loop: each pass is a cheap native layout of at most a couple
-    # hundred characters. The common case (thread fits in ~200 chars)
-    # exits after the first pass; only pathological long-word wrapping
-    # iterates further, and it always terminates at `floor`.
-    for _ in range(20):
-        shown = text[:length].rstrip()
-        if length < len(text):
-            shown += "…"
-        attributed = _attributed(shown)
-        thread_tv.textStorage().setAttributedString_(attributed)
-        if not link_url:
-            return
-        total_len = attributed.length()
-        if total_len == 0:
-            return
-        lm.ensureLayoutForTextContainer_(tc)
-        glyph_range = lm.glyphRangeForTextContainer_(tc)
-        laid_out_all = (glyph_range.location + glyph_range.length) >= total_len
-        fits = False
-        if laid_out_all:
-            last_rect = lm.boundingRectForGlyphRange_inTextContainer_(
-                NSMakeRange(total_len - 1, 1), tc
-            )
-            fits = (last_rect.origin.y + last_rect.size.height) <= available_h
-        if fits or length <= floor:
-            return
-        length = max(floor, length - step)
+    )
+    thread_tv.textStorage().setAttributedString_(body)
 
 
 # Human names for the ISO 639-1 codes the drafting model actually emits, so the
@@ -2339,9 +2296,21 @@ class _ReviewController(NSObject):
             # S4L_SANDBOX_CANDIDATES_FILE short-circuit): approving this would
             # feed a real reply to twitter_post_plan.py against a months-old
             # thread. Block it here, the single choke point _record(True, ...)
-            # always routes through, rather than downstream — Reject is still
-            # the only way to clear a sandbox card.
+            # always routes through, rather than downstream — no real
+            # approved decision is ever recorded for a sandbox draft.
             _log("blocked approve on sandbox draft (not postable)")
+            if self._host_view is not None:
+                # A grid tile has no title bar to show the warning on (the
+                # try/except below silently no-ops when self._panel is None),
+                # which left the tile looking permanently unresponsive with
+                # no explanation (2026-07-16 user report). Reject still
+                # records nothing feedback-worthy for a sandbox draft, but a
+                # blocked approve should behave the same way visually: clear
+                # the tile rather than leave it stuck. _finish() with an
+                # empty self._decisions fires on_complete([]) -- no decision
+                # is recorded, the slot just gets freed and refilled.
+                self._finish()
+                return
             try:
                 self._panel.setTitle_("s4l · SANDBOX draft — not postable, use Reject")
             except Exception:
