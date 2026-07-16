@@ -6382,17 +6382,22 @@ async function main() {
   const ss = setInterval(() => void sendStateSnapshot("interval"), 15 * 60_000);
   ss.unref();
 
-  // One-shot voice-exemplar catch-up for installs onboarded BEFORE the
-  // exemplar feature: if the persona has no voice.examples_scanned_at, rescan
-  // the connected X profile and store the top-performing replies as
-  // voice.examples + the persona_corpus.txt exemplar section. Additive only
-  // (regenerates just its own marked corpus section; respects hand-written
-  // examples) and self-limiting (no cooldown by design: success stamps
-  // examples_scanned_at which makes later boots a no-op, and until then it
-  // WAITS politely on the twitter-browser lock, polling while holding
-  // nothing, until cycles/DM runs free the browser, up to 12h before
-  // deferring to the next boot). Delayed so boot-time work (runtime
-  // provision, kicker install) settles first.
+  // Voice-exemplar catch-up + periodic refresh, checked on every boot
+  // (2026-07-16, extended from the original one-shot-for-legacy-installs
+  // version): rescans the connected X profile and re-stores voice.examples +
+  // the persona_corpus.txt exemplar section whenever
+  // scripts/voice_exemplars.py's _needs_rescan() says so -- never scanned,
+  // scanned by an older SCANNER_VERSION (so a scraper fix like the 2026-07-15
+  // stall-detection bug reaches already-scanned installs on their next boot
+  // instead of silently never re-running), or the last scan is more than
+  // RESCAN_MAX_AGE_DAYS (14) old. Additive only (regenerates just its own
+  // marked corpus section; respects hand-written examples). Each boot is
+  // cheap when nothing needs it (stamped examples_scanned_at +
+  // examples_scanner_version make it a no-op until either goes stale), and
+  // when something DOES need it, it WAITS politely on the twitter-browser
+  // lock, polling while holding nothing, until cycles/DM runs free the
+  // browser, up to 12h before deferring to the next boot. Delayed so
+  // boot-time work (runtime provision, kicker install) settles first.
   const backfill = setTimeout(() => {
     if (isPaused()) return;
     // timeout covers the 12h lock wait plus generous room for the scan itself
