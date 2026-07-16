@@ -2504,7 +2504,7 @@ def _draft_iteration(plan, config, reddit_username):
 
     print(f"[post_reddit] Starting draft session for {len(candidates)} thread(s)...")
     start = time.time()
-    ok, output, usage = run_claude_structured(prompt, timeout=1200)
+    ok, output, usage = run_claude_structured(prompt, timeout=1800)
     elapsed = time.time() - start
     print(f"[post_reddit] Draft finished in {elapsed:.0f}s (${usage['cost_usd']:.4f})")
 
