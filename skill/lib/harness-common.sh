@@ -2,6 +2,15 @@
 # harness-common.sh - the shared engine behind every per-platform browser
 # backend (twitter-backend.sh, reddit-backend.sh, linkedin-backend.sh).
 #
+# LOCAL OVERRIDES: ~/.social-autoposter-mcp/harness-local.env is sourced (when
+# present) before any launch decision. It is machine-local (never shipped),
+# for per-box experiments without a release: e.g. pointing one operator box's
+# harness at Chrome Beta (BH_CHROME_BIN=...) or adding launch flags
+# (HC_EXTRA_FLAGS="--no-startup-window") while every other install keeps
+# stock behavior. Values here are plain shell assignments; keep it tiny.
+# shellcheck disable=SC1090
+[ -f "$HOME/.social-autoposter-mcp/harness-local.env" ] && . "$HOME/.social-autoposter-mcp/harness-local.env" 2>/dev/null || true
+#
 # Born 2026-07-14 from the three near-duplicate backends. Every hard-won fix
 # used to land in ONE backend and drift: the CDP wedge detector, the two-strike
 # tolerance, the focus-safe launcher, the occlusion flags, and the repo-relative
