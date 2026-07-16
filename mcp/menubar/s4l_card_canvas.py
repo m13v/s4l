@@ -22,25 +22,42 @@ scoring is invented for platforms that don't have one.
 
 Two-draft threads (candidate["drafts"], Draft A / Draft B) render as two
 side-by-side editable boxes in the same row (the wider canvas has room,
-unlike the corner card's stacked layout, per 2026-07-15 product direction);
-whichever box the reviewer's caret is in is the "armed" draft for that row,
-via the exact same textViewDidChangeSelection_ convention the corner card
-uses (see s4l_card.py's _update_draft_borders), just duplicated per-row.
+unlike the corner card's stacked layout, per 2026-07-15 product direction).
+Neither box is visually pre-selected: the bold "armed" border only appears
+once the reviewer actually clicks into one (row["touched"]), so nothing on
+a fresh row looks pre-chosen before the reviewer decides anything
+(2026-07-16 user report -- the row's checkbox, the actual post/skip
+decision, already starts unchecked, but the bold border on Draft A read as
+"already chosen" regardless). Clicking into a box is the exact same
+textViewDidChangeSelection_ convention the corner card uses (see
+s4l_card.py's _update_draft_borders), just duplicated per-row and gated on
+first touch; armed_slot still defaults to 0 (Draft A) internally as the
+fallback if a row is approved via its checkbox without ever touching either
+box, matching the corner card.
+
+Each row's thread quote shows the FULL text, never truncated with an
+ellipsis -- sized to its own measured height up to a cap, scrolling in
+place beyond that (2026-07-16 user report: the old fixed-height box cut
+threads off with no way to read the rest short of opening the external
+link). The row's eye icon opens the same popover content the corner card's
+eye icons show (engagement stats + drafting details, combined into one
+icon/popover per row instead of the corner card's two).
 
 Decided rows (approved/discarded) stay visible but frozen -- disabled
 controls, dimmed, a status line -- rather than being removed and the rest
 reflowed: correctness and a stable scroll position matter more here than
-tidying the list.
+tidying the list. There is no per-row Discard button (2026-07-16 user
+report: redundant with the checkbox + header's "Discard selected" -- check
+just the one row and click that to discard a single thread).
 
 Deliberately NOT reimplemented here (present on the corner card, cut for
-this surface's first pass, none of them decision-contract changes so any
+this surface's first pass, neither a decision-contract change so either
 can land later): per-second live expiry countdowns (age/expiry is a static
-label computed at render/extend time), hover-dwell telemetry on two-draft
-boxes (draft_choice ships with hover_*_ms=0 and visited_other=False), the
-stats/details hover popovers (folded into a single tooltip), and the
-categorized reject-reason picker (discard here always ships
-reject_category=None, same as the corner card's own "Reject commits with
-no category" fallback path).
+label computed at render/extend time), and hover-dwell telemetry on
+two-draft boxes (draft_choice ships with hover_*_ms=0 and
+visited_other=False). The categorized reject-reason picker has no per-row
+entry point either -- discard here always ships reject_category=None, same
+as the corner card's own "Reject commits with no category" fallback path.
 
 Must be driven on the main thread (mirrors s4l_card.py).
 """
@@ -50,16 +67,37 @@ import re
 import time
 
 import objc
-from Foundation import NSObject, NSMakeRect, NSMakeSize, NSURL
+from Foundation import (
+    NSObject,
+    NSMakeRect,
+    NSMakeSize,
+    NSURL,
+    NSAttributedString,
+    NSMutableAttributedString,
+    NSNotificationCenter,
+)
 from AppKit import (
     NSApp,
     NSButton,
     NSFont,
+    NSImage,
     NSScrollView,
     NSTextView,
     NSView,
     NSColor,
     NSWorkspace,
+    NSPopover,
+    NSPopoverBehaviorApplicationDefined,
+    NSViewController,
+    NSTrackingArea,
+    NSTrackingMouseEnteredAndExited,
+    NSTrackingActiveAlways,
+    NSTextStorage,
+    NSLayoutManager,
+    NSTextContainer,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSLinkAttributeName,
     NSWindowOcclusionStateVisible,
     NSBackingStoreBuffered,
     NSFloatingWindowLevel,
@@ -78,10 +116,6 @@ except Exception:
         from AppKit import NSSwitchButton as NSButtonTypeSwitch
     except Exception:
         NSButtonTypeSwitch = 3  # raw NSSwitchButton value, pre-10.12 AppKit
-try:
-    from AppKit import NSBezelStyleInline
-except Exception:
-    NSBezelStyleInline = None
 
 # Reuse the corner card's panel class (Cmd+V/C/X/A/Z routing for a status-bar
 # app with no Edit menu) and its styling/rendering helpers instead of
@@ -96,7 +130,6 @@ from s4l_card import (
     _frosted,
     _fill_color,
     _solid,
-    _fit_thread_body,
     _engagement_line,
     _details_lines,
     _reply_heading_suffix,
@@ -114,15 +147,89 @@ from s4l_card import (
 # already enforce that), but each module owns its own reference regardless.
 _active = None
 
-WIN_MARGIN = 20
-HEADER_H = 46
-ROW_H = 258
-ROW_GAP = 16
-ROW_PAD = 14
+WIN_MARGIN = 20.0
+HEADER_H = 46.0
+ROW_GAP = 16.0
+ROW_PAD = 14.0
+ROW_RM = 14.0          # inner row margin (left/right)
+CHECKBOX_COL_W = 28.0  # space reserved for the row checkbox before content starts
+TOP_CHROME_H = 34.0    # checkbox/heading/age/eye row, reserved above the thread box
+THREAD_GAP = 10.0      # gap between the thread quote and the draft box(es) below it
+MIN_THREAD_H = 24.0
+MAX_THREAD_H = 150.0   # thread text is never truncated; beyond this it scrolls in place
+DRAFT_LABEL_H = 14.0
+DRAFT_BOX_H = 130.0
+BOTTOM_MARGIN = 14.0   # room for the post-decision status line
 
 
 def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _content_w_for(doc_w):
+    """Usable row width after the left checkbox column and both margins --
+    the single formula _build_rows/extend_drafts (pre-pass sizing) and
+    _add_row (actual construction) both call, so they can never drift."""
+    return doc_w - ROW_RM - CHECKBOX_COL_W - ROW_RM
+
+
+def _measure_text_height(text, width, font_size=12.0):
+    """Wrapped height a block of text needs at `width`, via a standalone
+    TextKit stack (no view attachment needed). Used to size each row's
+    thread-quote box to its ACTUAL content instead of a fixed height +
+    ellipsis truncation."""
+    text = (text or "").strip()
+    if not text or width <= 0:
+        return 0.0
+    storage = NSTextStorage.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: NSFont.systemFontOfSize_(font_size)}
+    )
+    lm = NSLayoutManager.alloc().init()
+    storage.addLayoutManager_(lm)
+    tc = NSTextContainer.alloc().initWithContainerSize_(NSMakeSize(width, 1.0e7))
+    tc.setLineFragmentPadding_(0.0)
+    lm.addTextContainer_(tc)
+    lm.glyphRangeForTextContainer_(tc)  # force layout
+    return float(lm.usedRectForTextContainer_(tc).size.height)
+
+
+def _set_thread_text(tv, text, link_url, font_size=12.0):
+    """Full thread text, never truncated (see _measure_text_height's
+    docstring) -- a trailing ' ↗' opens the source thread when clicked, same
+    glyph/behavior as the corner card's thread quote."""
+    text = (text or "").strip()
+    body = NSMutableAttributedString.alloc().initWithString_attributes_(
+        text,
+        {
+            NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
+            NSForegroundColorAttributeName: NSColor.labelColor(),
+        },
+    )
+    if link_url:
+        body.appendAttributedString_(
+            NSAttributedString.alloc().initWithString_attributes_(
+                " ↗",
+                {
+                    NSFontAttributeName: NSFont.systemFontOfSize_(font_size),
+                    NSLinkAttributeName: NSURL.URLWithString_(link_url),
+                },
+            )
+        )
+    tv.textStorage().setAttributedString_(body)
+
+
+def _row_geometry(d, content_w):
+    """Every vertical measurement for one row, computed ONCE and shared by
+    the pre-pass sizing (_build_rows/extend_drafts) and the actual row
+    construction (_add_row) so the two can never drift apart."""
+    text = (d.get("thread_text_en") or d.get("thread_text") or "").strip()
+    measured = _measure_text_height(text, max(10.0, content_w - 8.0), font_size=12.0)
+    thread_h = min(MAX_THREAD_H, max(MIN_THREAD_H, measured + 10.0))
+    drafts_field = d.get("drafts")
+    dual = isinstance(drafts_field, list) and len(drafts_field) == 2
+    label_h = DRAFT_LABEL_H if dual else 0.0
+    row_h = TOP_CHROME_H + thread_h + THREAD_GAP + label_h + DRAFT_BOX_H + BOTTOM_MARGIN
+    return {"thread_h": thread_h, "dual": dual, "label_h": label_h, "row_h": row_h}
 
 
 def _sort_key(d):
@@ -174,10 +281,12 @@ class _CanvasController(NSObject):
         self._panel = None
         self._scroll = None
         self._doc = None
+        self._doc_bottom = 0.0  # next free y for extend_drafts' new rows
         self._select_all_btn = None
         self._count_label = None
         self._approve_btn = None
         self._discard_btn = None
+        self._stats_popover = None  # one shared popover, any row's eye icon
         self._presented_at = time.time()
         self._last_decision_at = None
         self._last_interaction_at = None
@@ -285,6 +394,14 @@ class _CanvasController(NSObject):
         scroll.setDrawsBackground_(False)
         content.addSubview_(scroll)
         self._scroll = scroll
+        # A row's eye popover anchors to that row's own button; once the list
+        # scrolls, that anchor may no longer be under (or even near) the
+        # popover -- close it rather than leave it floating disconnected.
+        clip = scroll.contentView()
+        clip.setPostsBoundsChangedNotifications_(True)
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "scrollDidChange:", "NSViewBoundsDidChangeNotification", clip
+        )
 
         self._rows = []
         self._build_rows(scroll)
@@ -294,15 +411,25 @@ class _CanvasController(NSObject):
 
     @objc.python_method
     def _build_rows(self, scroll):
+        # Two-pass layout: row heights vary with each thread's actual text
+        # (see _row_geometry), so every row's height is measured FIRST, then
+        # rows are stacked using running cumulative offsets -- a fixed
+        # per-row height would either clip long threads or leave dead space
+        # under short ones (2026-07-16 user report).
         cs = scroll.contentSize()
         doc_w = cs.width
-        n = len(self._sorted)
-        doc_h = max(cs.height, ROW_PAD + n * (ROW_H + ROW_GAP))
+        content_w = _content_w_for(doc_w)
+        geoms = [_row_geometry(d, content_w) for d in self._sorted]
+        total_h = ROW_PAD + sum(g["row_h"] + ROW_GAP for g in geoms)
+        doc_h = max(cs.height, total_h)
         doc = _FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, doc_w, doc_h))
         self._doc = doc
+        y = ROW_PAD
         for i, d in enumerate(self._sorted):
-            row_y = ROW_PAD + i * (ROW_H + ROW_GAP)
-            self._add_row(doc, d, i, NSMakeRect(0, row_y, doc_w, ROW_H))
+            g = geoms[i]
+            self._add_row(doc, d, i, NSMakeRect(0, y, doc_w, g["row_h"]), g)
+            y += g["row_h"] + ROW_GAP
+        self._doc_bottom = y
         scroll.setDocumentView_(doc)
 
     @objc.python_method
