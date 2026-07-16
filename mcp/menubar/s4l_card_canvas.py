@@ -301,12 +301,7 @@ class _CanvasController(NSObject):
             size=12,
             muted=True,
         )
-        try:
-            from AppKit import NSTextAlignmentCenter
-
-            lbl.setAlignment_(NSTextAlignmentCenter)
-        except Exception:
-            pass
+        lbl.setAlignment_(NSTextAlignmentCenter)
         view.addSubview_(lbl)
 
     @objc.python_method
