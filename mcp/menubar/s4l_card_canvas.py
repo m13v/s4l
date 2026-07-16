@@ -1,51 +1,56 @@
 """Large centered grid of review cards (AppKit / pyobjc).
 
-`present_review_canvas(drafts, on_decision, on_complete, focus)` is the
-canvas counterpart to `s4l_card.present_review`: same `drafts` input shape
-(see s4l_state.review_drafts), same decision-dict contract fired via
+`present_review_canvas(drafts, on_decision, on_complete, focus)` is the canvas
+counterpart to `s4l_card.present_review`: same `drafts` input shape (see
+s4l_state.review_drafts), same decision-dict contract fired via
 on_decision/on_complete -- the menu bar's existing wiring
 (_on_card_decision / _on_review_closed) drives either surface unchanged.
 
 Where the corner card walks the backlog one draft at a time, this shows
-SEVERAL drafts at once in a large centered window, arranged as a grid of
-tiles. The only real difference from the corner card is that difference --
-"several at once instead of one at a time" -- so each tile IS a real
-s4l_card._ReviewController, mounted into a fixed-size grid slot via its
+EVERY pending draft at once in a large centered window, arranged as a grid
+of tiles, ranked highest-first, scrolling when there are more than fit on
+screen. The only real difference from the corner card is that difference --
+"all at once instead of one at a time" -- so each tile IS a real
+s4l_card._ReviewController, mounted into a grid slot via its
 host_view/host_window init variant instead of its own floating panel (see
 that class's initWithDrafts_onDecision_onComplete_focus_hostView_hostWindow_
 and the _mount_content/_seat_first_responder split it uses internally).
 Approve, the loved-emoji row, the full two-step reject-reason picker, the
 eye/stats/details popovers, draft A/B click-to-arm, translations, the live
 expiry countdown -- all of it is the EXACT same code the corner card runs,
-not a re-derived approximation. This module owns only the grid/backlog
-bookkeeping around that: which draft sits in which slot, and refilling a
-slot from the backlog the instant its tile is decided (2026-07-16 product
-direction: "the only difference is we show multiple cards at the same
-time... maybe the cards should even be the same format").
+not a re-derived approximation. This module owns only the grid bookkeeping
+around that: `self._order` is every currently-known pending draft, ranked,
+1:1 with `self._slots`.
+
+When a tile is decided, it's popped from self._order and every slot AFTER
+it is rebuilt one position earlier -- cards shift into the gap in rank
+order like Snake, rather than each slot independently refilling in place
+(2026-07-16 product direction). The grid shrinks by one slot each time (no
+artificial capacity to backfill); extend_drafts grows it by appending new
+slots at the end. There is no separate "backlog" -- everything the canvas
+knows about is always laid out in the grid; the scroll view (always
+present) handles whatever doesn't fit the window.
 
 Each tile is single-draft (drafts=[one]), so a tile's own on_complete fires
-immediately after its on_decision -- that firing IS the "this slot is free,
-put the next backlog draft here" signal (_fill_slot). A tile's on_decision
-forwards to this controller's own on_decision (so posting starts right
-away, same as the corner card) and appends to the running self._decisions
-list; the OUTER on_complete (this module's own contract with the menu bar)
-fires once, when the whole canvas window closes, carrying every decision
-made across every tile shown during the session -- never confused with a
-single tile's internal completion.
+immediately after its on_decision -- that firing IS the "remove this one
+and reflow" signal. A tile's on_decision forwards to this controller's own
+on_decision (so posting starts right away, same as the corner card) and
+appends to the running self._decisions list; the OUTER on_complete (this
+module's own contract with the menu bar) fires once, when the whole canvas
+window closes, carrying every decision made across every tile shown during
+the session -- never confused with a single tile's internal completion.
 
-No checkboxes, no "Select all", no bulk Approve/Discard buttons (all
-present in an earlier custom-rendered version of this file; removed
-2026-07-16 per product direction -- selection now happens by acting on a
-specific tile directly, exactly like the corner card, and only one draft
-per thread can ever be armed since each tile owns exactly one thread).
-The header shows "Showing N of Total pending" (visible tiles vs. visible +
-backlog) instead of a selection count.
+No checkboxes, no "Select all" (selection happens by acting on a specific
+tile directly, exactly like the corner card, and only one draft per thread
+can ever be armed since each tile owns exactly one thread). Approve All /
+Discard All live as two buttons inline in the header row, next to the
+pending count -- not their own dedicated card, not a bulk-select flow.
 
-The backlog is sorted by stats.virality_score descending when a candidate
-has one (Twitter only, today, per score_twitter_candidates.py); candidates
-without a score sort as -1 and keep review_drafts()'s existing newest-first
-order among themselves (Python's stable sort) at the bottom of the queue --
-no new scoring is invented for platforms that don't have one.
+Rows are ranked by stats.virality_score descending when a candidate has one
+(Twitter only, today, per score_twitter_candidates.py); candidates without a
+score sort as -1 and keep review_drafts()'s existing newest-first order
+among themselves (Python's stable sort) at the bottom of the list -- no new
+scoring is invented for platforms that don't have one.
 
 Must be driven on the main thread (mirrors s4l_card.py).
 """
@@ -67,7 +72,6 @@ from AppKit import (
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskUtilityWindow,
-    NSTextAlignmentCenter,
     NSBezelStyleRounded,
 )
 
@@ -97,10 +101,10 @@ from s4l_card import (
 # already enforce that), but each module owns its own reference regardless.
 _active = None
 
-# Bulk-action hooks for the control card's two buttons, same registration
-# pattern as s4l_card.py's set_discard_all_handler. The menu bar registers
-# BOTH modules' set_discard_all_handler with the SAME _discard_all_pending
-# (it's already surface-agnostic -- reads the store, not the card UI) before
+# Bulk-action hooks for the header's two buttons, same registration pattern
+# as s4l_card.py's set_discard_all_handler. The menu bar registers BOTH
+# modules' set_discard_all_handler with the SAME _discard_all_pending (it's
+# already surface-agnostic -- reads the store, not the card UI) before
 # presenting either surface; set_approve_all_handler has no corner-card
 # equivalent to mirror since "approve everything with no review" only makes
 # sense once several drafts are visible at once. A canvas built while either
@@ -171,12 +175,18 @@ class _CanvasController(NSObject):
         self = objc.super(_CanvasController, self).init()
         if self is None:
             return None
-        self._backlog = sorted(list(drafts), key=_sort_key, reverse=True)
+        # Every currently-known pending draft, ranked, 1:1 with self._slots.
+        # No separate "backlog" -- everything the canvas knows about is
+        # always laid out in the grid (2026-07-16 product direction); the
+        # scroll view handles whatever doesn't fit the window.
+        self._order = sorted(list(drafts), key=_sort_key, reverse=True)
         self._on_decision = on_decision
         self._on_complete = on_complete
         self._focus = bool(focus)
         self._decisions = []  # every decision from every tile, whole session
         self._slots = []  # [{"view": NSView, "tile": _ReviewController|None, "n": int|None}]
+        self._cols = GRID_COLS
+        self._doc_w = 0.0
         self._panel = None
         self._scroll = None
         self._doc = None
@@ -239,12 +249,11 @@ class _CanvasController(NSObject):
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
 
         header_y = h - HEADER_H
-        # Bulk actions live INLINE with the "Showing N of Total pending"
-        # count, not their own dedicated card -- a whole grid slot spent on
-        # a heading + description paragraph + two big buttons was more than
-        # this needs (2026-07-16 user direction: "just two buttons ... that's
-        # it"). Buttons on the right, count label filling the space to their
-        # left.
+        # Bulk actions live INLINE with the pending count, not their own
+        # dedicated card -- a whole grid slot spent on a heading +
+        # description paragraph + two big buttons was more than this needs
+        # (2026-07-16 user direction: "just two buttons ... that's it").
+        # Buttons on the right, count label filling the space to their left.
         btn_w, btn_h, btn_gap = 110.0, 26.0, 8.0
         btn_y = header_y + (HEADER_H - btn_h) / 2.0
         approve_x = w - WIN_MARGIN - btn_w
@@ -295,103 +304,113 @@ class _CanvasController(NSObject):
         self._panel.setContentView_(_frosted(content))
         self._refresh_header()
 
+    # ---- grid layout ---------------------------------------------------------
+    # One slot per entry in self._order, always (no spare capacity, no hidden
+    # placeholders). _slot_frame/_resize_doc compute geometry from whatever
+    # self._cols/len(self._slots) currently are; _add_slot/_drop_last_slot
+    # grow/shrink the slot list; _reflow_from rebuilds tile CONTENT (not
+    # positions) starting at a given index after the ranking shifts.
+
     @objc.python_method
     def _build_grid(self, scroll):
         cs = scroll.contentSize()
-        doc_w = cs.width
-        # As many columns as fit, up to GRID_COLS; as many rows as fit the
-        # visible height (a small screen just gets fewer slots, not smaller
-        # tiles -- tiles stay the corner card's own fixed W x H so nothing
-        # about the reused rendering code has to change).
-        cols = max(1, min(GRID_COLS, int((doc_w + GRID_GAP) // (TILE_W + GRID_GAP))))
-        rows = max(1, int((cs.height - 2 * GRID_PAD + GRID_GAP) // (TILE_H + GRID_GAP)))
-        grid_w = cols * TILE_W + (cols - 1) * GRID_GAP
-        left_pad = max(0.0, (doc_w - grid_w) / 2.0)
-        doc_h = max(cs.height, rows * TILE_H + (rows - 1) * GRID_GAP + 2 * GRID_PAD)
-        doc = _FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, doc_w, doc_h))
+        self._doc_w = cs.width
+        # As many columns as fit, up to GRID_COLS -- a small screen just
+        # gets fewer columns, not smaller tiles (tiles stay the corner
+        # card's own fixed W x H so nothing about the reused rendering code
+        # has to change). Rows are NOT capped to what fits in the visible
+        # height: every pending draft gets a slot, and the doc grows taller
+        # than the window as needed -- the scroll view (already present)
+        # handles the rest (2026-07-16 user direction: "if not all cards are
+        # visible in the window, we need a scroll bar").
+        self._cols = max(1, min(GRID_COLS, int((self._doc_w + GRID_GAP) // (TILE_W + GRID_GAP))))
+        doc = _FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, self._doc_w, cs.height))
         self._doc = doc
-
         self._slots = []
-        for i in range(cols * rows):
-            r, c = divmod(i, cols)
-            x = left_pad + c * (TILE_W + GRID_GAP)
-            y = GRID_PAD + r * (TILE_H + GRID_GAP)
-            slot_view = NSView.alloc().initWithFrame_(NSMakeRect(x, y, TILE_W, TILE_H))
-            # Outline every slot -- a tile mounted here has no window of its
-            # own anymore (it's a subview, not a floating panel), so the
-            # visual card separation the corner card got for free from being
-            # its own OS window has to be drawn explicitly here instead
-            # (2026-07-16 user report: "no outline around each card").
-            _round_rect(slot_view)
-            try:
-                slot_view.layer().setBackgroundColor_(_fill_color().CGColor())
-            except Exception:
-                pass
-            doc.addSubview_(slot_view)
-            self._slots.append({"view": slot_view, "tile": None, "n": None, "activated": False})
-
         scroll.setDocumentView_(doc)
-
-        for i in range(len(self._slots)):
-            self._fill_slot(i)
+        for _ in self._order:
+            self._add_slot()
+        self._reflow_from(0)
+        self._resize_doc()
         self._refresh_header()
 
-    # ---- backlog / slot management ------------------------------------------
+    @objc.python_method
+    def _slot_frame(self, i):
+        grid_w = self._cols * TILE_W + (self._cols - 1) * GRID_GAP
+        left_pad = max(0.0, (self._doc_w - grid_w) / 2.0)
+        r, c = divmod(i, self._cols)
+        x = left_pad + c * (TILE_W + GRID_GAP)
+        y = GRID_PAD + r * (TILE_H + GRID_GAP)
+        return NSMakeRect(x, y, TILE_W, TILE_H)
 
     @objc.python_method
-    def _fill_slot(self, slot_idx):
-        """Mount the next backlog draft into this slot. A slot that never
-        had a draft (the grid has more capacity than there is work right
-        now) stays HIDDEN rather than showing an empty placeholder --
-        pre-seeding a wall of "No more drafts" tiles for a small backlog
-        looked broken (2026-07-16 user report: "the other cards didn't move
-        into their place, it shows No more drafts in each tile"). A slot
-        that WAS showing a draft and just ran the backlog dry DOES get the
-        placeholder -- that's a real, useful signal ("you're caught up
-        here"), not a startup artifact. Called at build time for every
-        non-control slot, and again for one slot the instant its tile is
-        decided (a tile's on_complete IS that signal, see
-        s4l_card._ReviewController -- single-draft, so its own on_complete
-        fires right after its on_decision)."""
-        slot = self._slots[slot_idx]
-        for sv in list(slot["view"].subviews()):
-            sv.removeFromSuperview()
-        if not self._backlog:
-            slot["tile"] = None
-            slot["n"] = None
-            if slot["activated"]:
-                slot["view"].setHidden_(False)
-                self._show_empty_slot(slot["view"])
-            else:
-                slot["view"].setHidden_(True)
-            self._refresh_header()
+    def _add_slot(self):
+        i = len(self._slots)
+        slot_view = NSView.alloc().initWithFrame_(self._slot_frame(i))
+        # Outline every slot -- a tile mounted here has no window of its own
+        # anymore (it's a subview, not a floating panel), so the visual card
+        # separation the corner card got for free from being its own OS
+        # window has to be drawn explicitly here instead (2026-07-16 user
+        # report: "no outline around each card").
+        _round_rect(slot_view)
+        try:
+            slot_view.layer().setBackgroundColor_(_fill_color().CGColor())
+        except Exception:
+            pass
+        self._doc.addSubview_(slot_view)
+        self._slots.append({"view": slot_view, "tile": None, "n": None})
+
+    @objc.python_method
+    def _resize_doc(self):
+        rows = max(1, -(-len(self._slots) // self._cols)) if self._slots else 1
+        needed_h = rows * TILE_H + (rows - 1) * GRID_GAP + 2 * GRID_PAD
+        cs = self._scroll.contentSize()
+        doc_h = max(cs.height, needed_h)
+        self._doc.setFrameSize_(NSMakeSize(self._doc_w, doc_h))
+
+    @objc.python_method
+    def _reflow_from(self, start_idx):
+        """Rebuild every slot's CONTENT from start_idx onward from the
+        current self._order -- slot POSITIONS never move, only which draft
+        occupies each one. Used after a decision removes one entry so
+        everything after it shifts into the vacated grid position ("snake"
+        reflow, 2026-07-16 user direction) instead of independently
+        refilling in place. In-progress edits on any rebuilt tile are lost
+        -- ranking order takes priority over preserving an edit on a card
+        the reviewer hadn't yet acted on."""
+        for i in range(start_idx, len(self._slots)):
+            slot = self._slots[i]
+            for sv in list(slot["view"].subviews()):
+                sv.removeFromSuperview()
+            d = self._order[i]
+            tile = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_focus_hostView_hostWindow_(
+                [d],
+                self._tile_decision_cb(i),
+                self._tile_complete_cb(i),
+                True,
+                slot["view"],
+                self._panel,
+            )
+            slot["tile"] = tile
+            slot["n"] = d.get("n")
+
+    @objc.python_method
+    def _remove_and_reflow(self, n):
+        """Pop draft `n` out of self._order, drop one slot (the grid is one
+        shorter -- no spare capacity to backfill), and reflow every slot
+        from its old position onward so subsequent cards shift up into the
+        gap in rank order."""
+        try:
+            idx = next(i for i, d in enumerate(self._order) if d.get("n") == n)
+        except StopIteration:
             return
-        d = self._backlog.pop(0)
-        slot["activated"] = True
-        slot["view"].setHidden_(False)
-        tile = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_focus_hostView_hostWindow_(
-            [d],
-            self._tile_decision_cb(slot_idx),
-            self._tile_complete_cb(slot_idx),
-            True,
-            slot["view"],
-            self._panel,
-        )
-        slot["tile"] = tile
-        slot["n"] = d.get("n")
+        self._order.pop(idx)
+        if self._slots:
+            last = self._slots.pop()
+            last["view"].removeFromSuperview()
+        self._reflow_from(idx)
+        self._resize_doc()
         self._refresh_header()
-
-    @objc.python_method
-    def _show_empty_slot(self, view):
-        w, h = view.frame().size.width, view.frame().size.height
-        lbl = _label(
-            NSMakeRect(0, h / 2.0 - 10, w, 20),
-            "No more drafts",
-            size=12,
-            muted=True,
-        )
-        lbl.setAlignment_(NSTextAlignmentCenter)
-        view.addSubview_(lbl)
 
     # Approve All / Discard All buttons live in the header row (see
     # _render()), not a dedicated card -- these two actions just target the
@@ -432,27 +451,25 @@ class _CanvasController(NSObject):
     @objc.python_method
     def _tile_complete_cb(self, slot_idx):
         def _cb(_tile_decisions):
-            # The tile's own single-draft stack finished -- free the slot
-            # and immediately pull in the next backlog draft, exactly per
-            # 2026-07-16 product direction ("it gets taken away from the
-            # window, and other cards move into its place").
-            self._fill_slot(slot_idx)
+            # The tile's own single-draft stack finished -- remove it from
+            # the ranking and let everything after it shift up ("snake"
+            # reflow; see _remove_and_reflow). slot_idx is read lazily at
+            # call time (not captured as a fixed n) because a still-live
+            # tile ahead of it could have already shifted this slot's
+            # content since the closure was created.
+            slot = self._slots[slot_idx] if slot_idx < len(self._slots) else None
+            n = slot["n"] if slot else None
+            if n is not None:
+                self._remove_and_reflow(n)
 
         return _cb
 
     @objc.python_method
-    def _known_ns(self):
-        known = {dec.get("n") for dec in self._decisions}
-        known.update(d.get("n") for d in self._backlog)
-        known.update(s["n"] for s in self._slots if s["n"] is not None)
-        return known
-
-    @objc.python_method
     def _refresh_header(self):
-        showing = sum(1 for s in self._slots if s["tile"] is not None)
-        total = showing + len(self._backlog)
+        total = len(self._order)
         try:
-            self._count_label.setStringValue_(f"Showing {showing} of {total} pending")
+            plural = "s" if total != 1 else ""
+            self._count_label.setStringValue_(f"{total} pending draft{plural}")
         except Exception:
             pass
         try:
@@ -464,41 +481,45 @@ class _CanvasController(NSObject):
 
     @objc.python_method
     def extend_drafts(self, drafts):
-        """Append newly-queued drafts to the backlog, refilling any empty
-        slots immediately (the backlog was exhausted, now it isn't; a
-        never-yet-activated slot un-hides the same way, see _fill_slot).
-        Existing slots/tiles are never touched -- an in-progress edit on
-        screen is never disturbed, mirroring the corner card's own
-        extend_drafts."""
+        """Append newly-queued drafts to the end of the ranking, growing the
+        grid by one slot each -- existing slots/tiles are never touched, so
+        an in-progress edit on screen is never disturbed, mirroring the
+        corner card's own extend_drafts."""
         if self._panel is None:
             return 0
-        have = self._known_ns()
+        have = {d.get("n") for d in self._order}
+        have.update(dec.get("n") for dec in self._decisions)
         added = [d for d in drafts if d.get("n") not in have]
         if not added:
             return 0
         added.sort(key=_sort_key, reverse=True)
-        self._backlog.extend(added)
-        for i, slot in enumerate(self._slots):
-            if slot["tile"] is None and self._backlog:
-                self._fill_slot(i)
+        start_idx = len(self._order)
+        self._order.extend(added)
+        for _ in added:
+            self._add_slot()
+        self._reflow_from(start_idx)
+        self._resize_doc()
         self._refresh_header()
         self._log_surface("extended")
         return len(added)
 
     @objc.python_method
     def prune_drafts(self, ns):
-        """Drop not-yet-shown drafts whose plan index `n` is in `ns` (a
-        candidate that expired backend-side mid-review) from the backlog
-        only -- never a currently-visible tile, mirroring the corner card's
-        own prune_drafts ("never touches the card currently on screen")."""
+        """Drop drafts whose plan index `n` is in `ns` (a candidate that
+        expired backend-side mid-review) and reflow the rest into place.
+        Every draft the canvas knows about has a live tile in this design
+        (no hidden backlog), so unlike the corner card's own prune_drafts
+        this DOES tear down a visible tile when it's the pruned one -- the
+        candidate is gone server-side either way; leaving a stale,
+        still-editable tile on screen would be worse."""
         if self._panel is None or not ns:
             return 0
         ns = set(ns)
-        before = len(self._backlog)
-        self._backlog = [d for d in self._backlog if d.get("n") not in ns]
-        removed = before - len(self._backlog)
+        removed = 0
+        for n in [d.get("n") for d in list(self._order) if d.get("n") in ns]:
+            self._remove_and_reflow(n)
+            removed += 1
         if removed:
-            self._refresh_header()
             self._log_surface("pruned")
         return removed
 
@@ -526,8 +547,7 @@ class _CanvasController(NSObject):
                 screen_name = str(scr.localizedName())
         except Exception:
             pass
-        showing = sum(1 for s in self._slots if s["tile"] is not None)
-        pending = showing + len(self._backlog)
+        pending = len(self._order)
         return {
             "open": self._panel is not None,
             "total": pending,
@@ -562,10 +582,9 @@ class _CanvasController(NSObject):
         self._log_surface("occlusion_changed")
 
     def windowShouldClose_(self, sender):
-        # Closing leaves undecided (still-showing or backlog) drafts
-        # pending; the menu bar treats this exactly like an unfinished
-        # corner-card stack (snooze, re-present later), same as the corner
-        # card's own windowShouldClose_.
+        # Closing leaves undecided drafts pending; the menu bar treats this
+        # exactly like an unfinished corner-card stack (snooze, re-present
+        # later), same as the corner card's own windowShouldClose_.
         self._finish()
         return True
 
