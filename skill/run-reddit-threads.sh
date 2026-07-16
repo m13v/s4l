@@ -256,8 +256,22 @@ export CLAUDE_SESSION_ID=$(uuidgen | tr 'A-Z' 'a-z')
 log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
-if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
-    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+if [ "$_ensure_rc" = "78" ]; then
+    # Reserved skip code (harness-common.sh:182-185): the pre-launch hook
+    # deliberately deferred because a poster is mid-drain on the ONE shared
+    # tab. This is NOT a bootstrap failure — falling back to the legacy
+    # ensure_browser_healthy here (as this used to, treating ANY nonzero rc
+    # as broken) is wrong on two counts: it misreports a clean defer as a
+    # warning, and ensure_browser_healthy checks the pre-harness
+    # browser-profiles/reddit path (dead since the 2026-05-29 migration), so
+    # it is pure wasted work every time cycles overlap around an active post
+    # (routine, see the "double-fork wrapper" note in run-reddit-search.sh).
+    log "reddit-harness bootstrap deferred (rc=78, poster active elsewhere); skipping this run so the poster keeps the tab."
+    exit 0
+elif [ "$_ensure_rc" != "0" ]; then
+    log "WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 
