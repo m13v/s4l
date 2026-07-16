@@ -118,6 +118,18 @@ def main() -> int:
         help="scope the pull to one install (required for another install's data -- "
         "matched_project alone is NOT tenant-safe, e.g. 'PersonalBrand' spans 7 installs)",
     )
+    ap.add_argument(
+        "--sort-by",
+        default="virality_score",
+        choices=["virality_score", "delta_score", "none"],
+        help="rank the pulled pool by this field (descending) and keep the top --limit "
+        "before writing (default virality_score, matching the real production pipeline's "
+        "own selection -- 'status=posted' alone only proves a candidate passed ONCE, "
+        "under whatever arm drafted it then; picking the highest-scoring of the pool "
+        "raises the odds it also clears the SAME virality bar and the model's own "
+        "judgment on replay. 'none' keeps the API's discovered_at-DESC order, i.e. most "
+        "recent first).",
+    )
     ap.add_argument("--out", required=True, help="output path for the pipe-separated candidates file")
     args = ap.parse_args()
 
@@ -126,10 +138,17 @@ def main() -> int:
         return 1
 
     urls = [u.strip() for u in args.urls.split(",") if u.strip()] if args.urls else None
-    rows = fetch(args.project, args.status, args.limit, args.since, urls, args.install_id)
+    # Over-fetch when ranking so there's an actual pool to rank within (otherwise
+    # sorting the API's own --limit-sized, discovered_at-DESC page is a no-op).
+    # 500 is the API's own hard cap (see /api/v1/twitter-candidates GET).
+    fetch_limit = min(max(args.limit * 10, 50), 500) if args.sort_by != "none" and not urls else args.limit
+    rows = fetch(args.project, args.status, fetch_limit, args.since, urls, args.install_id)
     if not rows:
         print("[twitter_prompt_sandbox] no candidates matched the given filters", file=sys.stderr)
         return 1
+    if args.sort_by != "none":
+        rows.sort(key=lambda r: float(r.get(args.sort_by) or 0), reverse=True)
+    rows = rows[: args.limit]
 
     lines = [to_pipe_row(SANDBOX_ID_BASE + i, r) for i, r in enumerate(rows)]
     Path(args.out).write_text("\n".join(lines) + "\n")
