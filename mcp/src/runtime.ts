@@ -707,22 +707,47 @@ export function startProvisioning(): InstallProgress {
   return readProgress() ?? freshProgress();
 }
 
-// Bounded auto-retry for a provision that ended in failure. Called from the
-// runtime `status` handler on each poll: if the last run failed (done && !ok)
-// and nothing is in flight, kick a fresh run so a TRANSIENT failure (a dropped
-// Chromium download, a flaky DMG mount) self-heals during normal status polling
-// instead of parking until the next server boot. The venv/harness steps clean
-// their own partial artifacts, so a retry starts from a clean slate. Capped so a
-// genuinely broken environment (no network, no disk) surfaces the error instead
-// of looping forever. Returns true if it started a retry.
+// Bounded auto-retry for a provision that ended in failure OR silently died.
+// Called from the runtime `status` handler on each poll. Two distinct dead
+// states, both recoverable the same way:
+//   1. done && !ok — a real failure (fail() ran to completion).
+//   2. running still true, but updated_at hasn't moved in a long time — the
+//      HOLDING PROCESS WAS KILLED mid-provision (e.g. Claude Desktop quit
+//      mid-install: its onQuitCleanup path closes the MCP server abruptly,
+//      never reaching the .finally() that releases the provision lock or
+//      calls fail()). Confirmed live on the MacStadium QA box 2026-07-15: a
+//      quit ~16s into the Chromium step froze install-progress.json at
+//      "running": true forever. The reconnecting process(es) that spawned
+//      seconds later saw the lock file as still-fresh (< PROVISION_LOCK_STALE_MS
+//      old at that moment) and correctly deferred to it — but nothing ever
+//      retried afterward, because case 1's guard doesn't match "running", and
+//      ensureRuntimeProvisioned() only fires once, at process boot. Case 2
+//      closes that gap: once updated_at is stale enough that the holder is
+//      certainly dead, treat it exactly like case 1 — the venv/harness steps
+//      already clean their own partial artifacts, and startProvisioning()'s
+//      tryAcquireProvisionLock() will find the (by-now very stale) lock file
+//      and correctly reclaim it.
+// Capped so a genuinely broken environment (no network, no disk) surfaces the
+// error instead of looping forever. Returns true if it started a retry.
 let autoRetryCount = 0;
 const MAX_AUTO_RETRIES = 3;
+// Deliberately well above PROVISION_LOCK_STALE_MS (60s): a heartbeat this old
+// cannot be a merely-slow step (the heartbeat ticks every 15s regardless of
+// what the step itself is doing), only a dead holder.
+const STALLED_RUNNING_MS = 120_000;
 export function retryProvisionIfStalled(): boolean {
   try {
     if (runtimeReady()) return false;
     if (isProvisioning()) return false;
     const p = readProgress();
-    if (!(p && p.done && !p.ok)) return false; // only retry a real failure
+    const failed = !!(p && p.done && !p.ok);
+    const zombieRunning = !!(
+      p &&
+      p.running &&
+      !p.done &&
+      Date.now() - new Date(p.updated_at).getTime() > STALLED_RUNNING_MS
+    );
+    if (!(failed || zombieRunning)) return false;
     if (autoRetryCount >= MAX_AUTO_RETRIES) return false;
     autoRetryCount += 1;
     startProvisioning();
