@@ -640,7 +640,11 @@ class _CanvasController(NSObject):
             for slot, cand_tv in row["textviews"].items():
                 if cand_tv is not tv:
                     continue
-                if slot != row["armed_slot"]:
+                # Fires on first touch even into the already-default slot 0
+                # (not row["touched"]), so the bold border only ever appears
+                # AFTER an actual click, never pre-applied to Draft A.
+                if not row["touched"] or slot != row["armed_slot"]:
+                    row["touched"] = True
                     row["armed_slot"] = slot
                     self._update_row_borders(row)
                 return
@@ -649,13 +653,18 @@ class _CanvasController(NSObject):
     def _update_row_borders(self, row):
         if not row["dual"]:
             return
+        # Neutral (identical hairline on both boxes) until the reviewer has
+        # actually clicked into one -- no draft is pre-selected/pre-
+        # highlighted by default. armed_slot still defaults to 0 internally
+        # (what posts if approved via the checkbox without ever touching
+        # either box), it just isn't visually implied until touched.
         selected_color = NSColor.blackColor()
         for slot, outline in row["outlines"].items():
             try:
                 layer = outline.layer()
                 if layer is None:
                     continue
-                if slot == row["armed_slot"]:
+                if row["touched"] and slot == row["armed_slot"]:
                     layer.setBorderWidth_(3.0)
                     layer.setBorderColor_(selected_color.CGColor())
                     tint = _solid(NSColor.textBackgroundColor()).blendedColorWithFraction_ofColor_(
@@ -683,6 +692,138 @@ class _CanvasController(NSObject):
             pass
         self._last_interaction_at = time.time()
         return True
+
+    # ---- row info popover (engagement stats + drafting details) --------------
+    # Mirrors s4l_card._ReviewController's eye-icon popover almost verbatim
+    # (see _show_popover), just one combined icon/popover per ROW here
+    # instead of two separate eyes per single current card, and shared
+    # across every row via ONE popover instance (only one row's info is ever
+    # relevant to look at at a time, so nothing is lost by not letting every
+    # row keep its own).
+
+    @objc.python_method
+    def _build_eye_button(self, frame, row_idx):
+        eye = NSButton.alloc().initWithFrame_(frame)
+        eye.setBordered_(False)
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_("eye", "thread info")
+        if img is not None:
+            eye.setImage_(img)
+            eye.setTitle_("")
+        else:  # pre-Big Sur fallback: no SF Symbols
+            eye.setTitle_("👁")
+        eye.setTarget_(self)
+        eye.setAction_("eyeClicked:")
+        eye.setTag_(row_idx)
+        eye.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                eye.bounds(),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                self,
+                {"kind": "row_eye", "row": row_idx},
+            )
+        )
+        return eye
+
+    @objc.python_method
+    def _row_popover_content(self, row):
+        d = row["d"]
+        content = []
+        eng = _engagement_line(d.get("stats"))
+        if eng:
+            content.append(eng)
+        content.extend(_details_lines(d))
+        return content
+
+    @objc.python_method
+    def _open_row_popover(self, row_idx):
+        if not (0 <= row_idx < len(self._rows)):
+            return
+        row = self._rows[row_idx]
+        self._show_popover(self._row_popover_content(row), row.get("eye_btn"), "row info")
+
+    def eyeClicked_(self, sender):
+        try:
+            row_idx = int(sender.tag())
+        except Exception:
+            return
+        self._open_row_popover(row_idx)
+
+    @objc.python_method
+    def _hover_info(self, event):
+        try:
+            ta = event.trackingArea()
+            info = ta.userInfo() or {}
+            return info.get("kind"), info.get("row")
+        except Exception:
+            return None, None
+
+    def mouseEntered_(self, event):
+        kind, row_idx = self._hover_info(event)
+        if kind != "row_eye" or row_idx is None:
+            return
+        self._open_row_popover(int(row_idx))
+
+    def mouseExited_(self, event):
+        kind, _row_idx = self._hover_info(event)
+        if kind != "row_eye":
+            return
+        self._close_stats_popover()
+
+    def scrollDidChange_(self, notification):
+        # A row's popover anchors to that row's own eye button; once the
+        # list scrolls the anchor may no longer be anywhere near it, so
+        # close rather than leave a floating, disconnected popover.
+        self._close_stats_popover()
+
+    @objc.python_method
+    def _close_stats_popover(self):
+        try:
+            if self._stats_popover is not None and self._stats_popover.isShown():
+                self._stats_popover.close()
+        except Exception:
+            pass
+        self._stats_popover = None
+
+    @objc.python_method
+    def _show_popover(self, content, anchor, what):
+        """One popover surface shared by every row's eye icon (near-verbatim
+        port of s4l_card._ReviewController._show_popover). `content` is a
+        single string or a list of strings (one row per field, gapped)."""
+        if anchor is None or not content:
+            return
+        if self._stats_popover is not None and self._stats_popover.isShown():
+            return
+        rows = content if isinstance(content, list) else [content]
+        row_gap = 8 if len(rows) > 1 else 0
+        font = NSFont.systemFontOfSize_(12)
+        heights = []
+        pw = 0
+        for row_text in rows:
+            s = NSAttributedString.alloc().initWithString_attributes_(row_text, {NSFontAttributeName: font})
+            measured = s.boundingRectWithSize_options_(NSMakeSize(300, 10_000), 1)
+            heights.append(int(measured.size.height) + 3)
+            pw = max(pw, int(measured.size.width))
+        pw += 34
+        ph = sum(heights) + row_gap * (len(rows) - 1) + 16
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
+        y = ph - 8
+        for row_text, h in zip(rows, heights):
+            y -= h
+            view.addSubview_(_label(NSMakeRect(13, y, pw - 26, h), row_text, size=12))
+            y -= row_gap
+        vc = NSViewController.alloc().init()
+        vc.setView_(view)
+        pop = NSPopover.alloc().init()
+        pop.setBehavior_(NSPopoverBehaviorApplicationDefined)
+        pop.setContentViewController_(vc)
+        pop.setContentSize_((pw, ph))
+        try:
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        pop.showRelativeToRect_ofView_preferredEdge_(anchor.frame(), anchor.superview(), 1)
+        self._stats_popover = pop
+        _log(f"canvas {what} popover shown ({pw}x{ph})")
 
     # ---- selection / decisions ------------------------------------------------
 
@@ -714,16 +855,6 @@ class _CanvasController(NSObject):
             except Exception:
                 pass
         self._last_interaction_at = time.time()
-        self._refresh_header()
-
-    def rowDiscard_(self, sender):
-        try:
-            idx = int(sender.tag())
-        except Exception:
-            return
-        if not (0 <= idx < len(self._rows)):
-            return
-        self._apply_decision_to_row(self._rows[idx], False)
         self._refresh_header()
 
     def approveSelected_(self, sender):
