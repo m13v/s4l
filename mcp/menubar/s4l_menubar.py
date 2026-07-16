@@ -934,10 +934,19 @@ class S4LMenuBar(rumps.App):
                           from "routines gone".
           rate_limit_msg— set when a recent run hit the Claude weekly/usage limit
                           (re-arm cannot fix that); carries a short 'resets …' string.
+                          Cancelled by RECOVERY: a real assistant response written
+                          AFTER the newest limit error proves Claude turns are
+                          flowing again (limit reset, account switched, or a second
+                          healthy instance's lane is draining) — in every one of
+                          those cases "drafts can't run" is false, so drop the
+                          verdict instead of holding the banner for the rest of
+                          the scan window (it sat ~10 extra minutes after an
+                          account switch on 2026-07-15).
         Account-agnostic on purpose: it keys off actual execution, not a per-account
         lastRunAt that freezes (and lies) after an account switch."""
         ran = False
         limit_msg = None
+        limit_epoch = 0.0
         try:
             now = time.time()
             files = glob.glob(
