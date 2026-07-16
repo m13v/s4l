@@ -2824,6 +2824,17 @@ if [ "${DRAFT_ONLY:-0}" = "1" ]; then
         --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START )) 2>/dev/null || true
     _SA_RUN_SUMMARY_EMITTED=1
+    # Sandbox runs have no MCP wrapper watching stdout for this marker to hand
+    # the plan off to merge_review_queue.py (that handoff normally happens
+    # outside this script), so a sandbox plan would otherwise just rot on
+    # disk -- found live 2026-07-15, had to hand-reconstruct one after the
+    # fact. $PLAN_FILE already carries the fully-transformed candidates
+    # (reply_text/drafts/experiments.sandbox stamp, same shape any real draft
+    # gets), so this is a straight, no-transform call into the same merge
+    # step everything else uses.
+    if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+        python3 "$REPO_DIR/scripts/merge_review_queue.py" --plan "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"
+    fi
     # IMPORTANT: do NOT rm -f "$PLAN_FILE" here; the reviewer needs it. Print a
     # machine-readable marker so the MCP wrapper can locate the plan deterministically.
     echo "DRAFT_ONLY_PLAN=$PLAN_FILE"
