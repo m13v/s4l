@@ -895,13 +895,46 @@ class _ReviewController(NSObject):
         self = objc.super(_ReviewController, self).init()
         if self is None:
             return None
+        self._host_view = None
+        self._host_window = None
+        self._init_common(drafts, on_decision, on_complete, focus)
+        self._build()
+        return self
+
+    def initWithDrafts_onDecision_onComplete_focus_hostView_hostWindow_(
+        self, drafts, on_decision, on_complete, focus, host_view, host_window
+    ):
+        """Grid-tile variant (s4l_card_canvas.py): mounts this card's content
+        into `host_view` (a fixed-size slot inside the canvas's own window)
+        instead of creating its own floating corner panel. `host_window` is
+        the canvas's real window, used only to seat the caret
+        (makeFirstResponder_) since a tile owns no window of its own.
+        Everything else -- approve/reject (incl. the reject-reason picker),
+        popovers, draft A/B arm-selection, decision recording -- is the
+        EXACT same code path as the corner card; see _mount_content /
+        _seat_first_responder for the only branches, and _build/_finish for
+        the panel-vs-tile lifecycle split."""
+        self = objc.super(_ReviewController, self).init()
+        if self is None:
+            return None
+        self._host_view = host_view
+        self._host_window = host_window
+        self._init_common(drafts, on_decision, on_complete, focus)
+        self._build()
+        return self
+
+    @objc.python_method
+    def _init_common(self, drafts, on_decision, on_complete, focus):
         self._drafts = list(drafts)
         self._on_decision = on_decision
         self._on_complete = on_complete
         # focus=True only for a USER-initiated open (the menu bar's "Review N
         # pending drafts"): activate the app and seat the caret in the reply
         # field. Auto-presented cards (the timer tick) must appear without
-        # taking keyboard focus from whatever the user is doing.
+        # taking keyboard focus from whatever the user is doing. Grid tiles
+        # (self._host_view is not None) ignore this and always seat focus --
+        # see _render()'s mounting branch -- since a tile only ever exists
+        # because the reviewer already explicitly opened the canvas window.
         self._focus = bool(focus)
         self._close_reason = None  # "snooze" when the title-bar button closed us
         self._idx = 0
@@ -958,8 +991,6 @@ class _ReviewController(NSObject):
         self._last_decision_at = None
         self._last_interaction_at = None
         self._last_move_log = 0.0
-        self._build()
-        return self
 
     @objc.python_method
     def _track(self, kind):
