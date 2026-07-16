@@ -142,6 +142,40 @@ hc_cleanup_tabs() {
     BH_CLEANUP_PORT="$_port" python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
+# Shared interpreter for the reserved skip code 78 (2026-07-15). Every
+# ensure_<platform>_browser_for_backend() caller MUST check its own exit
+# status at ITS OWN call site, not rely on the hook exiting for them: an
+# `exit` inside a HC_PRE_LAUNCH_HOOK (or inside hc_ensure_browser itself)
+# only terminates the immediate shell, so a caller that wraps the call in a
+# subshell (`( source ...; ensure_x_browser_for_backend )`, several LinkedIn
+# callers do this) would see it silently swallowed -- exactly the 2026-07-06
+# incident (two live LinkedIn Chrome tabs from two pipelines) that first
+# established this convention. This helper only standardizes the CHECK so
+# every caller gets it right without re-deriving it; it does not (cannot)
+# replace calling it at the right scope.
+#
+# Usage, immediately after the ensure_* call, in the CALLER's own shell (not
+# a subshell, not inside a function you'd `|| _rc=$?` from two frames away):
+#   ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+#   _rc="${PIPESTATUS[0]}"
+#   hc_exit_if_deferred "$_rc" "reddit-harness"
+#   if [ "$_rc" != "0" ]; then ...caller's own genuine-failure handling...; fi
+#
+# Exits the CALLING SCRIPT with 0 when $1 is exactly 78 (a peer pipeline is
+# actively driving the shared harness Chrome; the launchd job re-fires on its
+# next cadence, nothing lost). Returns (does not exit) for every other value,
+# INCLUDING 0 and genuine failures, so callers keep full control of their own
+# success/failure/fallback handling -- this does not replace the elif branch
+# above, only the code every caller was duplicating (or getting wrong) for
+# the defer case.
+hc_exit_if_deferred() {
+    local _rc="${1:?rc}" _label="${2:-browser}"
+    if [ "$_rc" = "78" ]; then
+        echo "[$(_hc_ts)] ${_label} bootstrap deferred (rc=78, peer pipeline active on the shared tab); skipping this fire." >&2
+        exit 0
+    fi
+}
+
 _hc_reap_profile_owners() {
     # Kill any Chrome holding EXACTLY this profile dir (trailing space in the
     # pattern keeps browser-harness from matching browser-harness-linkedin),
