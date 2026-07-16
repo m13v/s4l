@@ -60,6 +60,14 @@ CDP = os.environ.get(
     os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555"),
 ).rstrip("/")
 
+# Bump whenever the scraping/ranking logic changes materially enough that an
+# install's existing scan should be considered stale and worth redoing, even
+# though it "succeeded" under the old code (e.g. the 2026-07-15 stall-detection
+# fix: old scans from accounts where S4L posts heavily silently undercounted
+# organic replies). scripts/voice_exemplars.py stamps this alongside
+# examples_scanned_at and treats a lower stamped version as a rescan trigger.
+SCANNER_VERSION = 2
+
 
 # --------------------------------------------------------------------------- #
 # CDP attach (mirrors setup_twitter_auth.py::_attach so behavior is identical).
@@ -560,6 +568,7 @@ def main() -> int:
             "counts": {"posts": len(posts), "comments": len(comments),
                        "s4l_posted_excluded": len(s4l_ids)},
             "grounding_instructions": GROUNDING_INSTRUCTIONS,
+            "scanner_version": SCANNER_VERSION,
         }
 
         # Persist the corpus beside config.json so the later project-save step
