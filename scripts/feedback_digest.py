@@ -185,7 +185,13 @@ def _event_line(e: dict) -> str:
         parts.append("edited_before_approving")
     line = " ".join(parts)
     if note:
-        line += f"\n  user note: {note[:300]}"
+        # Platform-derived events are machine-observed moderation facts, not
+        # something the user typed; label them honestly so the model never
+        # attributes the wording to the human reviewer.
+        label = ("moderation context"
+                 if str(e.get("decision") or "").startswith("platform_")
+                 else "user note")
+        line += f"\n  {label}: {note[:300]}"
     tweet = (e.get("tweet_text") or "").strip()
     if tweet:
         line += f"\n  their post was: {tweet[:200]}"
@@ -222,13 +228,17 @@ def _no_reason_rejects(events: list[dict]) -> list[dict]:
             and not (e.get("reject_note") or "").strip()]
 
 
-def build_prompt(project: dict, events: list[dict], overall_events: list[dict] | None = None) -> str:
+def build_prompt(project: dict, events: list[dict], overall_events: list[dict] | None = None,
+                 platform_events: list[dict] | None = None) -> str:
     block = lp.get_block(project)
     overall_events = overall_events or []
+    platform_events = platform_events or []
     rejected = [e for e in events if e.get("decision") == "rejected"]
     no_reason = _no_reason_rejects(events)
     approved = [e for e in events if e.get("decision") == "approved"]
     loved = [e for e in approved if e.get("loved")]
+    plat_removed = [e for e in events
+                    if str(e.get("decision") or "").startswith("platform_")]
     voice_never = ((project.get("voice") or {}).get("never")) or []
     guard_do_not = ((project.get("content_guardrails") or {}).get("do_not")) or []
 
@@ -247,6 +257,17 @@ def build_prompt(project: dict, events: list[dict], overall_events: list[dict] |
             "explicit standing guidance about the whole pipeline, NOT about any single thread):\n"
             f"{notes}"
         )
+    platform_block = ""
+    if platform_events:
+        plat_lines = "\n".join(
+            f"{i + 1}. {_event_line(e)}" for i, e in enumerate(platform_events)
+        )
+        platform_block = (
+            f"\n\nPLATFORM-DERIVED ACCOUNT-LEVEL SIGNALS ({len(platform_events)} "
+            "event(s), machine-observed, not tied to one project; they ride into "
+            "every project's digest like overall feedback):\n"
+            f"{plat_lines}"
+        )
 
     return f"""You maintain the SINGLE, install-wide learned_preferences block for this social-posting pipeline (shared across every configured project, not just "{project.get('name')}"). It distills the user's own approve/reject decisions on draft cards into short standing preferences that steer future thread selection and drafting across ALL projects. It is SOFT guidance read by the drafting model, not a filter.
 
@@ -258,12 +279,14 @@ CURRENT learned_preferences (shared by every project):
 CURRENT voice.never: {json.dumps(voice_never)}
 CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}
 
-NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(no_reason)} of the rejects without a stated reason, {len(approved)} approved, {len(loved)} of the approvals loved):
-{ev_lines}{overall_block}
+NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(no_reason)} of the rejects without a stated reason, {len(approved)} approved, {len(loved)} of the approvals loved, {len(plat_removed)} platform moderation strikes):
+{ev_lines}{overall_block}{platform_block}
 
 Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "no_reason_given" means the user rejected without picking a category or typing a note: the rejection itself is real, but WHY is your inference from the author/thread/draft context alone, so treat it as weak evidence. It can corroborate a pattern that reasoned events already show, but a no_reason_given reject never justifies a new entry or an author block on its own, and 2+ of them agreeing still only justify an entry when the shared pattern in their context is unmistakable. "edited_before_approving" with an ORIGINAL/REWROTE pair means the user hand-corrected our draft before posting: the rewrite is a direct statement of the voice they want. Diff the pair; when 2+ edits show the same correction (a phrase type removed, a structure replaced, tone shifted, length cut), distill that recurring pattern into draft_style_notes. Ignore edit content that is lead-specific or cosmetic (typo fixes, one-off facts); learn only what generalizes. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user picked the heart in the approve row ("this was a really good one"; approve_level_N in interactions carries the strength, 2 = best of the best): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
 
 Two-draft cards show a "did NOT pick" pair. "picked_draft_b_over_default_a" means the card offered two drafts with A preselected and the user deliberately clicked into B and approved it: a direct head-to-head preference for the picked draft over the shown alternative, evidence on par with a hand rewrite. "chose_default_a_after_trying_b" means they clicked into B (trying it as the selection) and then came back and approved A: equally explicit, the same head-to-head strength as a switch, just with the default as the winner. "kept_default_a_after_reading_b=Xs" means they kept the preselected A but spent Xs with the pointer over B first: an informed keep, weaker than either explicit choice (reading B does not prove they weighed it; treat like no_reason_given, corroborating a pattern that stronger events already show rather than founding one). "second_draft_not_read" means they approved the default without touching or reading the alternative: NO pairwise signal, never infer anything against the unread draft. When 2+ pairwise events agree, diff the picked texts against the not-picked ones and distill WHAT recurs (tone, structure, length, opener type, directness) into draft_style_notes; the "styles:" line names each side's engagement style, useful when the same style keeps winning or losing.
+
+"[platform_removed]" and "[platform_banned]" events are MACHINE-DERIVED moderation outcomes, not human card decisions; weigh them on their own track, never as a statement of the reviewer's taste. platform_removed means a moderator or platform filter removed one of our posts: the lesson is the CONTENT pattern (what reads as promotional, off-topic, or AI-written in that kind of venue), feeding thread_avoid or draft_style_notes. One removal is one community's judgment: treat it like a reasoned reject (it may justify one narrowly-scoped entry since the moderation context states the venue and outcome explicitly), and generalize only when 2+ removals share a pattern. platform_banned means a community blocked our account outright: the strongest platform-side evidence, but the specific venue is ALREADY hard-blocked by the pipeline, so never spend an entry naming an individual community; the only lesson worth an entry is a venue TYPE pattern (e.g. what kinds of communities keep rejecting us) once 2+ bans or removals show it. Platform events never justify block_authors (there is no author at fault) and never touch audience_prefer.
 
 You can also block SPECIFIC authors via the plan's block_authors list. A block is a permanent hard exclusion of that one handle from all future thread selection, so it is YOUR judgment call, never automatic. Block when the evidence is strong: a wrong_author reject IS a direct human statement about that author (especially with profile_click), and the author context (author_followers, their post, found_via_topic) or the user's note confirms the account itself was the problem rather than the topic. Do NOT block when the reject looks topic-driven (off_topic/bad_draft on a reasonable account) or when you are unsure; the generalizable TYPE entry in audience_avoid is the softer tool for that.
 
@@ -413,18 +436,21 @@ def _is_actionable(e: dict) -> bool:
 
 
 def digest_project(project: dict, platform: str, dry_run: bool,
-                   overall_events: list[dict] | None = None) -> bool:
-    """Digest one project's pending events (plus any overall-feedback notes,
-    which ride along in every project's prompt but are marked processed by
-    main(), not here). Returns True when the digest completed (or there was
-    nothing to do); False leaves the events unprocessed for the next run."""
+                   overall_events: list[dict] | None = None,
+                   platform_events: list[dict] | None = None) -> bool:
+    """Digest one project's pending events (plus any overall-feedback notes
+    and account-level platform events, which ride along in every project's
+    prompt but are marked processed by main(), not here). Returns True when
+    the digest completed (or there was nothing to do); False leaves the
+    events unprocessed for the next run."""
     name = project.get("name")
     overall_events = overall_events or []
+    platform_events = platform_events or []
     resp = api_get("/api/v1/review-events",
                    {"project": name, "platform": platform, "unprocessed": "true",
                     "limit": str(MAX_EVENTS_PER_RUN)})
     events = ((resp or {}).get("data") or {}).get("events") or []
-    if not events and not overall_events:
+    if not events and not overall_events and not platform_events:
         return True
     no_reason = _no_reason_rejects(events)
     if len(no_reason) >= BULK_NO_REASON_THRESHOLD:
