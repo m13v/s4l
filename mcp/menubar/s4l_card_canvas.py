@@ -56,6 +56,8 @@ import objc
 from Foundation import NSObject, NSMakeRect, NSMakeSize
 from AppKit import (
     NSApp,
+    NSButton,
+    NSFont,
     NSScrollView,
     NSView,
     NSWindowOcclusionStateVisible,
@@ -66,24 +68,28 @@ from AppKit import (
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskUtilityWindow,
     NSTextAlignmentCenter,
+    NSBezelStyleRounded,
 )
 
 # Reuse the corner card's panel class (Cmd+V/C/X/A/Z routing for a status-bar
-# app with no Edit menu), its per-card controller, and its tile dimensions
-# instead of duplicating any of them -- this module is a second
-# PRESENTATION only; the drafts data, decision contract, and every bit of
-# actual card UI/behavior stay single-sourced in s4l_card.py.
+# app with no Edit menu), its per-card controller, its styling helpers, and
+# its tile dimensions instead of duplicating any of them -- this module is a
+# second PRESENTATION only; the drafts data, decision contract, and every
+# bit of actual card UI/behavior stay single-sourced in s4l_card.py.
 from s4l_card import (
     _ReviewPanel,
     _ReviewController,
     _label,
     _frosted,
+    _round_rect,
+    _fill_color,
     _mouse_screen,
     _write_review_state,
     _log,
     NSWindowStyleMaskNonactivatingPanel,
     W as TILE_W,
     H as TILE_H,
+    M as TILE_M,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review,
@@ -113,9 +119,15 @@ def _sort_key(d):
 
 def _center_frame(screen):
     """Large centered frame on the given screen -- the canvas is a
-    deliberate review session, not a glanceable corner widget."""
+    deliberate review session, not a glanceable corner widget. Width scales
+    with the screen (2026-07-16 user report: it should adapt, not sit at a
+    fixed size), bounded so it never gets absurdly wide on a huge display
+    nor too cramped to fit GRID_COLS columns on a typical one -- 3 columns
+    of TILE_W=380 tiles + GRID_GAP=16 gaps need ~1172px of grid width alone,
+    so a cap below ~1250 silently drops to 2 columns even on a normal
+    laptop screen (the exact bug reported)."""
     vf = screen.visibleFrame() if screen is not None else NSMakeRect(0, 0, 1440, 900)
-    w = min(1180.0, vf.size.width * 0.88)
+    w = min(1320.0, max(900.0, vf.size.width * 0.85))
     h = vf.size.height * 0.86
     x = vf.origin.x + (vf.size.width - w) / 2.0
     y = vf.origin.y + (vf.size.height - h) / 2.0
