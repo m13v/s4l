@@ -2219,23 +2219,29 @@ class S4LMenuBar(rumps.App):
         if label:
             # Menu bar stays CONCISE (user rule 2026-07-14): strip the trailing
             # elapsed-duration token the producer encodes in the label ("draft
-            # 2m", "draft ⧖18m") from the TITLE only. The full label (with the
+            # 2m", "draft ⧖18m") from the display only. The full label (with the
             # duration the stall detector's _label_elapsed_secs parses) still
             # lives in activity.json — this is display-side trimming, never a
             # change to the data.
             import re as _re
             label = _re.sub(r"\s*⧖?\s*\d+\s*[sm]\s*$", "", str(label)).strip() or label
-            # The update arrow must stay visible even while a tool runs, so the
-            # "update available" signal is never masked by activity. _tick skips the
-            # title repaint while the spinner owns it, so the arrow is injected here.
-            head = "S4L ⬆" if self._update_available else "S4L"
-            # A "✓" label (e.g. "posted 3/10 ✓") is a momentary confirmation, not
-            # ongoing work — show it without the spinner glyph so it reads as done.
+            # Detailed pipeline status (scanning/drafting/posting) is a
+            # staging/dev signal now, not a customer-facing one (2026-07-16):
+            # it goes to the second, staging-only status item
+            # (_set_dev_status; a no-op when it doesn't exist) instead of the
+            # primary title, which _tick's title_owned_by_spinner gate now
+            # leaves free for _render_title's pending-draft count at all
+            # times. No "update available" arrow injection needed here
+            # anymore either — _render_title already renders that itself,
+            # every tick, since it's no longer skipped for plain activity.
+            # A "✓" label (e.g. "posted 3/10 ✓") is a momentary confirmation,
+            # not ongoing work — show it without the spinner glyph so it
+            # reads as done.
             if "✓" in label:
-                self.title = f"{head} {label}"
+                self._set_dev_status(label)
             else:
                 self._spin_i = (self._spin_i + 1) % len(SPINNER)
-                self.title = f"{head} {label} {SPINNER[self._spin_i]}"
+                self._set_dev_status(f"{label} {SPINNER[self._spin_i]}")
             return
         try:
             if self._spinner is not None:
@@ -2243,7 +2249,7 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
         self._spinner = None
-        self.title = "S4L"
+        self._set_dev_status("S4L·dev")
         self._sig = None  # force the next tick to repaint title + menu
 
     def _resume_approved_queue(self):
@@ -2581,8 +2587,18 @@ class S4LMenuBar(rumps.App):
         _, pending_drafts = self._pending_review()
         pending_count = len(pending_drafts)
 
-        # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
-        if not busy:
+        # Spinner owns the PRIMARY title only for the two operational states
+        # it exclusively renders there (update in flight, stalled autopilot)
+        # -- see _spin. Plain drafting/scanning/posting activity no longer
+        # touches the primary title at all (2026-07-16): it goes to the
+        # staging-only dev status item instead (_set_dev_status), so the
+        # pending-draft count stays live and visible here at all times, per
+        # product direction ("show pending drafts at all times when more
+        # than zero" -- not just when nothing else wants the title).
+        title_owned_by_spinner = self._update_in_flight() or (
+            self._stalled and not self._posting_label
+        )
+        if not title_owned_by_spinner:
             self._render_title(setup_complete, ob, blocker, attention, pending_count)
 
         # Blocker notification only on transition into a new blocker.
