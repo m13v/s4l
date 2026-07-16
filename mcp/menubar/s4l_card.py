@@ -1505,35 +1505,48 @@ class _ReviewController(NSObject):
         is_foreign = bool(card_lang and card_lang != "en")
         thread_en = (d.get("thread_text_en") or "").strip() if is_foreign else ""
         reply_en = (d.get("reply_text_en") or "").strip() if is_foreign else ""
-        # Thread text — black, with a small trailing ↗ link that opens the
-        # thread (an NSTextView because NSTextField can't do clickable links).
-        thread_tv = NSTextView.alloc().initWithFrame_(
+        # Thread text — black, with a small leading ↗ link that opens the
+        # thread (an NSTextView because NSTextField can't do clickable
+        # links). The FULL text always shows, never trimmed (2026-07-16 user
+        # direction); the box scrolls instead of shrinking the text to fit,
+        # and the link sits at the START so it's always visible regardless
+        # of scroll position or thread length.
+        thread_scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(M, H - 150, W - 2 * M, 74)
+        )
+        thread_scroll.setHasVerticalScroller_(True)
+        thread_scroll.setAutohidesScrollers_(True)
+        thread_scroll.setBorderType_(0)
+        # Quote-style block (subtle rounded fill, like a quoted tweet) so the
+        # thread reads as *their* content and the editor below as *ours*.
+        # Same outer frame as the old flat text; only the skin/scrolling
+        # changed.
+        if _round_rect(thread_scroll, border=False):
+            thread_scroll.setDrawsBackground_(True)
+            thread_scroll.setBackgroundColor_(_fill_color())
+        else:
+            thread_scroll.setDrawsBackground_(False)
+        tcs = thread_scroll.contentSize()
+        thread_tv = NSTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, tcs.width, tcs.height)
         )
         thread_tv.setEditable_(False)
         thread_tv.setSelectable_(True)  # links only respond when selectable
-        # Quote-style block (subtle rounded fill, like a quoted tweet) so the
-        # thread reads as *their* content and the editor below as *ours*.
-        # Same frame as the old flat text; only the skin changed.
-        if _round_rect(thread_tv, border=False):
-            thread_tv.setDrawsBackground_(True)
-            thread_tv.setBackgroundColor_(_fill_color())
-            try:
-                thread_tv.setTextContainerInset_(NSMakeSize(6, 5))
-            except Exception:
-                pass
-        else:
-            thread_tv.setDrawsBackground_(False)
-        # An NSTextView grows vertically by default; long threads inflated the
-        # frame over the author row above (non-flipped superview: growth goes
-        # UP). Pin the frame, then _fit_thread_body shrinks the text (never
-        # the trailing ↗ link) until the arrow actually lands inside it.
-        thread_tv.setVerticallyResizable_(False)
+        thread_tv.setDrawsBackground_(False)
+        thread_tv.setVerticallyResizable_(True)
         thread_tv.setHorizontallyResizable_(False)
+        thread_tv.setMinSize_(NSMakeSize(0, tcs.height))
+        thread_tv.setMaxSize_(NSMakeSize(1e7, 1e7))
+        thread_tv.textContainer().setWidthTracksTextView_(True)
+        try:
+            thread_tv.setTextContainerInset_(NSMakeSize(6, 5))
+        except Exception:
+            pass
         if thread_url:
             thread_tv.setDelegate_(self)
-        _fit_thread_body(thread_tv, thread_en or d.get("thread_text"), thread_url)
-        content.addSubview_(thread_tv)
+        _set_thread_text(thread_tv, thread_en or d.get("thread_text"), thread_url)
+        thread_scroll.setDocumentView_(thread_tv)
+        content.addSubview_(thread_scroll)
         # Reply heading — bold. A concise "project/lane · viral N" tag rides
         # right after it in a SEPARATE, regular-weight label (2026-07-08:
         # was folded into the same bold string, which made the metadata read
