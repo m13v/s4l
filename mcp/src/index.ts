@@ -1223,6 +1223,27 @@ async function postApproved(batchId: string, plan: Plan) {
       if (fresh) plan = fresh;
     }
   }
+  // Arm the cross-instance posting flag HERE, before the Reddit drain, not just
+  // before the Twitter phase below. Root cause (found 2026-07-16): this flag
+  // used to get set only right before ensureTwitterBrowserForPost(), AFTER the
+  // whole Reddit drain loop above (one runPython("post_reddit.py") call per
+  // approved Reddit card, each with real CDP/browser overhead — a batch of a
+  // handful of cards routinely runs minutes). For that entire window this
+  // instance's isPeerDrainActive() reported false, so a SECOND MCP instance's
+  // postApproved() (e.g. a fresh one-shot worker boot running its own startup
+  // backlog drain) could pass the SAME gate check above and start its own
+  // drain concurrently. Both eventually reached their own Twitter phase and
+  // both spawned scripts/twitter_post_plan.py with S4L_LOCK_ROLE=post — the
+  // ONLY code path that ever sets that role. Two live "post" role holders
+  // can't preempt each other (browser_mutex.py case 6: correct, preempting a
+  // peer mid-post risks a double-post), so one always waited 45s and gave up
+  // — the "Twitter browser locked by session python:<pid> ... waited 45s,
+  // giving up" failures that silently killed 11 real approved drafts over
+  // 2026-07-15/16. Arming the flag for the FULL function closes that window:
+  // a peer's gate check now blocks for the entire drain, Reddit included, so
+  // only one instance ever reaches the Twitter phase at a time.
+  postingActive = true;
+  startPostingFlagHeartbeat();
   // Post every card the user APPROVED that hasn't already landed or been ruled out.
   // `approved` is now a DURABLE decision (sticky, never cleared by a later call), so
   // filtering out posted/terminal here makes this idempotent: re-running it only
@@ -1244,7 +1265,11 @@ async function postApproved(batchId: string, plan: Plan) {
       delete c.discard_reason;
     }
   }
-  if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
+  if (approved.length === 0) {
+    postingActive = false;
+    stopPostingFlagHeartbeat();
+    return { attempted: 0, exit_code: 0, summary: "nothing approved" };
+  }
 
   // ---- Reddit cards (2026-07-14): drain them FIRST, independently ----------
   // A reddit card carries the verbatim draft decision (reddit_decision) plus
@@ -1422,7 +1447,10 @@ async function postApproved(batchId: string, plan: Plan) {
   }
   if (approvedTwitter.length === 0) {
     // All-reddit batch: persist the stamps and return without touching the
-    // twitter preflight/lock path.
+    // twitter preflight/lock path. Must clear the flag armed above ourselves —
+    // this branch never reaches the Twitter phase's scheduleShellLockRelease().
+    postingActive = false;
+    stopPostingFlagHeartbeat();
     if (redditSkippedPeerDrain) {
       return {
         attempted: 0,
@@ -1446,6 +1474,8 @@ async function postApproved(batchId: string, plan: Plan) {
   // poster that silently burns the whole batch.
   if (!readConfiguredTwitterHandle()) await ensurePostingHandle();
   if (!readConfiguredTwitterHandle()) {
+    postingActive = false;
+    stopPostingFlagHeartbeat();
     return {
       attempted: 0,
       exit_code: 0,
