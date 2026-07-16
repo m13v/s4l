@@ -265,20 +265,44 @@ class _CanvasController(NSObject):
             x = left_pad + c * (TILE_W + GRID_GAP)
             y = GRID_PAD + r * (TILE_H + GRID_GAP)
             slot_view = NSView.alloc().initWithFrame_(NSMakeRect(x, y, TILE_W, TILE_H))
+            # Outline every slot -- a tile mounted here has no window of its
+            # own anymore (it's a subview, not a floating panel), so the
+            # visual card separation the corner card got for free from being
+            # its own OS window has to be drawn explicitly here instead
+            # (2026-07-16 user report: "no outline around each card").
+            _round_rect(slot_view)
+            try:
+                slot_view.layer().setBackgroundColor_(_fill_color().CGColor())
+            except Exception:
+                pass
             doc.addSubview_(slot_view)
-            self._slots.append({"view": slot_view, "tile": None, "n": None})
+            self._slots.append({"view": slot_view, "tile": None, "n": None, "activated": False})
 
         scroll.setDocumentView_(doc)
-        for i in range(len(self._slots)):
+
+        # Position 0 is a persistent bulk-action card (Approve All / Discard
+        # All), never part of the draft-filling rotation below -- ONE card
+        # with two buttons, not a header button bar (2026-07-16 product
+        # direction).
+        self._build_control_card(self._slots[0]["view"])
+        for i in range(1, len(self._slots)):
             self._fill_slot(i)
+        self._refresh_header()
 
     # ---- backlog / slot management ------------------------------------------
 
     @objc.python_method
     def _fill_slot(self, slot_idx):
-        """Mount the next backlog draft into this slot, or leave it empty
-        with a placeholder if the backlog is exhausted. Called at startup
-        for every slot, and again for one slot the instant its tile is
+        """Mount the next backlog draft into this slot. A slot that never
+        had a draft (the grid has more capacity than there is work right
+        now) stays HIDDEN rather than showing an empty placeholder --
+        pre-seeding a wall of "No more drafts" tiles for a small backlog
+        looked broken (2026-07-16 user report: "the other cards didn't move
+        into their place, it shows No more drafts in each tile"). A slot
+        that WAS showing a draft and just ran the backlog dry DOES get the
+        placeholder -- that's a real, useful signal ("you're caught up
+        here"), not a startup artifact. Called at build time for every
+        non-control slot, and again for one slot the instant its tile is
         decided (a tile's on_complete IS that signal, see
         s4l_card._ReviewController -- single-draft, so its own on_complete
         fires right after its on_decision)."""
@@ -288,10 +312,16 @@ class _CanvasController(NSObject):
         if not self._backlog:
             slot["tile"] = None
             slot["n"] = None
-            self._show_empty_slot(slot["view"])
+            if slot["activated"]:
+                slot["view"].setHidden_(False)
+                self._show_empty_slot(slot["view"])
+            else:
+                slot["view"].setHidden_(True)
             self._refresh_header()
             return
         d = self._backlog.pop(0)
+        slot["activated"] = True
+        slot["view"].setHidden_(False)
         tile = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_focus_hostView_hostWindow_(
             [d],
             self._tile_decision_cb(slot_idx),
@@ -315,6 +345,77 @@ class _CanvasController(NSObject):
         )
         lbl.setAlignment_(NSTextAlignmentCenter)
         view.addSubview_(lbl)
+
+    @objc.python_method
+    def _build_control_card(self, view):
+        """Persistent bulk-action card (2026-07-16 product direction: "a
+        card with a button to discard all and approve all", not header
+        buttons). Discard All reuses the EXACT SAME confirm-and-clear-
+        everything flow the corner card's own title-bar "Discard all…"
+        button already drives (s4l_menubar._discard_all_pending, wired via
+        set_discard_all_handler exactly like s4l_card.py's accessory
+        button); Approve All is new (s4l_menubar._approve_all_pending) but
+        mirrors that same confirm-first shape. Both act on every pending
+        draft in the session -- the ones showing now AND everything still
+        queued in the backlog, matching _discard_all_pending's own scope
+        (it reads the full store-level pending set, not just what's
+        rendered)."""
+        w, h = view.frame().size.width, view.frame().size.height
+        m = TILE_M
+        view.addSubview_(
+            _label(NSMakeRect(m, h - 44, w - 2 * m, 24), "Bulk actions", size=15, bold=True)
+        )
+        self._control_count_label = _label(
+            NSMakeRect(m, h - 68, w - 2 * m, 18), "", size=12, muted=True
+        )
+        view.addSubview_(self._control_count_label)
+        view.addSubview_(
+            _label(
+                NSMakeRect(m, h - 210, w - 2 * m, 130),
+                "Applies to every pending draft in this session — the ones "
+                "showing now and everything still queued behind them. Both "
+                "ask for confirmation first.",
+                size=11,
+                muted=True,
+            )
+        )
+        approve_btn = NSButton.alloc().initWithFrame_(NSMakeRect(m, 90, w - 2 * m, 34))
+        approve_btn.setTitle_("Approve All")
+        approve_btn.setBezelStyle_(NSBezelStyleRounded)
+        approve_btn.setFont_(NSFont.systemFontOfSize_(13))
+        approve_btn.setTarget_(self)
+        approve_btn.setAction_("approveAllClicked:")
+        view.addSubview_(approve_btn)
+
+        discard_btn = NSButton.alloc().initWithFrame_(NSMakeRect(m, 46, w - 2 * m, 34))
+        discard_btn.setTitle_("Discard All")
+        discard_btn.setBezelStyle_(NSBezelStyleRounded)
+        try:
+            discard_btn.setHasDestructiveAction_(True)
+        except Exception:
+            pass
+        discard_btn.setFont_(NSFont.systemFontOfSize_(13))
+        discard_btn.setTarget_(self)
+        discard_btn.setAction_("discardAllClicked:")
+        view.addSubview_(discard_btn)
+
+    def approveAllClicked_(self, sender):
+        cb = _approve_all_handler
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            _log(f"canvas approve-all handler failed: {e}")
+
+    def discardAllClicked_(self, sender):
+        cb = _discard_all_handler
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            _log(f"canvas discard-all handler failed: {e}")
 
     @objc.python_method
     def _tile_decision_cb(self, slot_idx):
