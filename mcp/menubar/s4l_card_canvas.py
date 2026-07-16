@@ -199,6 +199,12 @@ class _CanvasController(NSObject):
         panel = _ReviewPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, NSBackingStoreBuffered, False
         )
+        # `frame` here IS the content rect (that's what initWithContentRect_
+        # takes) -- panel.frame() later would instead return the WINDOW frame,
+        # taller by the title bar's height, and sizing the content view to
+        # that overlapped the header row under the title bar (2026-07-16 user
+        # report). Keep the real content size around for _render().
+        self._content_size = NSMakeSize(frame.size.width, frame.size.height)
         panel.setLevel_(NSFloatingWindowLevel)
         panel.setFloatingPanel_(True)
         panel.setBecomesKeyOnlyIfNeeded_(True)
@@ -220,8 +226,7 @@ class _CanvasController(NSObject):
 
     @objc.python_method
     def _render(self):
-        frame = self._panel.frame()
-        w, h = frame.size.width, frame.size.height
+        w, h = self._content_size.width, self._content_size.height
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
 
         header_y = h - HEADER_H
