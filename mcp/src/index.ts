@@ -1379,9 +1379,27 @@ async function postApproved(batchId: string, plan: Plan) {
       } else {
         // Leave the approval sticky (approved && !posted && !terminal) so the
         // next post_drafts call retries, mirroring twitter's failed-drain
-        // semantics; only stamp terminal on a conclusive CDP refusal.
+        // semantics; only stamp terminal on a conclusive CDP refusal. This
+        // list MUST stay a superset of post_reddit.py's own
+        // _PERMANENT_CDP_ERRORS (account_blocked_in_sub, no_permalink) —
+        // otherwise post_reddit.py already gives up on the row (marks the DB
+        // candidate permanently failed, e.g. adds the sub to
+        // subreddit_bans.comment_blocked) while this card stays non-terminal
+        // and the drain retries the same doomed post forever (found
+        // 2026-07-16: an approved r/tifu card retried every cycle for over
+        // an hour after the sub was already in subreddit_bans.comment_blocked).
         const cdpReason = (/\[post_reddit\] CDP FAILED: ([a-z_]+)/.exec(out) || [])[1];
-        if (cdpReason && ["thread_locked", "thread_archived", "thread_not_found", "blocked_by_author"].includes(cdpReason)) {
+        if (
+          cdpReason &&
+          [
+            "thread_locked",
+            "thread_archived",
+            "thread_not_found",
+            "blocked_by_author",
+            "account_blocked_in_sub",
+            "no_permalink",
+          ].includes(cdpReason)
+        ) {
           c.terminal = true;
           c.terminal_reason = `reddit_${cdpReason}`;
         }
