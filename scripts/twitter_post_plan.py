@@ -490,6 +490,25 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     """
     cid = int(c["candidate_id"])
     candidate_url = c["candidate_url"]
+    # Prompt-sandbox hard stop (2026-07-15): a sandbox replay of historical
+    # threads (run-twitter-cycle.sh's S4L_SANDBOX_CANDIDATES_FILE) must NEVER
+    # reach a real post, full stop -- unconditionally, regardless of
+    # DRAFT_ONLY. Found live: a direct interactive invocation without
+    # DRAFT_ONLY=1 ran straight through to this function and only missed a
+    # real post because already_posted_to_thread() below happened to catch
+    # it (the specific historical candidate had already been replied to for
+    # real in the past); a --status pending sandbox candidate would NOT have
+    # been caught by that check and WOULD have posted for real. This check
+    # is the actual gate; the menu-bar "block Approve on sandbox cards" rail
+    # only protects the DRAFT_ONLY/human-review path and never covers this
+    # direct-post path at all.
+    if (c.get("experiments") or {}).get("sandbox"):
+        print(
+            f"[post] candidate {cid}: sandbox candidate, refusing to post "
+            f"(thread={candidate_url})",
+            flush=True,
+        )
+        return ("skipped", "sandbox_no_post")
     reply_text = (c.get("reply_text") or "").strip()
     link_url = (c.get("link_url") or "").strip()
     project = c["matched_project"]
