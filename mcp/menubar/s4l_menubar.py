@@ -3021,9 +3021,7 @@ class S4LMenuBar(rumps.App):
             # button (moved out of the dropdown 2026-07-10), which reuses the
             # bulk-discard handler wholesale, confirmation alert included.
             # Both are s4l_card-only surfaces (the standalone feedback panel
-            # and the corner card's title-bar accessory; the canvas has no
-            # equivalent title-bar button — "Select all" + "Discard
-            # selected" already cover that case natively), so this stays
+            # and the corner card's title-bar accessory), so this stays
             # unconditional on s4l_card regardless of which layout is about
             # to present, and never goes stale if the layout is switched.
             s4l_card.set_feedback_handler(self._on_feedback_text)
@@ -3034,6 +3032,14 @@ class S4LMenuBar(rumps.App):
                 focus=focus,
             )
             if layout_name == "canvas":
+                # The canvas's own bulk-action card (2026-07-16, replacing
+                # the corner card's title-bar button with a persistent grid
+                # tile): Discard All reuses the SAME confirm-and-clear-
+                # everything handler s4l_card's title bar drives (already
+                # surface-agnostic); Approve All has no corner-card
+                # equivalent to reuse.
+                mod.set_discard_all_handler(self._discard_all_pending)
+                mod.set_approve_all_handler(self._approve_all_pending)
                 mod.present_review_canvas(drafts, **present_kwargs)
             else:
                 mod.present_review(drafts, **present_kwargs)
