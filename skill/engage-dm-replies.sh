@@ -1295,7 +1295,11 @@ case "${PLATFORM:-all}" in
         log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit pre-flight acquire BUSY; ensure_reddit_browser_for_backend will run anyway; per-DM acquires inside the prompt will retry."
-        ensure_reddit_browser_for_backend
+        ensure_reddit_browser_for_backend || _RD_BOOT_RC=$?
+        if [ "${_RD_BOOT_RC:-0}" = "78" ]; then
+            python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+        fi
+        hc_exit_if_deferred "${_RD_BOOT_RC:-0}" "reddit-harness"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         ;;
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
@@ -1317,7 +1321,11 @@ case "${PLATFORM:-all}" in
         log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit pre-flight acquire BUSY; per-DM acquires inside the prompt will retry."
-        ensure_reddit_browser_for_backend
+        ensure_reddit_browser_for_backend || _RD_BOOT_RC=$?
+        if [ "${_RD_BOOT_RC:-0}" = "78" ]; then
+            python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+        fi
+        hc_exit_if_deferred "${_RD_BOOT_RC:-0}" "reddit-harness"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         acquire_lock "twitter-browser" 3600
         ensure_twitter_browser_for_backend
