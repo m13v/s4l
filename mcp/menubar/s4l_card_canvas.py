@@ -98,6 +98,28 @@ from s4l_card import (
 # already enforce that), but each module owns its own reference regardless.
 _active = None
 
+# Bulk-action hooks for the control card's two buttons, same registration
+# pattern as s4l_card.py's set_discard_all_handler. The menu bar registers
+# BOTH modules' set_discard_all_handler with the SAME _discard_all_pending
+# (it's already surface-agnostic -- reads the store, not the card UI) before
+# presenting either surface; set_approve_all_handler has no corner-card
+# equivalent to mirror since "approve everything with no review" only makes
+# sense once several drafts are visible at once. A canvas built while either
+# is None simply has an inert button.
+_discard_all_handler = None
+_approve_all_handler = None
+
+
+def set_discard_all_handler(cb):
+    global _discard_all_handler
+    _discard_all_handler = cb
+
+
+def set_approve_all_handler(cb):
+    global _approve_all_handler
+    _approve_all_handler = cb
+
+
 WIN_MARGIN = 20.0
 HEADER_H = 40.0
 GRID_GAP = 16.0
@@ -458,6 +480,11 @@ class _CanvasController(NSObject):
         except Exception:
             pass
         try:
+            plural = "s" if total != 1 else ""
+            self._control_count_label.setStringValue_(f"{total} pending draft{plural}")
+        except Exception:
+            pass
+        try:
             self._panel.setTitle_(f"s4l · Review {total} drafts (canvas)")
         except Exception:
             pass
@@ -467,10 +494,12 @@ class _CanvasController(NSObject):
     @objc.python_method
     def extend_drafts(self, drafts):
         """Append newly-queued drafts to the backlog, refilling any empty
-        slots immediately (the backlog was exhausted, now it isn't).
+        slots immediately (the backlog was exhausted, now it isn't; a
+        never-yet-activated slot un-hides the same way, see _fill_slot).
         Existing slots/tiles are never touched -- an in-progress edit on
         screen is never disturbed, mirroring the corner card's own
-        extend_drafts."""
+        extend_drafts. Slot 0 is the persistent control card, never part of
+        this rotation."""
         if self._panel is None:
             return 0
         have = self._known_ns()
@@ -480,6 +509,8 @@ class _CanvasController(NSObject):
         added.sort(key=_sort_key, reverse=True)
         self._backlog.extend(added)
         for i, slot in enumerate(self._slots):
+            if i == 0:
+                continue
             if slot["tile"] is None and self._backlog:
                 self._fill_slot(i)
         self._refresh_header()
