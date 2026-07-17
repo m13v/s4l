@@ -451,7 +451,8 @@ def main():
         project_config.get("subreddits", config.get("subreddits", []))
         if project_config else config.get("subreddits", [])
     )
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+    from account_resolver import resolve as _resolve_account
+    reddit_username = _resolve_account("reddit") or ""
     user_agent = f"social-autoposter/1.0 (u/{reddit_username})" if reddit_username else "social-autoposter/1.0"
 
     # Rate limit check
