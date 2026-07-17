@@ -426,7 +426,7 @@ For each chosen candidate:
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim as draft_a_text/draft_a_style (set is_reused_draft=true, draft_b_text=null, draft_b_style=null). Do NOT call log_draft.py; do NOT redraft; do NOT write a second variant, prior cycle already paid the LLM cost for the one draft you have.
    - Otherwise (fresh candidate, is_reused_draft=false): write TWO independent drafts. Do NOT judge, rank, or pick a favorite between them, both are shown to the reviewer, who decides.
      - draft_a_text: follow the DRAFT A style block above (its own description/example/note/length limit).
-     - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move because they follow different style templates, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.@DRAFT_B_DIVERGENCE_NOTE@
+     - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.@DRAFT_B_DIVERGENCE_NOTE@
    - @DRAFT_DIRECTIVE@ (applies to both drafts on fresh candidates; each still obeys its OWN style's length limit, not a shared one).
 3a. PERSIST DRAFT A (skip entirely for reused drafts):
      python3 @REPO_DIR@/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'DRAFT_A_TEXT' --style DRAFT_A_STYLE --assigned-style '@PICKED_STYLE@' --assigned-mode '@PICKED_MODE@'
@@ -512,6 +512,21 @@ def render_twitter_prompt(ing):
     arm = ing.get("arm") or os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or ""
     lane = ing.get("lane") if ing.get("lane") is not None else os.environ.get("S4L_ACTIVE_LANE", "")
     picked_style = ing.get("picked_style") or ""
+    picked_style_b = ing.get("picked_style_b") or ""
+    picked_mode = ing.get("picked_mode") or "use"
+    picked_mode_b = ing.get("picked_mode_b") or "use"
+    if arm == ARM_TREATMENT:
+        # No engagement style is assigned for treatment_v4 (2026-07-17). The
+        # picker may still have run upstream in run-twitter-cycle.sh (cheaper
+        # to leave that call in the locked shell script than to thread a
+        # skip-the-picker flag through it), but its result must never reach
+        # the prompt, the --assigned-style drift-coercion path in
+        # twitter_post_plan.py, or the output JSON -- only this sentinel may.
+        # Must match engagement_styles.py's duplicated "voice_first" literal.
+        picked_style = STYLE_SENTINEL_TREATMENT
+        picked_style_b = STYLE_SENTINEL_TREATMENT
+        picked_mode = "use"
+        picked_mode_b = "use"
     return (
         _TW_TEMPLATE
         .replace("@PREFIX@", ing.get("prefix") or "")
@@ -531,10 +546,10 @@ def render_twitter_prompt(ing):
         .replace("@DRAFT_B_DIVERGENCE_NOTE@", draft_b_divergence_note(arm))
         .replace("@DRAFT_DIRECTIVE@", draft_directive(arm, lane))
         .replace("@PICKED_STYLE_OR_INVENT@", picked_style or "(invent)")
-        .replace("@PICKED_STYLE_B@", ing.get("picked_style_b") or "")
-        .replace("@PICKED_MODE_B@", ing.get("picked_mode_b") or "use")
+        .replace("@PICKED_STYLE_B@", picked_style_b)
+        .replace("@PICKED_MODE_B@", picked_mode_b)
         .replace("@PICKED_STYLE@", picked_style)
-        .replace("@PICKED_MODE@", ing.get("picked_mode") or "use")
+        .replace("@PICKED_MODE@", picked_mode)
     )
 
 
