@@ -837,6 +837,9 @@ def cmd_log_post(args):
         "project": args.project,
         "engagement_style": getattr(args, "engagement_style", None),
         "search_topic": getattr(args, "search_topic", None),
+        # draft_prompt A/B arm that shaped this draft (2026-07-16); same
+        # posts.draft_prompt_variant column log_post.py stamps for twitter.
+        "draft_prompt_variant": getattr(args, "draft_prompt_variant", None),
         "claude_session_id": session_id,
         "language": None,
         "is_recommendation": False,
@@ -925,6 +928,12 @@ def main():
                             "can break out audience-page traffic (e.g. "
                             "'audience_page:founder-ghostwriting') from generic "
                             "homepage links.")
+    p_log.add_argument("--draft-prompt-variant", dest="draft_prompt_variant",
+                       default=None,
+                       help="draft_prompt A/B arm that shaped this draft "
+                            "(treatment_v4/control_v4); stored in "
+                            "posts.draft_prompt_variant, same column the "
+                            "twitter lane stamps via log_post.py.")
 
     args = parser.parse_args()
     try:
