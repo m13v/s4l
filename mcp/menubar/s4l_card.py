@@ -801,6 +801,31 @@ def _label(frame, text, *, size=12, bold=False, muted=False, truncates=False):
     return f
 
 
+class _TileScroll(NSScrollView):
+    """Scroll box that yields the wheel to an enclosing canvas grid. Inside
+    the canvas (s4l_card_canvas.py) most of a tile's area is one of these
+    boxes, and AppKit routes the whole wheel gesture (momentum included) to
+    the innermost scroll view under the pointer -- so the canvas simply
+    would not scroll whenever the pointer sat over a thread quote or draft
+    editor (2026-07-16 user report). Forward the event to the outer scroll
+    view instead, UNLESS this box's own text view holds the caret (the
+    reviewer clicked into it, so inner scrolling is what they want). In the
+    corner card there is no enclosing scroll view and behavior is unchanged."""
+
+    def scrollWheel_(self, event):
+        try:
+            outer = self.enclosingScrollView()
+            if outer is not None:
+                win = self.window()
+                fr = win.firstResponder() if win is not None else None
+                if fr is None or fr is not self.documentView():
+                    outer.scrollWheel_(event)
+                    return
+        except Exception:
+            pass
+        objc.super(_TileScroll, self).scrollWheel_(event)
+
+
 def _editable_scroll(frame, text=""):
     """Rounded-rect scrollable text editor (hairline border, solid text
     background over the frosted panel; falls back to the old square bezel when
@@ -809,7 +834,7 @@ def _editable_scroll(frame, text=""):
     outer frame the text runs underneath the scroller. The scroller itself
     auto-hides so it only appears when the text overflows.
     Returns (scroll, textview)."""
-    scroll = NSScrollView.alloc().initWithFrame_(frame)
+    scroll = _TileScroll.alloc().initWithFrame_(frame)
     scroll.setHasVerticalScroller_(True)
     scroll.setAutohidesScrollers_(True)
     if _round_rect(scroll):
@@ -902,6 +927,7 @@ class _ReviewController(NSObject):
         self._eye_btn = None
         self._details_btn = None
         self._stats_popover = None
+        self._pending_hover_kind = None
         self._age_expiry_label = None
         self._age_expiry_timer = None
         # Per-card telemetry, reset when a NEW card renders (not on the
@@ -1378,6 +1404,7 @@ class _ReviewController(NSObject):
             _label(NSMakeRect(M, H - 70, 78, 18), "Replying to", size=12, bold=True, muted=True)
         )
         right_x = W - M
+        self._cancel_pending_hover()
         self._close_stats_popover()
         self._stop_age_expiry_timer()
         self._eye_btn = None
@@ -1511,7 +1538,7 @@ class _ReviewController(NSObject):
         # direction); the box scrolls instead of shrinking the text to fit,
         # and the link sits at the START so it's always visible regardless
         # of scroll position or thread length.
-        thread_scroll = NSScrollView.alloc().initWithFrame_(
+        thread_scroll = _TileScroll.alloc().initWithFrame_(
             NSMakeRect(M, H - 150, W - 2 * M, 74)
         )
         thread_scroll.setHasVerticalScroller_(True)
@@ -1948,13 +1975,18 @@ class _ReviewController(NSObject):
         if kind == "draft":
             self._draft_hover_open[slot] = time.time()
             return
-        _log(f"{kind} eye hover enter" if kind != "expiry" else "expiry label hover enter")
-        if kind == "details":
-            self._show_details_popover()
-        elif kind == "expiry":
-            self._show_expiry_popover()
-        else:
-            self._show_stats_popover()
+        # Dwell-gated (2026-07-16 canvas scroll-perf fix): scrolling the
+        # canvas sweeps these tracking areas under a stationary pointer,
+        # and opening a popover synchronously per enter event (text
+        # measurement + NSPopover build) hitched the scroll. A short
+        # delayed perform only fires if the pointer actually STAYS on the
+        # anchor; enter/exit pairs from content moving underneath cancel
+        # out. Bonus: the delayed perform is queued in the default run-loop
+        # mode, which does not run during a wheel gesture (event-tracking
+        # mode), so a popover can never open mid-scroll at all.
+        self._cancel_pending_hover()
+        self._pending_hover_kind = kind
+        self.performSelector_withObject_afterDelay_("showHoverPopover:", kind, 0.2)
 
     def mouseExited_(self, event):
         kind, slot = self._hover_info(event)
@@ -1965,8 +1997,40 @@ class _ReviewController(NSObject):
                     (time.time() - started) * 1000
                 )
             return
-        _log("eye hover exit")
+        self._cancel_pending_hover()
         self._close_stats_popover()
+
+    @objc.python_method
+    def _cancel_pending_hover(self):
+        pending = getattr(self, "_pending_hover_kind", None)
+        if pending is not None:
+            try:
+                NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+                    self, "showHoverPopover:", pending
+                )
+            except Exception:
+                pass
+            self._pending_hover_kind = None
+
+    def showHoverPopover_(self, kind):
+        """Delayed-perform target for a dwelled hover (see mouseEntered_)."""
+        self._pending_hover_kind = None
+        kind = str(kind)
+        try:
+            _log(
+                f"{kind} eye hover enter" if kind != "expiry" else "expiry label hover enter"
+            )
+            if kind == "details":
+                self._show_details_popover()
+            elif kind == "expiry":
+                self._show_expiry_popover()
+            else:
+                self._show_stats_popover()
+        except Exception:
+            # The card may have re-rendered (anchor replaced) between the
+            # hover and the dwell firing; a popover that can't anchor is
+            # simply skipped.
+            pass
 
     @objc.python_method
     def _flush_draft_hovers(self):
@@ -2481,6 +2545,7 @@ class _ReviewController(NSObject):
     @objc.python_method
     def _finish(self):
         global _active
+        self._cancel_pending_hover()
         self._close_stats_popover()
         self._stop_age_expiry_timer()
         if self._host_view is not None:
