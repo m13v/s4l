@@ -199,13 +199,16 @@ def get_excluded_authors(config, platform):
         if reddit_account:
             excluded.add(reddit_account.lower())
     elif platform == "linkedin":
-        linkedin_name = config.get("accounts", {}).get("linkedin", {}).get("name", "")
+        from account_resolver import resolve as _resolve_li
+        linkedin_name = _resolve_li("linkedin") or ""
         if linkedin_name:
             excluded.add(linkedin_name.lower())
         for p in config.get("exclusions", {}).get("linkedin_profiles", []):
             excluded.add(p.lower())
     elif platform == "x":
-        twitter_handle = config.get("accounts", {}).get("twitter", {}).get("handle", "").lstrip("@")
+        # The resolver normalizes (strips @) and covers env + mirror fallback.
+        from account_resolver import resolve as _resolve_tw
+        twitter_handle = _resolve_tw("twitter") or ""
         if twitter_handle:
             excluded.add(twitter_handle.lower())
         for t in config.get("exclusions", {}).get("twitter_accounts", []):
