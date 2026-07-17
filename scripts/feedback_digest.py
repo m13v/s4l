@@ -83,7 +83,7 @@ import learned_preferences as lp  # noqa: E402
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 LOCK_PATH = os.path.expanduser("~/.social-autoposter-mcp/feedback-digest.lock")
-MAX_EVENTS_PER_RUN = 200
+MAX_EVENTS_PER_RUN = 5
 # A cluster of reason-less rejects in one batch is a signal worth flagging
 # even when no shared textual pattern justifies a learned_preferences entry:
 # pure volume with no discernible pattern usually means something upstream
