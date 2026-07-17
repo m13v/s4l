@@ -1874,10 +1874,12 @@ class _ReviewController(NSObject):
         pop.setBehavior_(NSPopoverBehaviorApplicationDefined)
         pop.setContentViewController_(vc)
         pop.setContentSize_((pw, ph))
-        try:
-            NSApp.activateIgnoringOtherApps_(True)
-        except Exception:
-            pass
+        # No activateIgnoringOtherApps_ here (removed 2026-07-16): with
+        # ApplicationDefined behavior the popover shows fine from an inactive
+        # accessory app, and yanking app activation on a HOVER (these popovers
+        # open from mouseEntered_) stole focus from whatever the user was
+        # doing -- worst on the canvas, where scrolling sweeps anchors under
+        # the pointer.
         # Anchor to the eye's frame in the (non-flipped) content view, where
         # NSRectEdge 1 = NSMinYEdge is unambiguously the BOTTOM edge, so the
         # popover reliably opens below the icon. Anchoring to the button's own
