@@ -1207,7 +1207,12 @@ async function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped
           set.posted = true;
           set.terminal = false;
           if (c.our_url) set.our_url = c.our_url;
-          unset.push("discard_reason");
+          // Clear a stale failure stamp too: the menubar's per-card call can
+          // see posted=0 (the batch drain posted it under a different call)
+          // and stamp post_failed on a card that IS live (seen on 565462,
+          // 2026-07-17). posted is the settled truth; the residue just adds a
+          // false "didn't post" signal to dashboards/notifications.
+          unset.push("discard_reason", "post_failed", "post_error");
         } else if (c.terminal === true) {
           set.terminal = true;
           set.terminal_reason = c.terminal_reason ?? null;
@@ -1254,8 +1259,12 @@ async function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped
             f.terminal = false;
             if (c.our_url) f.our_url = c.our_url;
             // A post outcome closes the card's history: the pre-approval
-            // freshness stamp must not survive it.
+            // freshness stamp must not survive it. Same for a stale
+            // post_failed from a peer call's posted=0 misattribution (see
+            // the locked-patch branch above).
             delete f.discard_reason;
+            delete (f as Record<string, unknown>).post_failed;
+            delete (f as Record<string, unknown>).post_error;
           } else if (c.terminal === true && f.posted !== true) {
             f.terminal = true;
             f.terminal_reason = c.terminal_reason;
