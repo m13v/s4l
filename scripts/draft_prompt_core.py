@@ -151,9 +151,10 @@ def _treatment_core(voice_examples_ref):
     """
     return (
         "PRIORITY ORDER for how you write this, highest first: (1) "
-        "learned_preferences.draft_style_notes and edit_examples are the "
+        "learned_preferences.draft_style_notes are the "
         "strongest signal available, real human corrections to this "
-        "account's own past drafts, and are MANDATORY, not advisory. (2) "
+        "account's own past drafts (some carry a before/after example), and "
+        "are MANDATORY, not advisory. (2) "
         f"The ACCOUNT VOICE CORPUS block and {voice_examples_ref} are "
         "VERBATIM GROUND TRUTH for how this account actually writes: "
         "capitalization, punctuation, contractions, sentence length, "
@@ -332,6 +333,9 @@ def global_learned_prefs_json():
         config = _load_config()
         block = lp.get_global_block(config)
         block.pop("history", None)
+        # edit_examples feed only the digest now (2026-07-17); the drafting and
+        # judging prompts read their distilled form via draft_style_notes.
+        block.pop("edit_examples", None)
         return json.dumps(block, indent=2)
     except Exception:
         return "{}"
