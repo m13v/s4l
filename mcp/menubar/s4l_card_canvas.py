@@ -69,6 +69,7 @@ from AppKit import (
     NSWindowOcclusionStateVisible,
     NSBackingStoreBuffered,
     NSNormalWindowLevel,
+    NSFloatingWindowLevel,
     NSApplicationActivationPolicyAccessory,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
@@ -247,13 +248,57 @@ class _CanvasController(NSObject):
         panel.orderFrontRegardless()
         self._log_surface("presented")
         if self._focus:
-            try:
-                NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-                NSApp.activateIgnoringOtherApps_(True)
-            except Exception:
-                pass
+            self.raise_to_front()
+
+    @objc.python_method
+    def raise_to_front(self):
+        """Reliably bring the canvas above the current front app ONCE. The panel
+        is a NON-activating panel at NSNormalWindowLevel (so it behaves like a
+        normal window the reviewer works IN, per 2026-07-16), which means a plain
+        makeKeyAndOrderFront on our accessory app can leave it BEHIND the
+        frontmost app: window-level ordering, not activation, decides what covers
+        what, and a normal-level window can't jump above another normal-level
+        window that belongs to the active app. That is exactly the 2026-07-17
+        Nhat report -- the canvas 'presented' occluded ("didn't surface"). Fix:
+        briefly promote to NSFloatingWindowLevel so orderFrontRegardless is
+        guaranteed to place it in front regardless of activation, then demote
+        back to normal a beat later so other apps can cover it again (keeping the
+        "work IN it like a normal window" posture; always-on-top is the corner
+        card's job, not this one)."""
+        panel = self._panel
+        if panel is None:
+            return
+        try:
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        try:
+            panel.setLevel_(NSFloatingWindowLevel)
+        except Exception:
+            pass
+        try:
             panel.makeKeyAndOrderFront_(None)
             panel.orderFrontRegardless()
+        except Exception:
+            pass
+        # Drop back to a normal window level once it's on screen. performSelector
+        # keeps it above other windows just long enough to land in front; if
+        # scheduling ever fails, demote inline so it can never stay stuck on top.
+        try:
+            self.performSelector_withObject_afterDelay_("demoteWindowLevel:", None, 0.6)
+        except Exception:
+            try:
+                panel.setLevel_(NSNormalWindowLevel)
+            except Exception:
+                pass
+
+    def demoteWindowLevel_(self, _):
+        try:
+            if self._panel is not None:
+                self._panel.setLevel_(NSNormalWindowLevel)
+        except Exception:
+            pass
 
     @objc.python_method
     def _render(self):
@@ -755,13 +800,10 @@ def focus_active():
     if c is None or c._panel is None:
         return False
     try:
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        NSApp.activateIgnoringOtherApps_(True)
-    except Exception:
-        pass
-    try:
-        c._panel.makeKeyAndOrderFront_(None)
-        c._panel.orderFrontRegardless()
+        # Same reliable front-raise as the initial focused present: a brief
+        # window-level promotion so an already-open canvas comes above the front
+        # app even though it is a non-activating normal-level panel.
+        c.raise_to_front()
         c._panel.makeMainWindow()
         return True
     except Exception:
