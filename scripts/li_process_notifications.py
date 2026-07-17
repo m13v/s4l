@@ -12,9 +12,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_post
+from account_resolver import resolve as _resolve_account
 
 EXCLUDED_AUTHORS = {"louis030195", "louis3195"}
-OWN_NAMES = {"Matthew Diakonov", "m13v"}
+# Self-match guardrail: the resolved LinkedIn display name (accounts.linkedin.name)
+# plus the legacy slug form notifications sometimes carry. Resolved, not hardcoded,
+# so a non-operator install filters ITS own posts instead of the repo owner's.
+OWN_NAMES = {n for n in (_resolve_account("linkedin"), "m13v") if n}
 
 NOTIFS_FILE = "/tmp/li_notifications.json"
 EXISTING_COMMENTS_FILE = "/tmp/li_existing_comments.txt"
@@ -99,7 +103,10 @@ def main():
                     "thread_content": snippet[:500],    # best we have
                     "our_url": our_url,
                     "our_content": "[discovered from notifications, no original content tracked]",
-                    "our_account": "matthew-autoposter",
+                    # Resolved LinkedIn identity. The old literal here was
+                    # "matthew-autoposter" — the MOLTBOOK username stamped on a
+                    # linkedin row (wrong platform's identity, a pre-existing bug).
+                    "our_account": _resolve_account("linkedin") or "",
                     "source_summary": "discovered_from_notifications",
                     "project": "general",               # topics empty in config
                     "engagement_style": "discovery",
