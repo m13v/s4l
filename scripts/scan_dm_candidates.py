@@ -193,7 +193,9 @@ def get_excluded_authors(config, platform):
     excluded.add("[deleted]")
 
     if platform == "reddit":
-        reddit_account = config.get("accounts", {}).get("reddit", {}).get("username", "")
+        # The ONE resolver (also covers the reddit_account login-truth key).
+        from account_resolver import resolve as _resolve_account
+        reddit_account = _resolve_account("reddit") or ""
         if reddit_account:
             excluded.add(reddit_account.lower())
     elif platform == "linkedin":
