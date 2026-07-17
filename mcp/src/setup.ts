@@ -233,11 +233,19 @@ export function projectExists(name: string): boolean {
   }
 }
 
-// Strip stray JSON-array syntax that leaks into a single topic when a
-// stringified array was split on commas (leading "[", trailing "]", and the
-// surrounding quotes on each element). Without this, topics like '["AI video
-// generation"' and '"ex-Google"]' get seeded verbatim and poison every search
-// query with literal [, ] and " characters (Karol, 2026-06-30).
+// Strip stray JSON-array syntax that leaks into a single element ONLY when a
+// stringified array had to be split on commas (leading "[", trailing "]", and
+// the surrounding quotes on each element). Without this, topics like '["AI
+// video generation"' and '"ex-Google"]' get seeded verbatim and poison every
+// search query with literal [, ] and " characters (Karol, 2026-06-30).
+//
+// IMPORTANT: apply this ONLY on the naive-split fallback path. On the clean
+// paths (a real array, or a valid stringified array that JSON.parse handled)
+// each element is already clean, so stripping surrounding quotes there would
+// destroy legitimate phrase-match quotes in a search query — e.g.
+// '"agentic coding" min_faves:10' would lose its LEADING " and seed as
+// 'agentic coding" min_faves:10', weakening the phrase match (reported
+// 2026-07-17). Clean paths therefore only get trimmed.
 function stripTopicSyntax(x: string): string {
   let s = String(x).trim();
   s = s.replace(/^\[+/, "").replace(/\]+$/, "").trim();
@@ -256,6 +264,9 @@ export function normalizeStringList(
 ): string[] | undefined {
   if (t == null) return undefined;
   let raw: unknown[];
+  // Elements only carry stray JSON-array syntax when we reach the naive
+  // comma/newline split below; on the clean paths they're already delimited.
+  let fromNaiveSplit = false;
   if (Array.isArray(t)) {
     raw = t;
   } else {
@@ -268,9 +279,17 @@ export function normalizeStringList(
         parsed = null;
       }
     }
-    raw = Array.isArray(parsed) ? parsed : s.split(/[,\n]/);
+    if (Array.isArray(parsed)) {
+      raw = parsed;
+    } else {
+      raw = s.split(/[,\n]/);
+      fromNaiveSplit = true;
+    }
   }
-  return raw.map((x) => stripTopicSyntax(String(x))).filter(Boolean);
+  const clean = fromNaiveSplit
+    ? stripTopicSyntax
+    : (x: string) => String(x).trim();
+  return raw.map((x) => clean(String(x))).filter(Boolean);
 }
 
 function normalizeTopics(t: string[] | string | undefined): string[] | undefined {
