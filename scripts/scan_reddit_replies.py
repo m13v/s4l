@@ -328,7 +328,10 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    reddit_account = args.reddit_account or config.get("accounts", {}).get("reddit", {}).get("username", "")
+    # CLI override -> the ONE resolver (env -> reddit_account login truth ->
+    # accounts.reddit.username).
+    from account_resolver import resolve as _resolve_account
+    reddit_account = args.reddit_account or _resolve_account("reddit") or ""
     if not reddit_account:
         print("ERROR: Reddit account not configured. Set it in config.json or pass --reddit-account")
         sys.exit(1)
