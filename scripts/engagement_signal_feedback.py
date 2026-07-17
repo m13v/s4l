@@ -55,7 +55,6 @@ MIN_STYLE_SAMPLE = 10
 WARM_MIN_LAST_30D = 4
 WARM_MIN_CHILD_REPLIES = 1
 MAX_WARM_PROMOTIONS_PER_RUN = 3
-ENTRY_CHAR_LIMIT = 200  # mirrors learned_preferences.MAX_ENTRY_CHARS
 
 
 def fetch_window_rows(platform: str, days: int, limit_pages: int = 20) -> list[dict]:
@@ -165,7 +164,7 @@ def build_warm_entry(w: dict) -> str:
         f"({w['replied']}/{w['last_30d']} replied in 30d, {w['child_replies']} child "
         f"replies, 0 risk skips); warm to more engaged/product-relevant replies."
     )
-    return entry[:ENTRY_CHAR_LIMIT]
+    return entry
 
 
 def build_style_note(top: dict) -> str:
@@ -174,8 +173,6 @@ def build_style_note(top: dict) -> str:
         f"({top['child_reply_rate']:.2f}/reply, n={top['n']}); prefer it for technical-"
         "correction replies (concrete metric, name the exact failure mode)."
     )
-    if len(note) > ENTRY_CHAR_LIMIT:
-        note = note[: ENTRY_CHAR_LIMIT - 1].rsplit(" ", 1)[0] + "…"
     return note
 
 
