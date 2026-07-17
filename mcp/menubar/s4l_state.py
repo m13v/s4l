@@ -277,19 +277,39 @@ def autopilot_loaded() -> bool:
 _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+# /health is a trivial constant response, so any real latency is the OWNING MCP
+# process being briefly CPU-starved or paged out under machine load (Nhat's box:
+# ~8.6GB swap, 39% mem pressure, 582 procs), not the endpoint doing work. The old
+# single 1.5s attempt flapped a perfectly-alive server to "unreachable" on one
+# transient stall, and a false negative here strands approved drafts (see the
+# "dead pointer" note in mcp/src/index.ts). So probe forgivingly: a longer
+# deadline plus ONE retry. A genuinely-dead endpoint fails fast either way
+# (ECONNREFUSED returns immediately, both attempts), so this only rescues live
+# servers -- it never lets a real outage look healthy.
+_HEALTH_TIMEOUT_S = 4.0
+_HEALTH_ATTEMPTS = 2
+_HEALTH_RETRY_BACKOFF_S = 0.15
+
+
 def _endpoint_url():
     ep = read_json("panel-endpoint.json")
     url = (ep or {}).get("url")
     if not url:
         return None
-    try:
-        with _NO_PROXY_OPENER.open(url + "health", timeout=1.5) as r:
-            if r.status == 200:
-                return url
-    except Exception as e:
-        sys.stderr.write(f"[s4l-state] loopback health check failed: {type(e).__name__}: {e}\n")
-        sys.stderr.flush()
-        return None
+    last = None
+    for attempt in range(_HEALTH_ATTEMPTS):
+        try:
+            with _NO_PROXY_OPENER.open(url + "health", timeout=_HEALTH_TIMEOUT_S) as r:
+                return url if r.status == 200 else None
+        except Exception as e:
+            last = e
+            if attempt + 1 < _HEALTH_ATTEMPTS:
+                time.sleep(_HEALTH_RETRY_BACKOFF_S)
+    sys.stderr.write(
+        f"[s4l-state] loopback health check failed after {_HEALTH_ATTEMPTS} "
+        f"attempts: {type(last).__name__}: {last}\n"
+    )
+    sys.stderr.flush()
     return None
 
 
