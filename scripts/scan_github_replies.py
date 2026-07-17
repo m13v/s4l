@@ -42,7 +42,8 @@ def word_count(text):
 
 def main():
     config = load_config()
-    github_user = config.get("accounts", {}).get("github", {}).get("username", "m13v")
+    from account_resolver import resolve as _resolve_account
+    github_user = _resolve_account("github") or ""
 
     # Get all active GitHub posts we've commented on. The posts GET returns id +
     # thread_url together, so we capture the post_id map here and skip the
