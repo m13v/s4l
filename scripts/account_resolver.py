@@ -7,6 +7,16 @@ Resolution order for each platform (first non-empty wins):
      checked-in file). Twitter retains the legacy `AUTOPOSTER_TWITTER_HANDLE`
      name as an alias.
   2. The matching field in `config.json` -> `accounts.<platform>.<field>`.
+  3. The platform's durable identity store, when it has one. Today only
+     twitter does: the keychain-independent cookie mirror stamps the live
+     @handle at connect time (see twitter_cookie_mirror). This is the SAME
+     ground truth the session posts through, so it's a safe last resort where
+     a hardcoded fallback would not be. It exists because config.json is not a
+     reliable single home for the handle: onboarding populated the mirror but
+     not always config (the "posts land 0/N, no_account_configured" bug), so
+     making config the ONLY source made it a single point of failure. There is
+     deliberately NO hardcoded default anywhere in this resolver; a missing
+     handle returns None and callers refuse rather than impersonate an account.
 
 The handle is normalized:
   - leading `@` is stripped (twitter)
@@ -81,6 +91,24 @@ def _load_config() -> dict:
         return {}
 
 
+def _durable_handle(key: str) -> Optional[str]:
+    """Best-effort read of the platform's durable identity store, or None.
+
+    The durable store is written once at connect time and survives a fresh
+    install / keychain re-lock / Cookies-DB wipe, so it's the ground-truth last
+    resort when neither env nor config carries the handle. Only twitter has one
+    today (the cookie mirror); other platforms return None (env + config only).
+    Never raises: an unimportable/empty store must not break resolution.
+    """
+    if key in ("twitter", "x"):
+        try:
+            import twitter_cookie_mirror  # optional dep; scripts-dir sibling
+            return normalize((twitter_cookie_mirror.load_meta() or {}).get("handle"))
+        except Exception:
+            return None
+    return None
+
+
 def resolve(platform: str) -> Optional[str]:
     """Return the normalized posting handle for `platform`, or None."""
     key = (platform or "").strip().lower()
@@ -96,7 +124,13 @@ def resolve(platform: str) -> Optional[str]:
     cfg = _load_config()
     accounts = cfg.get("accounts") or {}
     block = accounts.get(section) or {}
-    return normalize(block.get(field))
+    config_value = normalize(block.get(field))
+    if config_value:
+        return config_value
+
+    # Last resort: the durable identity store (twitter cookie mirror). Keeps
+    # config.json from being a single point of failure without ever guessing.
+    return _durable_handle(key)
 
 
 def require(platform: str) -> str:
