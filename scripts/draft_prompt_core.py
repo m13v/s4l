@@ -689,11 +689,43 @@ def _cli():
         print(f"[draft_prompt_core] arm={variant} source={source}", file=sys.stderr)
         return 0
     if cmd == "render-twitter":
-        if len(args) < 3 or args[1] != "--ingredients":
-            print("render-twitter requires --ingredients FILE", file=sys.stderr)
+        if len(args) < 3 or args[1] not in ("--ingredients", "--ingredients-dir"):
+            print("render-twitter requires --ingredients FILE | --ingredients-dir DIR", file=sys.stderr)
             return 2
-        with open(args[2]) as f:
-            ing = json.load(f)
+        if args[1] == "--ingredients":
+            with open(args[2]) as f:
+                ing = json.load(f)
+        else:
+            # Shell-cycle mode: multiline blocks ride as files in DIR (written
+            # with printf, immune to ARG_MAX/env-size limits); scalars ride as
+            # S4L_PREP_* env vars; arm/lane/prefix come from the cycle env
+            # (S4L_DRAFT_PROMPT_VARIANT / S4L_ACTIVE_LANE / TW_ENGINE_PREFIX).
+            d = args[2]
+
+            def _blk(name):
+                try:
+                    with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                        return f.read()
+                except OSError:
+                    return ""
+
+            ing = {
+                "batch_id": os.environ.get("S4L_PREP_BATCH_ID", ""),
+                "skill_file": os.environ.get("S4L_PREP_SKILL_FILE", ""),
+                "repo_dir": _repo_dir(),
+                "picked_style": os.environ.get("S4L_PREP_PICKED_STYLE", ""),
+                "picked_mode": os.environ.get("S4L_PREP_PICKED_MODE", "use"),
+                "picked_style_b": os.environ.get("S4L_PREP_PICKED_STYLE_B", ""),
+                "picked_mode_b": os.environ.get("S4L_PREP_PICKED_MODE_B", "use"),
+                "prefix": os.environ.get("TW_ENGINE_PREFIX", ""),
+                "candidate_block": _blk("candidate_block"),
+                "media_block": _blk("media_block"),
+                "top_report": _blk("top_report"),
+                "top_report_b": _blk("top_report_b"),
+                "styles_block": _blk("styles_block"),
+                "styles_block_b": _blk("styles_block_b"),
+                "recent_self_block": _blk("recent_self_block"),
+            }
         sys.stdout.write(render_twitter_prompt(ing))
         return 0
     print(f"unknown command: {cmd}", file=sys.stderr)
