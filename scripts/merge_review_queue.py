@@ -257,6 +257,11 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
         for c in cands
         if not c.get("posted")
         and not c.get("terminal")
+        # Mirror s4l_state.candidate_state()'s awaiting_review bucket exactly
+        # (same 4-flag filter as the pending_count site below): a post_failed
+        # row is a settled decision, not an undecided draft the freshness gate
+        # should be able to expire.
+        and not c.get("post_failed")
         and not c.get("approved")
         # The bulk lookup is /api/v1/twitter-candidates; reddit cards would
         # never match a row there, so skip them (their freshness gating stays
