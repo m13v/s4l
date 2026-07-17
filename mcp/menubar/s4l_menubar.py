@@ -579,6 +579,12 @@ class S4LMenuBar(rumps.App):
         # a hitch every 5s tick.
         self._resumed = False
         self._loopback_check_due_at = 0.0
+        # Periodic approved-backlog drain cadence (2026-07-17): the menubar is
+        # the single drainer now that the MCP boot-time drain is gone. 10 min
+        # keeps a transiently-failed approval's retry latency reasonable while
+        # staying far below the old effective 5-min/multi-instance churn.
+        self.RESUME_PERIOD_S = 600.0
+        self._resume_due_at = 0.0
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -2301,16 +2307,14 @@ class S4LMenuBar(rumps.App):
         never confirmed posted (the in-memory _post_q died with the old process).
         Skip any the plan already shows as posted, so a card that landed on X just
         before the kill — but whose status update was lost — isn't posted twice."""
-        # Store lane (canonical): approved-but-unposted rows in the review store.
-        # Legacy lane: pre-store approved-queue.json entries (read-only now; the
-        # ledger is no longer written). Union, store first, dedup by (batch, n).
+        # Store lane ONLY (2026-07-17): approved-but-unposted rows in the review
+        # store, the single source of truth. The legacy approved-queue.json lane
+        # (a read-only third truth source that the ledger stopped writing long
+        # ago) was removed — its entries could never settle, so it re-enqueued
+        # the same dead approvals on every resume forever. If a genuinely
+        # pre-store approval ever resurfaces, it is visible in the store lane
+        # or it is gone; do not re-add the union.
         pending = list(st.store_pending_posts())
-        seen = {(it.get("batch"), it.get("n")) for it in pending}
-        legacy = [
-            it for it in st.approved_queue_pending()
-            if (it.get("batch"), it.get("n")) not in seen
-        ]
-        pending.extend(legacy)
         if not pending:
             return
         posted_ns = set()
@@ -2462,8 +2466,19 @@ class S4LMenuBar(rumps.App):
         if now >= self._loopback_check_due_at:
             self._loopback_check_due_at = now + 60.0
             if st.loopback_reachable():
-                if not self._resumed:
+                # Periodic backlog drain (2026-07-17): the menubar is now the
+                # SINGLE owner of approved-backlog recovery. The MCP server's
+                # boot-time drainApprovedBacklog was removed (each queue-worker
+                # session boots an MCP, so "boot-time" had become a 5-minute
+                # cron across concurrent instances). Here it runs on the one
+                # long-lived process instead: on loopback recovery and every
+                # RESUME_PERIOD_S thereafter, but only while nothing is
+                # in-flight (avoids enqueueing a card twice while an earlier
+                # drain still holds it in _post_q). _resume_approved_queue is
+                # idempotent against the store (skips posted/terminal rows).
+                if (not self._resumed or now >= self._resume_due_at) and self._posts_outstanding == 0:
                     self._resumed = True
+                    self._resume_due_at = now + self.RESUME_PERIOD_S
                     try:
                         self._resume_approved_queue()
                     except Exception as e:
