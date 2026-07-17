@@ -228,6 +228,7 @@ def check_account_resolver_hard_fails():
     import account_resolver  # noqa: E402
 
     saved_load_config = account_resolver._load_config
+    saved_durable_handle = account_resolver._durable_handle
     saved_env = dict(os.environ)
     try:
         # Strip every account-related env var + simulate an empty config.json
@@ -237,6 +238,15 @@ def check_account_resolver_hard_fails():
             if k.startswith("AUTOPOSTER_"):
                 del os.environ[k]
         account_resolver._load_config = lambda: {}
+        # Also stub the durable identity store (2026-07-17, added alongside
+        # account_resolver's _durable_handle): resolve() falls through to it
+        # as a THIRD source after env/config, so on any machine with a real
+        # twitter_cookie_mirror (this box included) "no config" alone no
+        # longer means "nothing resolvable" -- the real connected account's
+        # own handle would still come back and fail this "fresh install"
+        # simulation for the wrong reason. Stub it the same way _load_config
+        # is stubbed so this test isolates all three sources, not just one.
+        account_resolver._durable_handle = lambda key: None
 
         for platform in ("twitter", "reddit", "linkedin", "github", "moltbook"):
             result = account_resolver.resolve(platform)
@@ -258,6 +268,7 @@ def check_account_resolver_hard_fails():
               result == "some_handle", f"got {result!r}")
     finally:
         account_resolver._load_config = saved_load_config
+        account_resolver._durable_handle = saved_durable_handle
         os.environ.clear()
         os.environ.update(saved_env)
 
