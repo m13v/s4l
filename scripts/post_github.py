@@ -710,6 +710,14 @@ def parse_claude_json(output):
 # ---------- Posting + logging ------------------------------------------------
 
 def post_comment(owner, repo, number, body):
+    # Identity gate (mirrors twitter_browser.reply_to_tweet /
+    # reddit_browser.post_comment): the gh CLI would happily post as whatever
+    # account it is authed as, but with no resolved accounts.github.username
+    # the row's attribution is blank and self-filtering breaks. Refuse loudly.
+    from account_resolver import resolve as _resolve_gh
+    if not _resolve_gh("github"):
+        return False, ("no_account_configured (set accounts.github.username in "
+                       "config.json or AUTOPOSTER_GITHUB_USERNAME)")
     try:
         out = subprocess.check_output(
             ["gh", "issue", "comment", str(number), "-R", f"{owner}/{repo}", "--body", body],
