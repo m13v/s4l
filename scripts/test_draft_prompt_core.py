@@ -168,6 +168,49 @@ def python_render(arm, lane):
     return draft_prompt_core.render_twitter_prompt(ing)
 
 
+def cli_render(arm, lane):
+    """Post-flip mode: exercise the ingredients-dir CLI path exactly the way
+    the flipped run-twitter-cycle.sh does (blocks as files, scalars as
+    S4L_PREP_* env) and return its stdout."""
+    d = tempfile.mkdtemp(prefix="s4l_bytediff_ing_")
+    try:
+        for var, fname in [
+            ("CANDIDATE_BLOCK", "candidate_block"), ("MEDIA_BLOCK", "media_block"),
+            ("TOP_REPORT", "top_report"), ("TOP_REPORT_B", "top_report_b"),
+            ("STYLES_BLOCK", "styles_block"), ("STYLES_BLOCK_B", "styles_block_b"),
+            ("RECENT_SELF_BLOCK", "recent_self_block"),
+        ]:
+            with open(os.path.join(d, fname), "w", encoding="utf-8") as f:
+                f.write(SENTINELS[var])
+        env = dict(os.environ)
+        env.update({
+            "S4L_PREP_BATCH_ID": SENTINELS["BATCH_ID"],
+            "S4L_PREP_SKILL_FILE": os.path.join(REPO_DIR, "SKILL.md"),
+            "S4L_PREP_PICKED_STYLE": SENTINELS["PICKED_STYLE"],
+            "S4L_PREP_PICKED_MODE": SENTINELS["PICKED_MODE"],
+            "S4L_PREP_PICKED_STYLE_B": SENTINELS["PICKED_STYLE_B"],
+            "S4L_PREP_PICKED_MODE_B": SENTINELS["PICKED_MODE_B"],
+            "TW_ENGINE_PREFIX": SENTINELS["TW_ENGINE_PREFIX"],
+            "S4L_DRAFT_PROMPT_VARIANT": arm,
+            "S4L_REPO_DIR": REPO_DIR,
+        })
+        if lane:
+            env["S4L_ACTIVE_LANE"] = lane
+        else:
+            env.pop("S4L_ACTIVE_LANE", None)
+        out = subprocess.run(
+            [sys.executable, os.path.join(REPO_DIR, "scripts", "draft_prompt_core.py"),
+             "render-twitter", "--ingredients-dir", d],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        if out.returncode != 0:
+            raise SystemExit(f"harness: CLI render failed rc={out.returncode}\n{out.stderr[-2000:]}")
+        return out.stdout
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     matrix = [
         ("control_v4", ""),
@@ -175,9 +218,13 @@ def main():
         ("control_v4", "personal_brand"),
         ("treatment_v4", "personal_brand"),
     ]
+    with open(CYCLE_SH, "r", encoding="utf-8") as f:
+        pre_flip = 'PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.' in f.read()
+    mode = "shell-heredoc byte-diff" if pre_flip else "ingredients-dir CLI plumbing"
+    print(f"mode: {mode}")
     failures = 0
     for arm, lane in matrix:
-        want = shell_render(arm, lane)
+        want = shell_render(arm, lane) if pre_flip else cli_render(arm, lane)
         got = python_render(arm, lane)
         tag = f"arm={arm} lane={lane or 'promotion'}"
         if want == got:
