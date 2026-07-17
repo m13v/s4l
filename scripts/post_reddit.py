@@ -593,10 +593,14 @@ def _make_ban_entry(sub: str, reason: str | None, project: str | None) -> dict:
     it). Account is the only scope dimension.
     """
     from datetime import datetime, timezone
+    # The ONE resolver (env -> reddit_account.username -> accounts.reddit
+    # .username) replaces the old reddit_account-only read, so installs whose
+    # onboarding wrote accounts.reddit.username get account-scoped bans too
+    # instead of the global (account=None) back-compat bucket.
     account = None
     try:
-        with open(CONFIG_PATH) as _f:
-            account = (json.load(_f).get("reddit_account") or {}).get("username") or None
+        from account_resolver import resolve as _resolve_account_ban
+        account = _resolve_account_ban("reddit") or None
     except Exception:
         pass
     return {
