@@ -32,7 +32,8 @@ Returns None if neither source has a value. Callers should treat None as
 
 Platform key map:
     twitter   -> accounts.twitter.handle           (env: AUTOPOSTER_TWITTER_HANDLE)
-    reddit    -> accounts.reddit.username          (env: AUTOPOSTER_REDDIT_USERNAME)
+    reddit    -> reddit_account.username (login ground truth, when present)
+                 else accounts.reddit.username     (env: AUTOPOSTER_REDDIT_USERNAME)
     linkedin  -> accounts.linkedin.name            (env: AUTOPOSTER_LINKEDIN_NAME)
     github    -> accounts.github.username          (env: AUTOPOSTER_GITHUB_USERNAME)
     moltbook  -> accounts.moltbook.username        (env: AUTOPOSTER_MOLTBOOK_USERNAME)
@@ -120,8 +121,22 @@ def resolve(platform: str) -> Optional[str]:
     if env_value:
         return env_value
 
-    section, field = _PLATFORM_CONFIG_FIELD[key]
     cfg = _load_config()
+
+    # Reddit's login ground truth outranks the plain config field: the top-level
+    # `reddit_account` block is the auth-bearing "who this machine actually logs
+    # in as" record (operator machines / VMs). Drift between it and
+    # accounts.reddit.username broke the VM's post-permalink lookup (wrong
+    # username -> JS found 0 matching comments -> pipeline recorded `failed`
+    # despite the comment landing). This is THE ONLY place both keys are read;
+    # every caller goes through resolve("reddit") so they can never disagree
+    # about the winner again.
+    if key == "reddit":
+        legacy = normalize(((cfg.get("reddit_account") or {}).get("username")))
+        if legacy:
+            return legacy
+
+    section, field = _PLATFORM_CONFIG_FIELD[key]
     accounts = cfg.get("accounts") or {}
     block = accounts.get(section) or {}
     config_value = normalize(block.get(field))
