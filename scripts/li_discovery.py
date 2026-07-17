@@ -39,6 +39,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post
+from account_resolver import resolve as _resolve_account
 
 
 def _context():
@@ -107,7 +108,9 @@ def cmd_create_post(args):
             "our_content": "[discovered via notification, no original content tracked]",
             "project": args.project or "general",
             "thread_author": args.author or "(unknown)",
-            "our_account": "Matthew Diakonov",
+            # Resolved posting identity (accounts.linkedin.name), never hardcoded:
+            # a literal name here mis-attributes rows on any non-operator install.
+            "our_account": _resolve_account("linkedin") or "",
             "engagement_style": "discovered_via_notification",
             "status": "active",
         },
