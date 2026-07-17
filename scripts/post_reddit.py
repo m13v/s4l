@@ -2878,7 +2878,10 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "Deep_Ad1959")
+    # Resolve through the one account resolver (env -> config); never a hardcoded
+    # username. Empty = "unknown account" rather than impersonating the repo owner.
+    from account_resolver import resolve as _resolve_account
+    reddit_username = _resolve_account("reddit") or ""
 
     if args.phase == "phase0":
         # Hard-expire stale pending rows + re-assign salvageable rows to the
