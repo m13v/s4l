@@ -76,6 +76,13 @@ def _config_path():
 ARM_TREATMENT = "treatment_v4"
 ARM_CONTROL = "control_v4"
 
+# Must match the duplicated "voice_first" literal in
+# engagement_styles.get_assigned_style_prompt (not imported across modules,
+# matching how ARM_TREATMENT's "treatment_v4" string is itself duplicated
+# there). treatment_v4 assigns NO real engagement style as of 2026-07-17;
+# every treatment_v4 Twitter post is stamped with this sentinel instead.
+STYLE_SENTINEL_TREATMENT = "voice_first"
+
 
 def pick_draft_prompt_arm(env=None, export=True):
     """Return (variant, source). source in {env, pin, coin, fallback}.
@@ -118,17 +125,82 @@ def pick_draft_prompt_arm(env=None, export=True):
 # Text transcribed verbatim from run-twitter-cycle.sh (2026-07-16).
 # --------------------------------------------------------------------------
 
-_DIRECTIVE_TREATMENT = "Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. PRIORITY ORDER for how you write this, highest first: (1) learned_preferences.draft_style_notes and edit_examples under PROJECT ROUTING are the strongest signal available, real human corrections to this account's own past drafts, and are MANDATORY, not advisory. (2) The ACCOUNT VOICE CORPUS block and the matched project's voice.examples are VERBATIM GROUND TRUTH for how this account actually writes: capitalization, punctuation, contractions, sentence length, terseness. Match those mechanics exactly. (3) voice.tone is a supporting description only, never ground truth: if it ever conflicts with what the corpus/examples actually show, follow the examples, not the tone description. (4) The assigned engagement style is an optional idea for angle and length, not a required structure; draw on it only when it fits naturally, never at the cost of (1)-(3). Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes. Never violate voice.never. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+# --------------------------------------------------------------------------
+# Shared treatment_v4 core (2026-07-17). Written ONCE, used by BOTH lanes.
+#
+# Why this exists: promotion and persona used to carry independent copies of
+# nearly-identical priority-order/skeleton-ban/vary-entry-point text. They
+# drifted -- persona's copy was missing the "vary the entry point across
+# replies" sentence promotion had, which a real batch comparison traced to
+# the "nobody ___s it" tell appearing 2x as often in treatment as control:
+# a batch shares ONE assigned style, and without an explicit
+# vary-across-the-batch instruction the model reused that style's defining
+# vocabulary verbatim across every unrelated candidate. Do NOT fork this
+# text again for a lane-specific tweak; parameterize _treatment_core()
+# instead, or add a lane-specific sentence OUTSIDE it.
+# --------------------------------------------------------------------------
+
+def _treatment_core(voice_examples_ref):
+    """Shared PRIORITY ORDER + skeleton ban + entry-point-variation text.
+
+    voice_examples_ref: the lane-specific noun phrase for priority item (2)
+    (promotion scopes to "the matched project's voice.examples"; persona
+    scopes to "voice.examples above" since it's already narrowed to the one
+    persona project). No mention of engagement style anywhere in here on
+    purpose: treatment_v4 assigns none (see STYLE_SENTINEL_TREATMENT).
+    """
+    return (
+        "PRIORITY ORDER for how you write this, highest first: (1) "
+        "learned_preferences.draft_style_notes and edit_examples are the "
+        "strongest signal available, real human corrections to this "
+        "account's own past drafts, and are MANDATORY, not advisory. (2) "
+        f"The ACCOUNT VOICE CORPUS block and {voice_examples_ref} are "
+        "VERBATIM GROUND TRUTH for how this account actually writes: "
+        "capitalization, punctuation, contractions, sentence length, "
+        "terseness. Match those mechanics exactly. (3) voice.tone is a "
+        "supporting description only, never ground truth: if it ever "
+        "conflicts with what the corpus/examples actually show, follow the "
+        "examples, not the tone description. Do NOT use the "
+        "concede-then-reverse skeleton in ANY form. Banned openings "
+        "include: 'X is the easy part/half/win, the hard part is Y'; 'X "
+        "was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; "
+        "'the real/actual/harder part is Y'; 'what actually "
+        "breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X "
+        "is solved, Y is what breaks'. Lead with substance from ONE entry "
+        "point and vary the entry point AND the rhetorical move across "
+        "every reply you draft this batch, even when the same topic or "
+        "style would naturally suggest reusing the same construction: a "
+        "concrete first-hand specific or number; a direct answer to the "
+        "exact question asked; one sharp opinion with no hedge; a genuine "
+        "question that moves the thread forward; or a relevant pointer. No "
+        "warm-up framing sentence before the substance."
+    )
+
+
+_TREATMENT_LENGTH_NOTE = (
+    "Length: match how long the account's own real examples above actually "
+    "run; when the corpus doesn't make it obvious, default to one or two "
+    "sentences, well under Twitter's 250-character practical limit. NEVER "
+    "em dashes."
+)
+
+_DIRECTIVE_TREATMENT = (
+    "Otherwise: draft a direct, natural reply that stands on its own as a "
+    "useful contribution to the thread. Mention the matched project only "
+    "when it is genuinely the most relevant thing to say, and state it "
+    "plainly in one clause; most replies will not need it. "
+    + _treatment_core("the matched project's voice.examples") +
+    " " + _TREATMENT_LENGTH_NOTE +
+    " Never violate voice.never. Treat learned_preferences.audience_avoid "
+    "/ thread_avoid matches as strong reasons to skip the candidate. Never "
+    "violate content_guardrails.do_not."
+)
 
 _DIRECTIVE_CONTROL = "Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's `voice` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 
-_DIVERGENCE_NOTE_TREATMENT = " Beyond following different style templates: draft_a_text and draft_b_text must be genuinely distinct takes on this thread -- think of them as variant 1a and variant 1b: different entry point, different specific detail seized on, different rhetorical move -- not two phrasings of the same underlying observation dressed in different style language. If 1a and 1b would say essentially the same thing, pick a different angle entirely for 1b rather than just rewording 1a."
+_DIVERGENCE_NOTE_TREATMENT = " draft_a_text and draft_b_text must be genuinely distinct takes on this thread regardless of style -- think of them as variant 1a and variant 1b: different entry point, different specific detail seized on, different rhetorical move -- not two phrasings of the same underlying observation. If 1a and 1b would say essentially the same thing, pick a different angle entirely for 1b rather than just rewording 1a."
 
-_PERSONA_SKELETON_BAN = " Also do NOT use the concede-then-reverse skeleton in ANY form: banned openings include 'X is the easy part/half/win, the hard part is Y', 'X was never the [thing], it's Y', 'X isn't the [problem], it's Y', 'the real/actual/harder part is Y', 'what actually breaks/ships/matters is Y', 'the part nobody says/shows is Y', and 'X is solved, Y is what breaks'; if a draft has that pivot, rewrite it from one of the entry points above."
-
-_PERSONA_VOICE_PRIORITY_CLAUSE = " PRIORITY ORDER for how you write this, highest first: (1) learned_preferences.draft_style_notes and edit_examples are the strongest signal available, real human corrections to this account's own past drafts, and are MANDATORY. (2) The ACCOUNT VOICE CORPUS block and voice.examples above are VERBATIM GROUND TRUTH for how they actually write: capitalization, punctuation, contractions, sentence length, terseness. Match those mechanics exactly. (3) voice.tone is a supporting description only, never ground truth: if it ever conflicts with what the corpus/examples actually show (for example tone says lowercase is fine but every real example is properly capitalized), follow the examples. (4) The assigned engagement style is an optional idea for angle and length, not a required structure."
-
-_PERSONA_DIRECTIVE_TEMPLATE = "Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the ACCOUNT VOICE CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's `voice` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').@SKELETON_BAN@ This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.@VOICE_PRIORITY@ The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing @PREFS_RELATION@, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
+_PERSONA_DIRECTIVE_TEMPLATE = "Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the ACCOUNT VOICE CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's `voice` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').@TREATMENT_CORE@ This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing.@LENGTH_NOTE@ Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing @PREFS_RELATION@, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
 
 
 def draft_directive(arm=None, lane=None):
@@ -137,17 +209,17 @@ def draft_directive(arm=None, lane=None):
     lane = lane if lane is not None else os.environ.get("S4L_ACTIVE_LANE", "")
     if lane == "personal_brand":
         if arm == ARM_TREATMENT:
-            ban = _PERSONA_SKELETON_BAN
-            priority = _PERSONA_VOICE_PRIORITY_CLAUSE
-            rel = "(per the PRIORITY ORDER above: learned_preferences and the account's real voice outrank the engagement style whenever they disagree)"
+            core = " " + _treatment_core("voice.examples above")
+            length_note = " " + _TREATMENT_LENGTH_NOTE
+            rel = "(per the PRIORITY ORDER above: learned_preferences and the account's real voice are what drive this reply)"
         else:
-            ban = ""
-            priority = ""
+            core = ""
+            length_note = " Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes."
             rel = "(it overrides the engagement style's structural template on conflict)"
         return (
             _PERSONA_DIRECTIVE_TEMPLATE
-            .replace("@SKELETON_BAN@", ban)
-            .replace("@VOICE_PRIORITY@", priority)
+            .replace("@TREATMENT_CORE@", core)
+            .replace("@LENGTH_NOTE@", length_note)
             .replace("@PREFS_RELATION@", rel)
         )
     if arm == ARM_TREATMENT:
