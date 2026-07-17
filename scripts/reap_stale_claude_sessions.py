@@ -820,12 +820,13 @@ def main() -> int:
     # (it stays in pending), never a lost draft — a DRAFTING session is protected by
     # claim_pids, not by grace, so no grace value can kill a real draft.
     #
-    # Default 300s (2026-07-06): QUEUE_WORKER_POLL_SECONDS (240s) + ~60s margin for
-    # cold agent-mode boot (skill load + MCP init) and this reaper's own ps-scan
-    # latency. COUPLING: must stay >= QUEUE_WORKER_POLL_SECONDS + margin — if that
-    # constant grows, bump this default (or S4L_REAPER_CLAIM_GRACE_SEC) to match, or
-    # the reaper will SIGTERM a legitimately-polling worker before it ever claims.
-    claim_grace = _env_int("S4L_REAPER_CLAIM_GRACE_SEC", 300)
+    # Default 1020s (2026-07-17): QUEUE_WORKER_POLL_SECONDS (900s) + ~120s margin
+    # for cold agent-mode boot (skill load + MCP init) and this reaper's own
+    # ps-scan latency. COUPLING: must stay >= QUEUE_WORKER_POLL_SECONDS + margin;
+    # if that constant grows, bump this default (or S4L_REAPER_CLAIM_GRACE_SEC) to
+    # match, or the reaper will SIGTERM a legitimately-polling worker before it
+    # ever claims. (Was 300s while the poll window was 240s.)
+    claim_grace = _env_int("S4L_REAPER_CLAIM_GRACE_SEC", 1020)
 
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim

@@ -3958,7 +3958,7 @@ const QUEUE_WORKER_PROMPT_VERSION = 9; // v9 (2026-07-17): poll window widened 2
 // notification) or the host kills the whole parent+child chain in 1-3 min.
 // Never live-fire tested against a real production job. Full design, what's
 // validated vs not, and the implementation steps: docs/queue-worker-delegation-plan.md
-// Bump this constant to 9 only once that plan is actually implemented.
+// Bump this constant to 10 only once that plan is actually implemented.
 const QUEUE_WORKER_PROMPT_MARKER = "s4l_queue_worker_prompt_version";
 // How long ONE `next --wait-seconds` call polls before giving up and exiting.
 // 900s (15 min, per Matthew 2026-07-17, up from 240s): sits AT the single-
