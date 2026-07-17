@@ -204,6 +204,15 @@ say "Regression gate: scripts/test_no_silent_fallbacks.py"
 python3 "$REPO_ROOT/scripts/test_no_silent_fallbacks.py" \
   || die "regression gate failed -- a silent-fallback / bare-python3 issue was (re)introduced. See output above; do not release until it's clean or the finding is reviewed into the test's ALLOWLIST with a reason."
 
+# Cross-language lockstep gate: candidate_state (s4l_state.py vs index.ts) and
+# the short-link fallback host constant (dm_short_links.py vs bin/server.js)
+# are duplicated across runtimes BY NECESSITY; this test is what turns their
+# "keep in lockstep" comments into an enforced invariant. Divergence here has
+# shipped real incidents (post_failed drain asymmetry 2026-07-17).
+say "Regression gate: scripts/test_cross_language_parity.py"
+python3 "$REPO_ROOT/scripts/test_cross_language_parity.py" \
+  || die "cross-language parity gate failed -- a TS/Python lockstep pair diverged (candidate_state or fallback host). Fix BOTH sides before releasing."
+
 # ---- 1. Resolve + WRITE version into the repo-root package.json -------------
 # The repo-root package.json is the SINGLE source of truth: `npm pack` reads it
 # to build the embedded pipeline.tgz, so the bundle shell and the bundled
