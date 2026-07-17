@@ -46,7 +46,7 @@ Block shape (config.json top-level key `learned_preferences_global`):
   }
 
 WHITELIST: this module writes ONLY learned_preferences_global plus
-(append-only, still per-project) voice.never and content_guardrails.do_not.
+(add + remove, still per-project) voice.never and content_guardrails.do_not.
 Nothing else in a project entry is touchable through this path; unknown keys
 in a mutation plan are dropped and counted, never applied. Facts
 (content_angle, links, identity fields) are deliberately unreachable so a
@@ -65,8 +65,6 @@ from pathlib import Path
 
 # Lists the digest may fully manage inside learned_preferences.
 MANAGED_LISTS = ("audience_avoid", "audience_prefer", "thread_avoid", "draft_style_notes")
-# Existing config fields the digest may APPEND to (never remove from).
-APPEND_ONLY_FIELDS = ("voice_never_add", "guardrails_do_not_add")
 
 MAX_HISTORY = 1000
 
@@ -393,20 +391,30 @@ def apply_mutations(project_name: str, plan: dict, source_event_ids=None, cfg_pa
                 applied.append(f"{key} added: {v}")
 
         # Append-only extensions of existing curated fields.
-        for v in _validate_add_list(plan.get("voice_never_add"), cap=3):
+        for v in _validate_add_list(plan.get("voice_never_add")):
             voice = proj.setdefault("voice", {})
             never = voice.setdefault("never", [])
             if isinstance(never, list) and v not in never:
                 never.append(v)
                 applied.append(f"voice.never added: {v}")
-        for v in _validate_add_list(plan.get("guardrails_do_not_add"), cap=3):
+        for v in _validate_add_list(plan.get("voice_never_remove")):
+            never = (proj.get("voice") or {}).get("never")
+            if isinstance(never, list) and v in never:
+                never.remove(v)
+                applied.append(f"voice.never removed: {v}")
+        for v in _validate_add_list(plan.get("guardrails_do_not_add")):
             guard = proj.setdefault("content_guardrails", {})
             do_not = guard.setdefault("do_not", [])
             if isinstance(do_not, list) and v not in do_not:
                 do_not.append(v)
                 applied.append(f"content_guardrails.do_not added: {v}")
+        for v in _validate_add_list(plan.get("guardrails_do_not_remove")):
+            do_not = (proj.get("content_guardrails") or {}).get("do_not")
+            if isinstance(do_not, list) and v in do_not:
+                do_not.remove(v)
+                applied.append(f"content_guardrails.do_not removed: {v}")
 
-        for key in set(plan.keys()) - {"changes", "voice_never_add", "guardrails_do_not_add", "rationale", "project"}:
+        for key in set(plan.keys()) - {"changes", "voice_never_add", "voice_never_remove", "guardrails_do_not_add", "guardrails_do_not_remove", "rationale", "project"}:
             dropped.append(f"unknown top-level key '{key}'")
 
         if not applied:
