@@ -48,7 +48,9 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-OUR_USERNAME = "Deep_Ad1959"
+# No hardcoded username: "" means "unknown account" rather than impersonating the
+# repo owner when config.json carries no reddit account.
+OUR_USERNAME = ""
 _config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
 if os.path.exists(_config_path):
     try:
