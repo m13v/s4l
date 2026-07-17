@@ -671,6 +671,7 @@ def _format_body(post, repo_state=None, sub_ban=None, sub_count=None):
         f"Detected: {checked_at}\n"
         f"{repo_block}"
         f"{owner_block}"
+        f"{reddit_block}"
         f"\n"
         f"Thread:  {thread_url}\n"
         f"Title:   {title}\n"
@@ -679,18 +680,36 @@ def _format_body(post, repo_state=None, sub_ban=None, sub_count=None):
         f"--- Our content ---\n"
         f"{content_preview}\n"
         f"\n"
-        f"--- Next steps ---\n"
-        f"1. Inspect the thread to see if the comment was deleted, hidden,\n"
-        f"   or if the whole account was blocked.\n"
-        f"2. If the owner should be hard-blocked, add it to\n"
-        f"   config.json -> exclusions.github_repos. Owner-level entries\n"
-        f"   match all repos under that owner.\n"
-        f"3. The auto-blocklist (github_tools._dynamic_owner_blocklist)\n"
-        f"   already covers any owner with >=2 strikes in 90 days.\n"
+        f"{_next_steps(platform)}"
         f"\n"
         f"To re-fire this alert: python3 scripts/strike_alert.py --post-id {post['id']}\n"
     )
     return _scrub_dashes(body)
+
+
+def _next_steps(platform):
+    if platform == "reddit":
+        return (
+            "--- Next steps ---\n"
+            "1. Ban state above is deterministic (logged-in user_is_banned).\n"
+            "   BANNED subs are auto-added to config.json subreddit_bans\n"
+            "   .comment_blocked and feed a platform_banned learning event;\n"
+            "   no manual action needed to stop targeting them.\n"
+            "2. A single-post removal is one community's judgment on the content;\n"
+            "   the platform_removed event already teaches the digest that\n"
+            "   pattern. Watch the 'moderated here in last 90 days' count: a\n"
+            "   rising count on a not-yet-banned sub is an early bad-fit signal.\n"
+        )
+    return (
+        "--- Next steps ---\n"
+        "1. Inspect the thread to see if the comment was deleted, hidden,\n"
+        "   or if the whole account was blocked.\n"
+        "2. If the owner should be hard-blocked, add it to\n"
+        "   config.json -> exclusions.github_repos. Owner-level entries\n"
+        "   match all repos under that owner.\n"
+        "3. The auto-blocklist (github_tools._dynamic_owner_blocklist)\n"
+        "   already covers any owner with >=2 strikes in 90 days.\n"
+    )
 
 
 def _send_email(subject, body):
@@ -762,6 +781,19 @@ def main():
     if not rows:
         print("[strike_alert] no pending strikes")
         return
+
+    # Deterministic reddit ban verdict, computed ONCE for the whole sweep (a
+    # single read-only browser attach for all distinct subs, not one per email).
+    # Falls back to the recorded denylist when no session is reachable.
+    reddit_subs = {
+        s for s in (
+            _subreddit_from_url(r.get("thread_url")) or _subreddit_from_url(r.get("our_url"))
+            for r in rows if r.get("platform") == "reddit"
+        ) if s
+    }
+    reddit_ban = _reddit_ban_verdict(reddit_subs, _cfg, _reddit_username)
+    if reddit_subs:
+        print(f"[strike_alert] reddit_ban_verdict {reddit_ban}", flush=True)
 
     sent = 0
     skipped = 0
@@ -864,8 +896,13 @@ def main():
             )
             continue
 
-        subject = _format_subject(r, repo_state=repo_state)
-        body = _format_body(r, repo_state=repo_state)
+        _sub = None
+        _sub_ban = None
+        if r["platform"] == "reddit":
+            _sub = _subreddit_from_url(r.get("thread_url")) or _subreddit_from_url(r.get("our_url"))
+            _sub_ban = reddit_ban.get(_sub)
+        subject = _format_subject(r, repo_state=repo_state, sub_ban=_sub_ban)
+        body = _format_body(r, repo_state=repo_state, sub_ban=_sub_ban)
         if args.dry_run:
             print(f"[strike_alert] DRY RUN id={r['id']}")
             print(f"  subject: {subject}")
