@@ -52,29 +52,18 @@ _release_reddit_lease() {
     timeout 3 python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 }
 case "${PLATFORM:-all}" in
-    linkedin)
-        acquire_lock "linkedin-browser" 3600
-        # Join the cross-pipeline whole-run lock (one driver per 9556 Chrome).
-        # rc=78 is the reserved skip code from _acquire_linkedin_pipeline_lock;
-        # it must be converted to exit 0 HERE in the parent shell (an exit
-        # inside the subshell cannot stop this script). NOTE: log() is not
-        # defined yet at this point, hence plain echo.
-        _LI_BOOT_RC=0
-        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
-        if [ "$_LI_BOOT_RC" -eq 78 ]; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
-            exit 0
-        elif [ "$_LI_BOOT_RC" -ne 0 ]; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
-            exit "$_LI_BOOT_RC"
-        fi
-        ;;
-    reddit)
-        python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
-            echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
-        trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
-        ;;
-    twitter|x) acquire_lock "twitter-browser" 3600 ;;
+    # linkedin/reddit/twitter per-platform audits are all pure API/DB reads
+    # (stats.py --reddit-only / --twitter-audit; LinkedIn's CDP audit was
+    # retired 2026-04-17, see the no-op body below) -- none of them touch a
+    # browser, so acquiring a platform browser lock (or, for LinkedIn,
+    # actually launching real Chrome just to immediately no-op) was pure
+    # wasted contention against the pipelines that DO need these browsers
+    # (2026-07-16 fix). The per-platform pipeline lock at `acquire_lock
+    # "$LOCK_NAME"` below (a separate, DB/log-scoped lock, not a browser one)
+    # still runs unconditionally and is unaffected.
+    linkedin) ;;
+    reddit) ;;
+    twitter|x) ;;
     moltbook) ;;
     all)
         acquire_lock "linkedin-browser" 3600
