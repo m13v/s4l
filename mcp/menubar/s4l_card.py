@@ -425,8 +425,26 @@ def _engagement_line(stats):
     return " · ".join(parts)
 
 
+def _compact_arm(variant):
+    """Shrink a draft_prompt A/B variant to a heading-sized token so the arm
+    fits inline next to project/lane/viral: 'treatment_v4' -> 't v4',
+    'control_v4' -> 'c v4'. Anything that isn't a treatment/control_vN shape
+    (future arm names, retired bare 'treatment'/'control') falls back to the
+    raw variant, so no arm goes unlabelled. The full one-sentence meaning
+    still lives in the details popover via active_experiments.describe()."""
+    v = (variant or "").strip()
+    if not v:
+        return ""
+    m = re.match(r"(treatment|control)(?:_v?(\w+))?$", v)
+    if not m:
+        return v
+    arm = "t" if m.group(1) == "treatment" else "c"
+    ver = m.group(2)
+    return f"{arm} v{ver}" if ver else arm
+
+
 def _reply_heading_suffix(d):
-    """Concise 'project/lane · viral N' readout appended straight onto the
+    """Concise 'project/lane · viral N · t v4' readout appended straight onto the
     'Reply (editable):' heading (2026-07-07), so the two facts a reviewer
     checks first don't require opening the details eye. Pulled from the same
     fields _details_lines used to render as 'Project:'/'Lane:'/'Virality
@@ -465,6 +483,15 @@ def _reply_heading_suffix(d):
             bits.append(f"viral {float(v):g}")
         except (TypeError, ValueError):
             pass
+    # The drafting A/B arm (treatment vs control), compacted to 't v4'/'c v4'
+    # so the reviewer sees which prompt variant produced this draft without
+    # opening the details eye. Only draft_prompt rides the heading; other
+    # experiments stay solely in the popover. draft_prompt ALSO keeps its full
+    # one-sentence meaning in the popover (unlike 'lane', which is skipped
+    # there) because the compact token alone doesn't say what the arm does.
+    arm = _compact_arm((d.get("experiments") or {}).get("draft_prompt"))
+    if arm:
+        bits.append(arm)
     return " · ".join(bits)
 
 
