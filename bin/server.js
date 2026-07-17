@@ -2204,11 +2204,16 @@ async function enrichPostCommentsTwitterRuns(runs) {
         batchPostedUrls.add(c.tweet_url);
       }
     }
+    // treatment_v4 Twitter posts carry no real style, stamped 'voice_first'
+    // (must match draft_prompt_core.STYLE_SENTINEL_TREATMENT) instead of
+    // NULL. Excluded from this tally so it doesn't dominate the per-cycle
+    // "styles used" pill breakdown at ~half of Twitter volume.
+    const isRealStyle = (s) => !!s && s !== 'voice_first';
     const stylesMapTx = {};
     const topicsMapTx = {};
     for (const p of twitterPostNorm) {
       if (!p.threadUrl || !batchPostedUrls.has(p.threadUrl)) continue;
-      if (p.style) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+      if (isRealStyle(p.style)) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
       if (p.topic) topicsMapTx[p.topic] = (topicsMapTx[p.topic] || 0) + 1;
     }
     // Fall back to time-window if batch URL matching found nothing (e.g. old
@@ -2216,7 +2221,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
     if (!Object.keys(stylesMapTx).length && !Object.keys(topicsMapTx).length && !ownBatchId) {
       for (const p of twitterPostNorm) {
         if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
-        if (p.style) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+        if (isRealStyle(p.style)) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
         if (p.topic) topicsMapTx[p.topic] = (topicsMapTx[p.topic] || 0) + 1;
       }
     }
@@ -6124,6 +6129,11 @@ async function handleApi(req, res) {
         "GROUP BY pl2.post_id" +
       ") pl ON pl.post_id = posts.id " +
       "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+      // treatment_v4 Twitter posts carry no real style; they're stamped
+      // 'voice_first' (must match draft_prompt_core.STYLE_SENTINEL_TREATMENT)
+      // instead of NULL. Excluded here so it doesn't dominate this table at
+      // ~half of Twitter volume under a meaningless bucket.
+      "AND engagement_style IS DISTINCT FROM 'voice_first' " +
       platformFilter + projectFilter +
       "GROUP BY engagement_style ORDER BY posts DESC) r";
     // Return the full list of active platforms/projects in the window so the pill
