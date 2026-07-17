@@ -277,6 +277,30 @@ def build_prompt(project: dict, events: list[dict], overall_events: list[dict] |
             f"{plat_lines}"
         )
 
+    ex_pairs = block.get("edit_examples") or []
+    if ex_pairs:
+        ex_lines = "\n".join(
+            f"{i + 1}. ORIGINAL (ours): {e.get('original', '')}\n"
+            f"   FINAL (user rewrote to): {e.get('final', '')}"
+            for i, e in enumerate(ex_pairs)
+        )
+        edit_examples_block = (
+            f"\n\nACCUMULATED EDIT EXAMPLES ({len(ex_pairs)} total, newest "
+            "first): each is a draft the user hand-rewrote on the review card "
+            "before approving it, so every FINAL is a direct statement of the "
+            "voice they want. The drafting model NO LONGER sees these pairs "
+            "directly, so the ONLY way a rewrite's lesson reaches drafting is "
+            "if you distill it into a draft_style_notes entry. When 2+ examples "
+            "share a correction (a phrase type removed, a structure replaced, "
+            "tone or length shifted), write ONE draft_style_notes entry and "
+            "embed a short before/after fragment as an anchor (e.g. rewrote "
+            "'X' to 'Y') so the concrete rewrite travels with the rule. Ignore "
+            "lead-specific or cosmetic edits (typo fixes, one-off facts); learn "
+            f"only what generalizes across products.\n{ex_lines}"
+        )
+    else:
+        edit_examples_block = ""
+
     return f"""You maintain the SINGLE, install-wide learned_preferences block for this social-posting pipeline (shared across every configured project, not just "{project.get('name')}"). It distills the user's own approve/reject decisions on draft cards into short standing preferences that steer future thread selection and drafting across ALL projects. It is SOFT guidance read by the drafting model, not a filter.
 
 The events below all happened to come from project "{project.get('name')}"'s cards, but since the block is shared, only propose an entry that generalizes to a human reviewer's standing taste or quality bar (voice, tone, structural habits, author-quality signals, what counts as a good vs bad reply) — NOT something that is true only because of this one product's specific audience, niche, or content angle (e.g. "prefers accounts studying for nursing boards" belongs to one product's ICP, not to every project this reviewer runs). When the evidence is really project-specific, prefer NO change over forcing it into the shared block.
@@ -285,7 +309,7 @@ CURRENT learned_preferences (shared by every project):
 {json.dumps({k: block[k] for k in ("audience_avoid", "audience_prefer", "thread_avoid", "draft_style_notes")}, indent=2)}
 
 CURRENT voice.never: {json.dumps(voice_never)}
-CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}
+CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}{edit_examples_block}
 
 NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(no_reason)} of the rejects without a stated reason, {len(approved)} approved, {len(loved)} of the approvals loved, {len(plat_removed)} platform moderation strikes):
 {ev_lines}{overall_block}{platform_block}
@@ -304,8 +328,8 @@ Propose changes to the block. RULES, in priority order:
 3. Describe author/audience TYPES, never individual handles. "crypto/web3-native accounts shilling tokens" is right; "@someguy" is wrong. Preferences must generalize.
 4. Approvals are counter-evidence. If approvals contradict an existing entry, propose removing or narrowing it. Also propose removing entries that events show are stale.
 5. bad_draft events feed draft_style_notes (or, ONLY for a clearly recurring phrasing complaint, voice_never_add / guardrails_do_not_add; use those sparingly, they touch curated fields).
-6. Each entry: one sentence, under 200 characters, plain language, no em dashes, no hashtags, understandable a month from now without these events.
-7. Respect the cap: at most {lp.MAX_ENTRIES_PER_LIST} entries per list. If a list is full, fold the new signal into an existing entry via remove+add.
+6. Keep each entry plain language, no em dashes, no hashtags, understandable a month from now without these events. There is NO length or per-list count cap. A draft_style_notes entry SHOULD embed a short before/after fragment from the edit examples when one fits (e.g. rewrote 'X' to 'Y'); that anchor is the only way the concrete rewrite reaches the drafting model. audience_avoid, audience_prefer, and thread_avoid stay short type descriptions with no example.
+7. Never propose a note that tells the writer to drop, strip, omit, or leave out the product link or url, or to remove trailing punctuation. Those contradict the tail-link bridge feature and are auto-rejected on write, so spend no entry on them even if an edit example shows the user deleting a link.
 8. Scope check (this block is shared across every project): before proposing an entry, ask whether it would still make sense read from a totally different product's cards. If it only makes sense for "{project.get('name')}" specifically, don't add it.
 
 OUTPUT: a single JSON object, nothing else. Schema:
