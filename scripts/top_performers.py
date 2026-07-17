@@ -22,6 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 MIN_CONTENT_LEN = 30  # skip posts with empty/placeholder content
 
+# Duplicated literal (not imported): must match draft_prompt_core.py's
+# STYLE_SENTINEL_TREATMENT and engagement_styles.py's STYLE_SENTINEL, both
+# of which independently define "voice_first" the same way ARM_TREATMENT's
+# "treatment_v4" is already duplicated across those two modules.
+STYLE_SENTINEL_TREATMENT = "voice_first"
+
 # CTE that adds a bot-filtered `clicks` column to every row of `posts`.
 # Sources from `post_link_clicks` (per-hit log, populated by the redirector
 # after 2026-05-07) with `is_bot=false`. This is the same attribution path
@@ -521,6 +527,24 @@ def _fetch_report_via_api(*, platform, project, top, bottom):
     raw_fallback = data.get("fallback_top") or []
     raw_group = data.get("top_by_group") or {}
     top_by_style = data.get("top_by_style") or []
+
+    # treatment_v4 Twitter posts carry no real engagement style; they're
+    # stamped with the sentinel "voice_first" (must match
+    # draft_prompt_core.STYLE_SENTINEL_TREATMENT / engagement_styles.py's
+    # duplicated literal) instead of NULL, to avoid SQL NULL-handling
+    # landmines. This SQL-side GROUP BY has no whitelist, so without this
+    # filter "voice_first" would show up as its own row here, at roughly
+    # half of all Twitter post volume, and its single highest-scoring post
+    # would get presented as a "style to imitate" in the Best Example
+    # section below -- exactly the fake-style pollution this sentinel was
+    # designed to avoid downstream, just relocated to this report instead.
+    # Filtered here (not at the API) so every caller of this module is
+    # covered without touching the sibling website repo's SQL.
+    style_perf = [r for r in style_perf if r and r[0] != STYLE_SENTINEL_TREATMENT]
+    top_by_style = [
+        r for r in top_by_style
+        if not (len(r) > 12 and r[12] == STYLE_SENTINEL_TREATMENT)
+    ]
 
     top_filtered = _apply_top_filter(raw_top, top) if raw_top else []
     fallback_filtered = None
