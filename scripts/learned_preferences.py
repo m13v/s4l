@@ -26,10 +26,13 @@ The feedback loop:
      GLOBAL_LEARNED_PREFS_JSON (the 'Global learned preferences' line under
      PROJECT ROUTING; per-project stamping retired 2026-07-14), so the block
      (with its self-describing _instruction) reaches the judging/drafting
-     model automatically. `history` is stripped at prompt-build time: it is
-     a config.json-only audit changelog with no reader in any prompt.
-     prompt_block() renders the same content for callers that want an
-     explicit section instead of the raw embed.
+     model automatically. prompt_block() renders the same content for callers
+     that want an explicit section instead of the raw embed.
+
+     Audit history is NOT in the block: it lives in the sidecar JSONL at
+     history_path() (next to config.json), append-only, with no reader in any
+     prompt. Legacy in-config `history` is auto-migrated to the sidecar by the
+     write paths on the first mutation after upgrade, then dropped from config.
 
 Block shape (config.json top-level key `learned_preferences_global`):
 
@@ -41,9 +44,9 @@ Block shape (config.json top-level key `learned_preferences_global`):
     "thread_avoid":      ["engagement-bait question threads ..."],
     "draft_style_notes": [],
     "edit_examples":     [{"original", "final", "ts"}],
-    "updated_at": "...",
-    "history": [{"ts", "change", "rationale", "source_events": [ids]}]
+    "updated_at": "..."
   }
+  # audit changelog -> sidecar learned_preferences_history.jsonl (not here)
 
 WHITELIST: this module writes ONLY learned_preferences_global plus
 (add + remove, still per-project) voice.never and content_guardrails.do_not.
