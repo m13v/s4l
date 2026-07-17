@@ -168,6 +168,14 @@ def _reddit_plan_to_candidates(plan: dict) -> list:
             "thread_url": d.get("thread_url"),
             "thread_author": d.get("thread_author"),
             "thread_text": d.get("thread_title") or "",
+            # Reddit threads carry a title (thread_text, above) AND a body
+            # (selftext). Both matter to a reviewer: the title alone often
+            # can't be judged without the post body it heads. The card renders
+            # the title bold and the selftext beneath it in the same quote box
+            # (2026-07-17 user direction). Link posts / title-only threads have
+            # an empty selftext, so the card falls back to title-only. Decisions
+            # carry it as `selftext` (from the candidate) or `thread_selftext`.
+            "thread_selftext": d.get("selftext") or d.get("thread_selftext") or "",
             "matched_project": plan.get("project_name"),
             "reply_text": d.get("text"),
             "engagement_style": d.get("engagement_style"),
