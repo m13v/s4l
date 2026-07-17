@@ -43,10 +43,6 @@ try:
 except Exception:
     pass
 
-# Serializes read-modify-write on approved-queue.json. The menu bar's main thread
-# (approve click / restart resume) and the post-worker thread (status updates)
-# both mutate it; without this a concurrent interleave would drop an approval.
-_approved_lock = threading.Lock()
 
 # Mirrors shared/onboarding-ledger.cjs MILESTONES (same order). The ledger's
 # OPTIONAL milestones (reddit_connected / reddit_verified) are deliberately NOT
@@ -982,27 +978,6 @@ def review_queue_posted_count():
     return sum(1 for c in cands if candidate_state(c) == "posted")
 
 
-def _plan_generation(batch):
-    """created_at of the CURRENT review plan for this batch (stamped by
-    merge_review_queue.py when it starts a fresh plan), or None for plans
-    written before generation stamping existed.
-
-    Why this matters: the plan lives in /tmp and dies on every reboot or tmp
-    sweep, and its candidate numbering restarts at 1, while approved-queue.json
-    lives in the state dir forever. Without a generation marker, ledger entries
-    from a dead plan match the new plan's low indices and every fresh draft is
-    treated as already-decided: the 2026-07-03 "unapproved cards never show up"
-    bug (30 stale entries silently swallowed a whole day of drafts)."""
-    try:
-        p = Path(store_path())
-        if not p.exists():
-            base = os.environ.get("S4L_TMP_DIR") or "/tmp"
-            p = Path(base) / f"twitter_cycle_plan_{batch}.json"
-        return json.loads(p.read_text()).get("created_at") or None
-    except Exception:
-        return None
-
-
 def review_drafts(plan, batch="review-queue"):
     """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
     posted, terminal (rejected/dead), or already approved is a settled decision and
@@ -1087,35 +1062,13 @@ def review_drafts(plan, batch="review-queue"):
     return out
 
 
-# ---- durable approved-card queue ------------------------------------------
-# Card approvals MUST survive a menu bar / Claude restart. The in-memory post
-# queue does not: a restart strands every approved-but-unposted card, which then
-# re-presents for approval (the system had no record the user already approved
-# it). This file is the durable record, owned SOLELY by the menu bar — persisting
-# the approval in the main plan instead would race with the autopilot, which
-# rewrites that plan continuously and would silently drop the flag. Status flow:
-# queued -> posting -> posted | failed. review_drafts() excludes queued/posting
-# so an approved card is never re-shown while it drains; a restart re-enqueues
-# queued/posting items instead of re-presenting them.
-APPROVED_QUEUE = "approved-queue.json"
-
-
-def read_approved_queue():
-    d = read_json(APPROVED_QUEUE)
-    if not isinstance(d, dict) or not isinstance(d.get("items"), list):
-        return {"items": []}
-    return d
-
-
-def _write_approved_queue(d):
-    try:
-        p = Path(state_dir()) / APPROVED_QUEUE
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(d))
-        os.replace(str(tmp), str(p))  # atomic: a crash never leaves a half file
-    except Exception:
-        pass
+# ---- durable approved-card queue: REMOVED (2026-07-17) ---------------------
+# approved-queue.json was a second local ledger from before the review store
+# stamped decisions durably itself (store_stamp_decision, under the store
+# lock). Once decisions lived in the store, nothing appended to the ledger,
+# every status write was a no-op over a frozen item list, and its read lane
+# re-enqueued dead approvals forever. The review store is the ONLY local
+# decision record now; do not add a second one back.
 
 
 # ---- Engagement mode (2026-06-26, dual-flag 2026-06-29) -------------------
@@ -1377,22 +1330,10 @@ def toggle_lane(lane):
     return write_flags(f["personal_brand"], f["promotion"])
 
 
-def approved_queue_set_status(batch, n, status, error=None):
-    with _approved_lock:
-        d = read_approved_queue()
-        changed = False
-        for it in d["items"]:
-            if it.get("batch") == batch and it.get("n") == n:
-                it.update(status=status, error=error, ts=time_iso())
-                changed = True
-        if changed:
-            _write_approved_queue(d)
-
-
-# approved_queue_pending() REMOVED (2026-07-17): the legacy approved-queue.json
-# resume lane was a third source of truth whose entries could never settle (the
-# ledger stopped being written), so it re-enqueued dead approvals forever. The
-# store lane (store_pending_posts) is the only resume source now.
+# approved_queue_set_status() / approved_queue_pending() REMOVED (2026-07-17):
+# the legacy approved-queue.json ledger is gone entirely — see the removal note
+# above read-approved-queue's old location. The store lane (store_stamp_decision
+# + store_pending_posts) is the only decision record and resume source now.
 
 
 def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
