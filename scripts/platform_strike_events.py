@@ -165,7 +165,7 @@ def _ban_event(entry: dict) -> dict:
     }
 
 
-def collect_events(window_days: int) -> tuple[list[dict], int, int]:
+def collect_events(window_days: int, dry_run: bool = False) -> tuple[list[dict], int, int]:
     """Returns (events, removed_count, ban_count)."""
     cfg = _load_config()
     local_projects = {p.get("name") for p in (cfg.get("projects") or []) if p.get("name")}
@@ -179,7 +179,7 @@ def collect_events(window_days: int) -> tuple[list[dict], int, int]:
     })
     posts = ((resp or {}).get("data") or {}).get("posts") or []
 
-    removed_events = []
+    fresh = []
     for p in posts:
         if p.get("project_name") not in local_projects:
             continue
@@ -188,7 +188,47 @@ def collect_events(window_days: int) -> tuple[list[dict], int, int]:
         detected = _parse_ts(p.get("status_checked_at"))
         if detected is None or detected < cutoff:
             continue
-        removed_events.append(_removed_event(p))
+        fresh.append(p)
+
+    # Per-venue removal counts (clustering signal surfaced in each event note).
+    venue_counts: dict[str, int] = {}
+    for p in fresh:
+        v = _venue(p)
+        if v:
+            venue_counts[v] = venue_counts.get(v, 0) + 1
+    removed_events = [_removed_event(p, venue_counts.get(_venue(p) or "", 0))
+                      for p in fresh]
+
+    # Deterministic community-ban detection (2026-07-17): before reading the
+    # ban denylist, inspect the logged-in ban state of every reddit subreddit
+    # that struck us this window and persist newly-confirmed bans (reason
+    # 'account_blocked_in_sub'). This is what turns a pile of per-post removals
+    # into a single platform_banned learning signal, and upgrades weak manual
+    # denylist entries so their ban event can finally fire. Read-only browser
+    # attach; no-ops gracefully (returns unknown) on installs without a live
+    # Reddit session, and can be disabled with S4L_STRIKE_BAN_CHECK=0.
+    if os.environ.get("S4L_STRIKE_BAN_CHECK", "1") not in ("0", "false", "no"):
+        reddit_subs = sorted({
+            re.search(r"reddit\.com/r/([^/]+)/", (p.get("thread_url") or p.get("our_url") or "")).group(1)
+            for p in fresh
+            if re.search(r"reddit\.com/r/([^/]+)/", (p.get("thread_url") or p.get("our_url") or ""))
+        })
+        if reddit_subs:
+            try:
+                import reddit_ban_check
+                if dry_run:
+                    # read-only: detect and report, never persist
+                    st = reddit_ban_check.banned_state(reddit_subs)
+                    banned = [s for s, v in st.items() if v is True]
+                    log(f"ban_check (dry run) subs={len(reddit_subs)} banned={banned}")
+                else:
+                    res = reddit_ban_check.record_confirmed_bans(reddit_subs)
+                    log(f"ban_check subs={len(reddit_subs)} banned={len(res.get('banned') or [])}"
+                        f" recorded={res.get('recorded')} upgraded={res.get('upgraded')}")
+                    if res.get("recorded") or res.get("upgraded"):
+                        cfg = _load_config()  # reload so new ban entries below are seen
+            except Exception as e:
+                log(f"ban_check_error (non-fatal): {e}")
 
     ban_events = []
     for entry in ((cfg.get("subreddit_bans") or {}).get("comment_blocked") or []):
@@ -203,7 +243,7 @@ def collect_events(window_days: int) -> tuple[list[dict], int, int]:
 
 
 def sweep(window_days: int = 14, dry_run: bool = False) -> dict:
-    events, n_removed, n_banned = collect_events(window_days)
+    events, n_removed, n_banned = collect_events(window_days, dry_run=dry_run)
     inserted = 0
     duplicates = 0
     if dry_run:
