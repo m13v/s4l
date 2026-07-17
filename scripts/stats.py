@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch, load_env
+from account_resolver import resolve as _resolve_account
 
 
 # --- HTTP wrappers for the Reddit branch (2026-05-12 migration) --------------
@@ -704,7 +705,7 @@ def refresh_reddit(db, user_agent, config=None, quiet=False):
         else:
             # our_url is a thread URL without a comment ID
             # Check if it's our original post (we are the thread author)
-            is_our_post = thread_author.lower() == config.get("accounts", {}).get("reddit", {}).get("username", "").lower()
+            is_our_post = thread_author.lower() == (_resolve_account("reddit") or "").lower()
 
             if is_our_post:
                 # Original post — use thread-level stats (they ARE our stats)
@@ -738,7 +739,7 @@ def refresh_reddit(db, user_agent, config=None, quiet=False):
                 # Check if our comment is still visible by searching response[1]
                 our_found = False
                 our_removed = False
-                our_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+                our_username = _resolve_account("reddit") or ""
                 children = response[1].get("data", {}).get("children", [])
                 for child in children:
                     cd = child.get("data", {})
@@ -827,7 +828,7 @@ def refresh_reddit_resurrect(db, user_agent, config=None, quiet=False, days=60):
     One live detection is enough (bias: don't falsely mark deleted).
     """
     config = config or {}
-    our_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+    our_username = _resolve_account("reddit") or ""
 
     # 2026-05-12: read via /api/v1/posts. `db` is ignored.
     posts_rows = _http_list_reddit_dead_posts(days)
@@ -2439,7 +2440,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+    reddit_username = _resolve_account("reddit") or ""
     user_agent = f"social-autoposter/1.0 (u/{reddit_username})" if reddit_username else "social-autoposter/1.0"
 
     load_env()
