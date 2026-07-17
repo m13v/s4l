@@ -265,17 +265,45 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
         and not (c.get("experiments") or {}).get("sandbox")
         and _thread_url(c)
     ]
-    if not pending:
+    # Approved-but-unposted cards get the INVERSE sync: never pruned (the
+    # approval is a settled human decision, see docstring above), but if the
+    # backend row says the reply already LANDED (status='posted'), stamp
+    # posted=True here so the store agrees with the database. Without this
+    # there is no path that ever corrects a lost posted stamp: the drain's
+    # in-process stamp can lose a whole-file write race against the menubar
+    # or a peer drain, after which the card shows failed/terminal forever
+    # while the reply is live on X (2026-07-17 incident: 6 posted replies
+    # rendered as duplicate_thread_pre_post kills).
+    approved_open = [
+        c
+        for c in cands
+        if c.get("approved")
+        and not c.get("posted")
+        and c.get("platform") != "reddit"
+        and not (c.get("experiments") or {}).get("sandbox")
+        and _thread_url(c)
+    ]
+    if not pending and not approved_open:
         return 0, 0
-    urls = sorted({_thread_url(c) for c in pending})[:500]
+    urls = sorted({_thread_url(c) for c in pending} | {_thread_url(c) for c in approved_open})[:500]
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from http_api import api_get
 
-        resp = api_get(
-            "/api/v1/twitter-candidates",
-            query={"tweet_urls": ",".join(urls), "limit": 500},
-        )
+        # Scope to OUR candidate rows: the bulk GET has no tenant isolation,
+        # so without install_id another install's row for the same tweet_url
+        # (e.g. two customers discovering one viral thread) could be read
+        # back as "our" status and mis-stamp posted/terminal on our card.
+        query = {"tweet_urls": ",".join(urls), "limit": 500}
+        try:
+            from identity import get_identity
+
+            own_install = (get_identity() or {}).get("install_id")
+            if own_install:
+                query["install_id"] = own_install
+        except Exception:
+            pass  # fail open: unscoped lookup, same behavior as before
+        resp = api_get("/api/v1/twitter-candidates", query=query)
         rows = (resp.get("data") or {}).get("candidates") or []
     except BaseException as e:  # http_api raises SystemExit on terminal failure
         print(f"[merge_review_queue] backend sync skipped: {e}", file=sys.stderr)
@@ -295,6 +323,14 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
             c["terminal"] = True
             c["discard_reason"] = f"backend_status_{status}"
             pruned += 1
+    for c in approved_open:
+        row = by_url.get(_thread_url(c))
+        if row and row.get("status") == "posted":
+            c["posted"] = True
+            c["terminal"] = False
+            c.pop("post_failed", None)
+            c.pop("post_error", None)
+            stamped += 1
     return stamped, pruned
 
 
