@@ -2,7 +2,7 @@
 # engage-twitter.sh — X/Twitter engagement loop
 # Phase A: Discover replies/mentions via Twitter API (no browser needed)
 # Phase B: Respond to pending Twitter replies via browser (API can't reply to most tweets)
-# Called by launchd every 3 hours.
+# Called by launchd every 15 minutes (:13/:28/:43/:58).
 
 
 set -euo pipefail
