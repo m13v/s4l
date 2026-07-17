@@ -3,7 +3,15 @@
 #   Step 1: Reddit profile scrape (headless Playwright, views + upvotes + comments_count)
 #   Step 2: API stats (deletion/removal detection + stats fallback) via Python
 #   Step 3: X/Twitter stats via Claude + Playwright (browser required)
-#   Step 4: LinkedIn stats via Claude + Playwright (browser required)
+#   Step 4: LinkedIn stats (delegates to skill/stats-linkedin.sh, CDP-attach
+#           to the linkedin-harness Chrome; NOT Claude-driven, no browser
+#           tool calls -- the "via Claude + Playwright" description here was
+#           stale, describing the pre-2026-05-11 implementation. The
+#           scheduled LinkedIn stats job (com.m13v.social-stats-linkedin.plist)
+#           calls stats-linkedin.sh directly and never reaches this file at
+#           all; this Step 4 path only runs on a manual `stats.sh --platform
+#           linkedin` or no-flag invocation, both still correct, just unused
+#           by the current schedule)
 # Called by launchd every 6 hours.
 #
 # Args (any order):
