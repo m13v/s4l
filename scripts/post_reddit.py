@@ -42,7 +42,13 @@ import draft_prompt_core as _dpc
 # the package instead of a nonexistent ~/social-autoposter (the same $HOME
 # hardcode class that silently no-op'd session restore on customer boxes).
 REPO_DIR = os.path.expanduser(os.environ.get("S4L_REPO_DIR") or "~/social-autoposter")
-CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 REDDIT_BROWSER = os.path.join(REPO_DIR, "scripts", "reddit_browser.py")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 REDDIT_TOOLS = os.path.join(REPO_DIR, "scripts", "reddit_tools.py")
@@ -729,9 +735,6 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
         print(f"[post_reddit] WARNING: could not persist thread-blocked sub r/{sub}: {e}")
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def pick_project(platform="reddit", exclude=None):

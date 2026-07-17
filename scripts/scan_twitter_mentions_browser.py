@@ -42,7 +42,13 @@ except Exception:
     def _resolve_account(_platform):  # type: ignore[unused-arg]
         return None
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 MIN_WORDS = 3
 OUR_HANDLE = _resolve_account("twitter")
 if not OUR_HANDLE:
@@ -61,11 +67,6 @@ REPLY_PAGE_LIMIT = 500
 REPLY_MAX_PAGES = 200  # 100k rows of headroom; plenty for the dedup cache.
 
 
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
 
 
 def word_count(text):
