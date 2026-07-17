@@ -62,6 +62,7 @@ from Foundation import NSObject, NSMakeRect, NSMakeSize
 from AppKit import (
     NSApp,
     NSButton,
+    NSColor,
     NSFont,
     NSScrollView,
     NSView,
@@ -72,7 +73,12 @@ from AppKit import (
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskUtilityWindow,
+    NSWindowStyleMaskResizable,
     NSBezelStyleRounded,
+    NSViewWidthSizable,
+    NSViewHeightSizable,
+    NSViewMinXMargin,
+    NSViewMinYMargin,
 )
 
 # Reuse the corner card's panel class (Cmd+V/C/X/A/Z routing for a status-bar
@@ -84,7 +90,6 @@ from s4l_card import (
     _ReviewPanel,
     _ReviewController,
     _label,
-    _frosted,
     _round_rect,
     _fill_color,
     _mouse_screen,
@@ -207,6 +212,7 @@ class _CanvasController(NSObject):
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
             | NSWindowStyleMaskUtilityWindow
+            | NSWindowStyleMaskResizable
             | NSWindowStyleMaskNonactivatingPanel
         )
         panel = _ReviewPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -229,6 +235,12 @@ class _CanvasController(NSObject):
         panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setHidesOnDeactivate_(False)
         panel.setReleasedWhenClosed_(False)
+        # Don't let a resize (user drag or heal_active moving to a smaller
+        # screen) shrink below one column + the header.
+        try:
+            panel.setContentMinSize_(NSMakeSize(TILE_W + 2 * WIN_MARGIN + 40, 420))
+        except Exception:
+            pass
         panel.setDelegate_(self)
         self._panel = panel
         self._render()
@@ -259,6 +271,12 @@ class _CanvasController(NSObject):
         approve_x = w - WIN_MARGIN - btn_w
         discard_x = approve_x - btn_gap - btn_w
 
+        # Header widgets pin to the TOP edge (flexible bottom margin) so a
+        # window-frame change after build -- heal_active recentering on a
+        # different-sized screen, or a user resize -- can never clip the
+        # header under the title bar again (2026-07-16 user report: "the top
+        # bar gets stuck"; layout was built once and never followed the
+        # frame). Buttons additionally pin RIGHT (flexible left margin).
         discard_btn = NSButton.alloc().initWithFrame_(NSMakeRect(discard_x, btn_y, btn_w, btn_h))
         discard_btn.setTitle_("Discard All")
         discard_btn.setBezelStyle_(NSBezelStyleRounded)
@@ -269,6 +287,7 @@ class _CanvasController(NSObject):
         discard_btn.setFont_(NSFont.systemFontOfSize_(12))
         discard_btn.setTarget_(self)
         discard_btn.setAction_("discardAllClicked:")
+        discard_btn.setAutoresizingMask_(NSViewMinXMargin | NSViewMinYMargin)
         content.addSubview_(discard_btn)
 
         approve_btn = NSButton.alloc().initWithFrame_(NSMakeRect(approve_x, btn_y, btn_w, btn_h))
@@ -277,6 +296,7 @@ class _CanvasController(NSObject):
         approve_btn.setFont_(NSFont.systemFontOfSize_(12))
         approve_btn.setTarget_(self)
         approve_btn.setAction_("approveAllClicked:")
+        approve_btn.setAutoresizingMask_(NSViewMinXMargin | NSViewMinYMargin)
         content.addSubview_(approve_btn)
 
         self._count_label = _label(
@@ -285,6 +305,7 @@ class _CanvasController(NSObject):
             size=13,
             bold=True,
         )
+        self._count_label.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
         content.addSubview_(self._count_label)
 
         body_y = WIN_MARGIN
@@ -295,13 +316,29 @@ class _CanvasController(NSObject):
         )
         scroll.setHasVerticalScroller_(True)
         scroll.setAutohidesScrollers_(True)
-        scroll.setDrawsBackground_(False)
+        # OPAQUE background, deliberately (2026-07-16 scroll-perf fix): a
+        # transparent scroll view can't blit already-drawn pixels on scroll
+        # (copy-on-scroll and responsive-scrolling overdraw are both off for
+        # it), so every wheel tick re-rendered the entire visible grid --
+        # dozens of tiles, each with 2-3 nested text views -- and scrolling
+        # visibly lagged. Same reason the canvas window skips the corner
+        # card's _frosted vibrancy underlay below: compositing the whole
+        # grid over a live behind-window blur was most of the per-frame
+        # cost, for an effect barely visible behind a full grid of tiles.
+        scroll.setDrawsBackground_(True)
+        try:
+            scroll.setBackgroundColor_(NSColor.windowBackgroundColor())
+        except Exception:
+            pass
+        scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         content.addSubview_(scroll)
         self._scroll = scroll
 
         self._build_grid(scroll)
 
-        self._panel.setContentView_(_frosted(content))
+        # Plain content view, no _frosted wrapper (see the opaque-background
+        # comment above). NSPanel's own windowBackgroundColor fills the rest.
+        self._panel.setContentView_(content)
         self._refresh_header()
 
     # ---- grid layout ---------------------------------------------------------
@@ -325,6 +362,15 @@ class _CanvasController(NSObject):
         # visible in the window, we need a scroll bar").
         self._cols = max(1, min(GRID_COLS, int((self._doc_w + GRID_GAP) // (TILE_W + GRID_GAP))))
         doc = _FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, self._doc_w, cs.height))
+        # Layer-backed explicitly: scrolling then moves composited layers
+        # instead of re-drawing views through the window backing store,
+        # which with this many tiles is the difference between smooth and
+        # laggy (2026-07-16 scroll-perf fix; pairs with the opaque scroll
+        # background in _render).
+        try:
+            doc.setWantsLayer_(True)
+        except Exception:
+            pass
         self._doc = doc
         self._slots = []
         scroll.setDocumentView_(doc)
@@ -570,6 +616,30 @@ class _CanvasController(NSObject):
             f"frame={s['frame']} screen={s['screen']} visible={s['occlusion_visible']}"
         )
         _write_review_state(controller=self, last_event=event)
+
+    @objc.python_method
+    def _relayout_grid(self):
+        """Recompute geometry after the window's frame changed (user resize,
+        or heal_active recentering on a different-sized screen): column
+        count and slot POSITIONS only -- tiles are subviews of their slot
+        views and move with them, so in-progress edits survive a resize
+        untouched (unlike _reflow_from, which rebuilds content)."""
+        if self._scroll is None or self._doc is None:
+            return
+        cs = self._scroll.contentSize()
+        self._doc_w = cs.width
+        self._cols = max(
+            1, min(GRID_COLS, int((self._doc_w + GRID_GAP) // (TILE_W + GRID_GAP)))
+        )
+        for i, slot in enumerate(self._slots):
+            slot["view"].setFrame_(self._slot_frame(i))
+        self._resize_doc()
+
+    def windowDidResize_(self, notification):
+        try:
+            self._relayout_grid()
+        except Exception as e:
+            _log(f"canvas relayout failed: {e}")
 
     def windowDidMove_(self, notification):
         now = time.time()
