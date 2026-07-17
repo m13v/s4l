@@ -36,7 +36,9 @@ fi
 log "twitter-browser lock held (pid=$$)"
 
 # Probe + launch harness Chrome on port 9555 if needed, then sweep leftover tabs.
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail"
 
 # Load .env so http_api.py picks up AUTOPOSTER_API_BASE / AUTOPOSTER_API_KEY.
 # shellcheck source=/dev/null
