@@ -808,7 +808,9 @@ log "twitter-browser lock held (pid=$$) Phase 1"
 # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
 # went wrong when opening your profile" 7x and the pipeline hangs. Helper
 # refuses to clean if the lock PID is alive.
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); the access probe below will catch a genuinely broken browser"
 
 # --- Pre-flight: live X session probe (added 2026-06-02) --------------------
 # Before drafting/scraping anything, confirm the harness Chrome actually has a
@@ -2284,7 +2286,9 @@ if [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA
     acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
     log "twitter-browser lock held (pid=$$) Phase 2b-prep"
     # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
-    ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+    ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+    _ensure_rc="${PIPESTATUS[0]}"
+    [ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail"
 
     if [ -s "$MEDIA_URLS_FILE" ]; then
         log "Phase 2b-prep: capturing thread media for $(wc -l < "$MEDIA_URLS_FILE" | tr -d ' ') candidate(s)..."
@@ -2942,7 +2946,9 @@ log "Re-acquiring twitter-browser lock for Phase 2b-post..."
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 2b-post"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream posting may fail"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
 POST_OUTPUT=$("${S4L_PYTHON:-python3}" "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
