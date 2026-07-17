@@ -3263,6 +3263,17 @@ tool(
     const warnings: string[] = [];
     const inRange = (n: number) => n >= 1 && n <= total;
 
+    // Review-queue store: snapshot every row now so the write below can be a
+    // field-level DIFF applied under the store lock (store_patch.py) instead
+    // of an unlocked whole-file replace. This function holds its in-memory
+    // plan across user think-time; a whole-file write here erased any menubar
+    // decision or merge that landed in between (the 2026-07-17 truth-loss
+    // family). Non-store batches keep the plain write: single writer.
+    const isStoreBatch = batch_id === REVIEW_QUEUE_ID;
+    const rowsBefore: string[] = isStoreBatch
+      ? candidates.map((c) => JSON.stringify(c))
+      : [];
+
     // ---- Rejections: durable + final --------------------------------------
     // A rejected draft is marked terminal so it NEVER re-appears for review and is
     // never posted. A reject overrides any earlier approve on the same card.
@@ -3404,7 +3415,36 @@ tool(
       const c = candidates[n - 1];
       if (c) c.approved = true;
     });
-    writePlan(batch_id, plan);
+    // Persist the decision mutations. Store batch: diff each row against its
+    // snapshot and apply only the changed fields under the store lock, so a
+    // concurrent menubar decision or merge is never erased. Anything else
+    // (per-batch /tmp plans): plain write, single writer.
+    let storeWriteDone = false;
+    if (isStoreBatch) {
+      const patches: object[] = [];
+      candidates.forEach((c, i) => {
+        const beforeRaw = rowsBefore[i];
+        const afterRaw = JSON.stringify(c);
+        if (beforeRaw === afterRaw) return;
+        const before = JSON.parse(beforeRaw ?? "{}") as Record<string, unknown>;
+        const after = JSON.parse(afterRaw) as Record<string, unknown>;
+        const set: Record<string, unknown> = {};
+        const unset: string[] = [];
+        for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+          if (!(k in after) || after[k] === undefined) {
+            if (k in before) unset.push(k);
+          } else if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
+            set[k] = after[k];
+          }
+        }
+        if (Object.keys(set).length || unset.length)
+          patches.push({ candidate_id: c.candidate_id ?? null, n: i + 1, set, unset });
+      });
+      storeWriteDone = await patchReviewStore(patches);
+      if (!storeWriteDone)
+        console.error("[post_drafts] store_patch.py failed; falling back to unlocked plan write");
+    }
+    if (!storeWriteDone) writePlan(batch_id, plan);
 
     if (approve.size === 0) {
       return jsonContent({
