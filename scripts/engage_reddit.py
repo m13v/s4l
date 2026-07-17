@@ -386,7 +386,11 @@ def get_recent_archetypes(platform, limit=3):
 
 def build_prompt(reply, recent_replies, config, excluded_authors, top_report="", prior_history_block="", meta_callout=None):
     """Build a minimal prompt for one reply."""
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "Deep_Ad1959")
+    # Resolve through the one account resolver (env -> config); never a hardcoded
+    # username. Empty means "unknown account" (the prompt just omits it) rather
+    # than silently impersonating the repo owner on a misconfigured install.
+    from account_resolver import resolve as _resolve_account
+    reddit_username = _resolve_account("reddit") or ""
     reply_json = json.dumps(reply, indent=2)
 
     # Moltbook: skip recent_replies + top_report context blocks. Both are
