@@ -97,12 +97,9 @@ DEFAULT_INSTRUCTION = (
     "exceptionally on-topic despite a match. When WRITING a draft, "
     "draft_style_notes is MANDATORY, not advisory: follow every entry, and "
     "on conflict it overrides the engagement style's structural template. "
-    "edit_examples are before/after pairs from the user's own manual edits "
-    "on the review card: 'original' is the draft we wrote, 'final' is what "
-    "the user rewrote it to before posting. Treat every 'final' as the "
-    "target voice and every 'original' as the rejected voice: write new "
-    "drafts in the style of the finals, and never reproduce phrasing or "
-    "structure that the user edited away."
+    "Some draft_style_notes carry a short before/after example of a real "
+    "user rewrite; match the 'after' phrasing and never reproduce the "
+    "'before'."
 )
 
 
@@ -220,12 +217,8 @@ def prompt_block(project_cfg=None) -> str:
     for key in MANAGED_LISTS:
         for v in b[key]:
             lines.append(f"- {labels[key]}: {v}")
-    for e in b["edit_examples"]:
-        lines.append(
-            "- Edit example (write like FINAL, never like ORIGINAL):\n"
-            f"  ORIGINAL (ours, rejected style): {e['original']}\n"
-            f"  FINAL (user's rewrite, target style): {e['final']}"
-        )
+    # edit_examples are intentionally NOT rendered here (2026-07-17): they feed
+    # only the feedback digest now, which distills them into draft_style_notes.
     if not lines:
         return ""
     return (
@@ -237,15 +230,15 @@ def prompt_block(project_cfg=None) -> str:
     )
 
 
-def _validate_add_list(raw, cap=MAX_ENTRIES_PER_LIST):
+def _validate_add_list(raw, cap=None):
     out = []
     if not isinstance(raw, list):
         return out
     for v in raw:
         s = str(v).strip()
         if s:
-            out.append(s[:MAX_ENTRY_CHARS])
-        if len(out) >= cap:
+            out.append(s)
+        if cap is not None and len(out) >= cap:
             break
     return out
 
@@ -276,8 +269,8 @@ def record_edit_examples(project_name: str, pairs, cfg_path: str | None = None) 
         if not orig or not final or orig == final:
             continue
         clean.append({
-            "original": orig[:MAX_EXAMPLE_CHARS],
-            "final": final[:MAX_EXAMPLE_CHARS],
+            "original": orig,
+            "final": final,
             "ts": str(p.get("ts") or _now_iso()),
         })
     if not clean:
@@ -387,9 +380,15 @@ def apply_mutations(project_name: str, plan: dict, source_event_ids=None, cfg_pa
             for v in _validate_add_list(ops.get("add")):
                 if v in block[key]:
                     continue
-                if len(block[key]) >= MAX_ENTRIES_PER_LIST:
-                    dropped.append(f"{key} at cap ({MAX_ENTRIES_PER_LIST}), skipped: {v}")
-                    continue
+                # Never let the digest (re)learn a link/punctuation suppression
+                # note: it contradicts the tail-link bridge feature. Same guard
+                # migrate_to_global uses, now enforced on every digest write so
+                # reading the edit_examples pool can't resurrect URL-stripping.
+                if key == "draft_style_notes":
+                    reason = _excluded_note_reason(v)
+                    if reason:
+                        dropped.append(f"{key} rejected ({reason}): {v}")
+                        continue
                 block[key].append(v)
                 applied.append(f"{key} added: {v}")
 
@@ -525,9 +524,6 @@ def migrate_to_global(cfg_path: str | None = None) -> dict:
                             continue
                     if v in global_block[key]:
                         continue
-                    if len(global_block[key]) >= MAX_ENTRIES_PER_LIST:
-                        dropped_at_cap.append({"project": pname, "key": key, "value": v})
-                        continue
                     global_block[key].append(v)
                     touched = True
             existing_finals = {e["final"] for e in global_block["edit_examples"]}
@@ -549,8 +545,6 @@ def migrate_to_global(cfg_path: str | None = None) -> dict:
         summary = f"migrated {len(projects_merged)} project block(s) into learned_preferences_global"
         if excluded:
             summary += f"; excluded {len(excluded)} note(s) (link/punctuation suppression)"
-        if dropped_at_cap:
-            summary += f"; {len(dropped_at_cap)} entrie(s) dropped at the {MAX_ENTRIES_PER_LIST}-per-list cap"
         merged_history.append({
             "ts": _now_iso(),
             "change": summary,
