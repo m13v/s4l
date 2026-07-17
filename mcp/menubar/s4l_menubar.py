@@ -519,9 +519,11 @@ class S4LMenuBar(rumps.App):
         # Which review-surface module ("cards" | "canvas") is driving the
         # CURRENTLY open panel/window, None when nothing is open. Set at
         # presentation time from st.read_review_layout(); kept fixed for the
-        # life of that surface so switching the "View" submenu (Cards/Canvas)
-        # mid-session never talks to the wrong module for an already-open
-        # panel. See _review_mod().
+        # life of that surface so no call ever talks to the wrong module for
+        # an already-open panel. A "View Mode" (Cards/Canvas) switch while a
+        # surface is open dismisses it through this pin, then releases the
+        # pin and re-presents through the new module. See _review_mod() and
+        # _on_review_layout_preset().
         self._review_mod_name = None
         # Review snooze: epoch until which draft cards must not auto-present
         # (0 = not snoozed). Loaded from disk so a menubar restart mid-snooze
@@ -1180,6 +1182,7 @@ class S4LMenuBar(rumps.App):
             # posting is still draining, _maybe_start_review defers and the
             # backlog presents on the new surface once the drain completes.
             try:
+                self._set_snooze(0.0)
                 self._maybe_start_review(focus=True)
             except Exception as e:
                 sys.stderr.write(f"[s4l-menubar] view mode swap reopen failed: {e}\n")
@@ -2931,8 +2934,9 @@ class S4LMenuBar(rumps.App):
     def _review_mod(self):
         """Which review-surface module drives the review-drafts flow: the
         module that owns the currently open panel/window when one is open
-        (so a mid-session switch of the "View" submenu never talks to
-        the wrong surface for an already-open one), else the persisted
+        (so nothing ever talks to the wrong surface for an already-open
+        one; a "View Mode" switch swaps the open surface itself, see
+        _on_review_layout_preset), else the persisted
         st.read_review_layout() preference for a FRESH presentation. Both
         modules expose the exact same present_review*/extend_active/
         prune_active/active_status/heal_active/focus_active/dismiss_active
@@ -3327,8 +3331,7 @@ class S4LMenuBar(rumps.App):
         with self._review_lock:
             self._panel_open = False
             # The surface is confirmed gone: release the pin so the NEXT
-            # presentation re-resolves from st.read_review_layout() (picks up
-            # a "View" submenu switch made while this one was open).
+            # presentation re-resolves from st.read_review_layout().
             self._review_mod_name = None
             if self._posts_outstanding <= 0:
                 self._review_active = False
