@@ -15,8 +15,9 @@ import json, os, re, sys, urllib.request, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from scan_reddit_replies import load_cookies
+from account_resolver import require as _require_account
 
-OUR_ACCOUNT = "Deep_Ad1959"
+OUR_ACCOUNT = _require_account("reddit")
 UA = "social-autoposter/verify 1.0"
 
 # old.reddit.com URL: /r/<sub>/comments/<thread_id>/<slug>/<comment_id>/
