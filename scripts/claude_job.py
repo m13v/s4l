@@ -125,15 +125,20 @@ TYPE_TO_WORKER_NOTES = {
     ),
     "reddit-draft": (
         "WORKER EXECUTION NOTES (queue metadata; follow while executing the "
-        "prompt below): every Reddit thread's content is already inlined in "
-        "the prompt — do NOT fetch anything, do NOT run searches, no tools "
-        "are needed. Apply the prompt's SELECTION GATE to each candidate, "
-        "draft comments for the ones that pass, and submit ONE result object "
-        "matching the schema: {\"posts\": [...], \"rejects\": [...]}. A "
-        "candidate that fails the gate is simply absent from posts (add a "
-        "rejects entry only for the structural false-positive cases the "
-        "prompt describes). Batches are small; draft them in one pass and "
-        "submit promptly."
+        "prompt below): this unattended session is terminated ~90 seconds "
+        "after your LAST tool call. Every Reddit thread's content is already "
+        "inlined in the prompt — never fetch or open a reddit.com URL; "
+        "WebSearch/WebFetch are for EXTERNAL fact-checking only, per the "
+        "prompt's THREAD CONTENT rules. Apply the prompt's SELECTION GATE to "
+        "each candidate and work ONE thread at a time: draft both texts, "
+        "then IMMEDIATELY run that thread's log_draft.py persist command "
+        "exactly as the prompt's PERSIST step specifies (a quick Bash call), "
+        "THEN move to the next. Those per-thread Bash calls keep the session "
+        "alive. Only after EVERY candidate is handled do you assemble and "
+        "submit ONE result object matching the schema: {\"posts\": [...], "
+        "\"rejects\": [...]}. A candidate that fails the gate is simply "
+        "absent from posts (add a rejects entry only for the structural "
+        "false-positive cases the prompt describes)."
     ),
 }
 
