@@ -24,6 +24,22 @@ Two checks:
    bug_twitter_handle_scrape_brittle_m13v_fallback.md and
    bug_multitenant_no_install_scoping_account_fallback.md).
 
+3. check_style_assignment_render_agrees_with_pick() -- an engagement-style
+   picker (engagement_styles.pick_style_for_post/pick_exploration_style)
+   and the prompt renderer (get_assigned_style_prompt) must never disagree
+   about what was assigned, on any platform, under any draft-prompt
+   experiment arm; whatever a picker assigns must also survive
+   validate_or_register() unmodified. Deliberately asserts nothing about
+   what any specific arm's CONTENT is (arms are experiments and will keep
+   changing) -- only that the picker and the renderer agree with each
+   other for whatever they currently do. Guards against the class of bug
+   where a special-case decision lives in only one of the two functions:
+   one platform's driver hand-patches around the gap, the next platform's
+   driver (calling the picker directly) doesn't, and a real post lands
+   with the wrong engagement_style, silently coerced by
+   validate_or_register's drift protection (2026-07-17, see commit
+   2723662d and the Reddit r/saasbuild incident it fixed).
+
 Run:
     python3 scripts/test_no_silent_fallbacks.py
 Exit 0 = all pass; non-zero with FAIL lines otherwise.
@@ -273,11 +289,68 @@ def check_account_resolver_hard_fails():
         os.environ.update(saved_env)
 
 
+# ---------------------------------------------------------------------------
+# Check 3: engagement-style picker and prompt renderer must never disagree
+# ---------------------------------------------------------------------------
+
+def check_style_assignment_render_agrees_with_pick():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import engagement_styles as es
+    import draft_prompt_core as dpc
+
+    saved_env = os.environ.get("S4L_DRAFT_PROMPT_VARIANT")
+    try:
+        # dpc.ARM_TREATMENT is whatever the CURRENT draft-prompt experiment's
+        # specially-handled arm is called -- read from its one source of
+        # truth, never duplicated as a literal here, so a future rename
+        # (e.g. treatment_v4 -> treatment_v5) needs no change to this test.
+        # This is also the arm that resolves without any network call in
+        # both functions under test, so this check stays fast and offline.
+        os.environ["S4L_DRAFT_PROMPT_VARIANT"] = dpc.ARM_TREATMENT
+        for platform in ("twitter", "reddit", "linkedin", "github", "moltbook"):
+            pickers = (
+                ("pick_style_for_post",
+                 lambda p=platform: es.pick_style_for_post(p, context="posting")),
+                ("pick_exploration_style",
+                 lambda p=platform: es.pick_exploration_style(p, context="posting", exclude=set())),
+            )
+            for label, picker in pickers:
+                assignment = picker()
+                if not assignment or assignment.get("mode") != "use" or not assignment.get("style"):
+                    continue  # nothing assigned this call -- nothing to cross-check
+
+                rendered = es.get_assigned_style_prompt(platform, assignment, context="posting")
+                check(
+                    f"{platform}/{label}: render names the exact style it was handed",
+                    assignment["style"] in rendered,
+                    f"assigned={assignment['style']!r}",
+                )
+
+                decision = {"engagement_style": assignment["style"], "new_style": None}
+                validated_style, action = es.validate_or_register(
+                    decision,
+                    assigned_style=assignment["style"],
+                    assigned_mode=assignment["mode"],
+                )
+                check(
+                    f"{platform}/{label}: assignment survives validate_or_register unmodified",
+                    action in ("valid", "registered") and validated_style == assignment["style"],
+                    f"assigned={assignment['style']!r} action={action!r} got={validated_style!r}",
+                )
+    finally:
+        if saved_env is None:
+            os.environ.pop("S4L_DRAFT_PROMPT_VARIANT", None)
+        else:
+            os.environ["S4L_DRAFT_PROMPT_VARIANT"] = saved_env
+
+
 def main():
     print("-- check 1: no bare-python3 subprocess spawning a playwright-dependent script --")
     check_no_bare_playwright_subprocess()
     print("-- check 2: account_resolver hard-fails instead of impersonating --")
     check_account_resolver_hard_fails()
+    print("-- check 3: engagement-style picker and renderer agree, on every platform --")
+    check_style_assignment_render_agrees_with_pick()
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILURE(S):")
