@@ -40,10 +40,16 @@ Platform key map:
 """
 from __future__ import annotations
 
-import json
 import os
-from functools import lru_cache
+import sys
 from typing import Optional
+
+# THE config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir canonical
+# home / S4L_REPO_DIR resolution + mtime-based caching. Rolling our own here
+# (the pre-2026-07-17 lru_cache + dirname(__file__) read) bypassed all of that
+# and could read a different config.json than the rest of the pipeline.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import load_config as _load_config  # noqa: E402
 
 _PLATFORM_CONFIG_FIELD = {
     "twitter":  ("twitter",  "handle"),
@@ -79,17 +85,6 @@ def normalize(handle: Optional[str]) -> Optional[str]:
         h = h[2:]
     h = h.strip()
     return h or None
-
-
-@lru_cache(maxsize=1)
-def _load_config() -> dict:
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg_path = os.path.join(repo_root, "config.json")
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except (OSError, json.JSONDecodeError):
-        return {}
 
 
 def _durable_handle(key: str) -> Optional[str]:
