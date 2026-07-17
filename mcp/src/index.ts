@@ -1127,6 +1127,17 @@ function expiredStampOverridable(c: PlanCandidate): boolean {
   );
 }
 
+// Prompt-sandbox replay cards (run-twitter-cycle.sh S4L_SANDBOX_CANDIDATES_FILE)
+// carry experiments.sandbox=true; older sandbox rows predate that stamp but all
+// use the synthetic >=900,000,000 id range twitter_prompt_sandbox.py assigns.
+function isSandboxCandidate(c: PlanCandidate): boolean {
+  const exps = (c as Record<string, unknown>).experiments;
+  if (exps && typeof exps === "object" && (exps as Record<string, unknown>).sandbox)
+    return true;
+  const id = Number(c.candidate_id);
+  return Number.isFinite(id) && id >= 900_000_000;
+}
+
 function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: PlanCandidate[]) {
   // Merge posted/terminal stamps into a FRESH read of the store instead of
   // rewriting the whole plan from the copy taken minutes ago. The old
@@ -1145,21 +1156,31 @@ function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: Plan
     );
     const fresh = mergeable ? readPlan(batchId) : null;
     if (fresh && Array.isArray(fresh.candidates)) {
-      const freshById = new Map<string, PlanCandidate>();
+      // candidate_id is NOT unique in the review-queue store: sandbox reruns
+      // and re-merged drafts append sibling rows with the same id. Stamping
+      // only one sibling (the old Map single-slot) left the others matching
+      // the drain's approved && !posted && !terminal filter, so the backlog
+      // re-drained the same candidate every heartbeat forever (2026-07-17
+      // incident: 23-card loop at 60s cadence). Stamp EVERY row with the id.
+      const freshById = new Map<string, PlanCandidate[]>();
       fresh.candidates.forEach((c: PlanCandidate) => {
-        if (c.candidate_id !== undefined && c.candidate_id !== null)
-          freshById.set(String(c.candidate_id), c);
+        if (c.candidate_id !== undefined && c.candidate_id !== null) {
+          const key = String(c.candidate_id);
+          const list = freshById.get(key);
+          if (list) list.push(c);
+          else freshById.set(key, [c]);
+        }
       });
       for (const c of stamped) {
-        const f = freshById.get(String(c.candidate_id));
-        if (!f) continue;
-        if (c.posted === true) {
-          f.posted = true;
-          f.terminal = false;
-          if (c.our_url) f.our_url = c.our_url;
-        } else if (c.terminal === true && f.posted !== true) {
-          f.terminal = true;
-          f.terminal_reason = c.terminal_reason;
+        for (const f of freshById.get(String(c.candidate_id)) ?? []) {
+          if (c.posted === true) {
+            f.posted = true;
+            f.terminal = false;
+            if (c.our_url) f.our_url = c.our_url;
+          } else if (c.terminal === true && f.posted !== true) {
+            f.terminal = true;
+            f.terminal_reason = c.terminal_reason;
+          }
         }
       }
       writePlan(batchId, fresh);
@@ -1257,7 +1278,12 @@ async function postApproved(batchId: string, plan: Plan) {
     (c: PlanCandidate) =>
       c.approved === true &&
       c.posted !== true &&
-      (c.terminal !== true || expiredStampOverridable(c))
+      (c.terminal !== true || expiredStampOverridable(c)) &&
+      // Prompt-sandbox replays can never post (twitter_post_plan.py post_one()
+      // hard-refuses them), so draining one is pure churn: it burns a browser
+      // lock turn and, if its terminal stamp later loses a store-write race,
+      // loops forever. Exclude them here regardless of stamp state.
+      !isSandboxCandidate(c)
   );
   for (const c of approved) {
     if (c.terminal === true) {
@@ -6186,7 +6212,10 @@ async function drainApprovedBacklog(): Promise<void> {
       (c) =>
         c.approved === true &&
         c.posted !== true &&
-        (c.terminal !== true || expiredStampOverridable(c))
+        (c.terminal !== true || expiredStampOverridable(c)) &&
+        // Same sandbox exclusion as postApproved's own filter: a sandbox
+        // replay can never post, so it must never count as backlog.
+        !isSandboxCandidate(c)
     );
     if (!backlog.length) return;
     console.error(
