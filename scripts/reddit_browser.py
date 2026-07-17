@@ -536,6 +536,15 @@ def post_comment(thread_url, text):
 
     Returns: {"ok": true, "permalink": "..."} or {"ok": false, "error": "..."}
     """
+    # Identity gate (mirrors twitter_browser.reply_to_tweet): refuse to post
+    # when no Reddit account resolves. Without it we cannot attribute the
+    # comment or find our own permalink afterwards, and posting with a blank
+    # identity pollutes the shared DB. Fail fast and loud instead.
+    if not OUR_USERNAME:
+        print("[reddit_browser] no reddit account configured "
+              "(accounts.reddit.username / reddit_account.username / "
+              "AUTOPOSTER_REDDIT_USERNAME); refusing to post.", file=sys.stderr)
+        return {"ok": False, "error": "no_account_configured"}
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -837,6 +846,13 @@ def reply_to_comment(comment_permalink, text, dm_id=None):
     Returns: {"ok": true, "applied_campaigns": [...], "reply_text": "..."}
               or {"ok": false, "error": "..."}
     """
+    # Identity gate (mirrors twitter_browser.reply_to_tweet): no resolved
+    # account -> no post. See post_comment above for the rationale.
+    if not OUR_USERNAME:
+        print("[reddit_browser] no reddit account configured "
+              "(accounts.reddit.username / reddit_account.username / "
+              "AUTOPOSTER_REDDIT_USERNAME); refusing to post.", file=sys.stderr)
+        return {"ok": False, "error": "no_account_configured"}
     from playwright.sync_api import sync_playwright
 
     # Pre-flight: refuse to attempt a reply in a sub we know we can't comment in.
