@@ -384,6 +384,28 @@ NODE_RUNTIME_PLATFORM="darwin-arm64"
 NODE_VENDOR_DIR="$MCP_DIR/vendor/node-$NODE_RUNTIME_PLATFORM"
 NODE_VENDOR_BIN="$NODE_VENDOR_DIR/bin/node"
 NODE_CACHE_DIR="$REPO_ROOT/.cache/node-runtime"
+# Can THIS build host execute the vendored target binary? The .mcpb always
+# vendors darwin-arm64 (that is where it runs), but the release itself is cut
+# from CI on linux-x64. Executing a darwin-arm64 node on a linux-x64 runner is
+# an `Exec format error` (exit 126) -- what broke every rc from 1.7.6-rc.11 on.
+# Run the exec-based `--version` sanity checks ONLY when the host os/arch matches
+# the vendored target; otherwise verify by presence + executable bit, which is
+# all a cross-build can honestly assert.
+case "$(uname -s)" in
+  Darwin) HOST_OS="darwin" ;;
+  Linux)  HOST_OS="linux" ;;
+  *)      HOST_OS="unknown" ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) HOST_ARCH="arm64" ;;
+  x86_64|amd64)  HOST_ARCH="x64" ;;
+  *)             HOST_ARCH="unknown" ;;
+esac
+if [[ "$HOST_OS-$HOST_ARCH" == "$NODE_RUNTIME_PLATFORM" ]]; then
+  HOST_CAN_EXEC_VENDORED_NODE=1
+else
+  HOST_CAN_EXEC_VENDORED_NODE=0
+fi
 say "Vendoring Node $NODE_RUNTIME_VERSION ($NODE_RUNTIME_PLATFORM) for the .mcpb"
 if [[ ! -x "$NODE_VENDOR_BIN" ]]; then
   NODE_TARBALL="node-$NODE_RUNTIME_VERSION-$NODE_RUNTIME_PLATFORM.tar.gz"
@@ -406,9 +428,13 @@ if [[ ! -x "$NODE_VENDOR_BIN" ]]; then
   chmod +x "$NODE_VENDOR_BIN"
 fi
 [[ -x "$NODE_VENDOR_BIN" ]] || die "vendored node binary missing/not executable at $NODE_VENDOR_BIN"
-VENDORED_NODE_VER="$("$NODE_VENDOR_BIN" --version)"
-[[ "$VENDORED_NODE_VER" == "$NODE_RUNTIME_VERSION" ]] || die "vendored node reports $VENDORED_NODE_VER, expected $NODE_RUNTIME_VERSION"
-echo "  vendored node: $VENDORED_NODE_VER at mcp/vendor/node-$NODE_RUNTIME_PLATFORM/bin/node ($(du -h "$NODE_VENDOR_BIN" | cut -f1))"
+if [[ "$HOST_CAN_EXEC_VENDORED_NODE" == "1" ]]; then
+  VENDORED_NODE_VER="$("$NODE_VENDOR_BIN" --version)"
+  [[ "$VENDORED_NODE_VER" == "$NODE_RUNTIME_VERSION" ]] || die "vendored node reports $VENDORED_NODE_VER, expected $NODE_RUNTIME_VERSION"
+  echo "  vendored node: $VENDORED_NODE_VER at mcp/vendor/node-$NODE_RUNTIME_PLATFORM/bin/node ($(du -h "$NODE_VENDOR_BIN" | cut -f1))"
+else
+  echo "  vendored node: present at mcp/vendor/node-$NODE_RUNTIME_PLATFORM/bin/node ($(du -h "$NODE_VENDOR_BIN" | cut -f1)); --version self-check skipped (host $HOST_OS-$HOST_ARCH cannot exec $NODE_RUNTIME_PLATFORM)"
+fi
 
 # ---- 4. Pack the .mcpb ------------------------------------------------------
 say "Packing $BUNDLE"
@@ -474,10 +500,15 @@ VENDOR_CHECK_DIR="$(mktemp -d)"
 unzip -q -o "$BUNDLE" "vendor/node-$NODE_RUNTIME_PLATFORM/bin/node" -d "$VENDOR_CHECK_DIR"
 VENDOR_CHECK_BIN="$VENDOR_CHECK_DIR/vendor/node-$NODE_RUNTIME_PLATFORM/bin/node"
 [[ -x "$VENDOR_CHECK_BIN" ]] || die "vendored node in bundle lost its executable bit"
-VENDOR_CHECK_VER="$("$VENDOR_CHECK_BIN" --version)"
-[[ "$VENDOR_CHECK_VER" == "$NODE_RUNTIME_VERSION" ]] || die "vendored node in bundle reports $VENDOR_CHECK_VER, expected $NODE_RUNTIME_VERSION"
-rm -rf "$VENDOR_CHECK_DIR"
-echo "  vendored node runs from bundle: $VENDOR_CHECK_VER ok"
+if [[ "$HOST_CAN_EXEC_VENDORED_NODE" == "1" ]]; then
+  VENDOR_CHECK_VER="$("$VENDOR_CHECK_BIN" --version)"
+  [[ "$VENDOR_CHECK_VER" == "$NODE_RUNTIME_VERSION" ]] || die "vendored node in bundle reports $VENDOR_CHECK_VER, expected $NODE_RUNTIME_VERSION"
+  rm -rf "$VENDOR_CHECK_DIR"
+  echo "  vendored node runs from bundle: $VENDOR_CHECK_VER ok"
+else
+  rm -rf "$VENDOR_CHECK_DIR"
+  echo "  vendored node survives bundle round-trip with exec bit intact; --version run skipped (host $HOST_OS-$HOST_ARCH cannot exec $NODE_RUNTIME_PLATFORM)"
+fi
 
 if [[ "$DO_RELEASE" == "0" ]]; then
   say "Done (--no-release). Bundle ready at: $BUNDLE"
