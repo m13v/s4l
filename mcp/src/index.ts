@@ -3948,8 +3948,8 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 8; // v8: worker polls internally (claude_job.py next --wait-seconds) instead of single-shot check-then-die. Empirically verified (2026-07-06) that a single long-running Bash call survives well past the host's ~90s between-tool-call inactivity kill — that timer only fires on MODEL silence, not on one in-flight tool call — so one Bash call can safely poll for QUEUE_WORKER_POLL_SECONDS before giving up. This cuts the every-minute spin-up-empty-then-die husk cycle down to roughly one session per poll window instead of one per cron tick. v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
-// v9 (PLANNED, NOT IMPLEMENTED): delegate the actual drafting to a fresh
+const QUEUE_WORKER_PROMPT_VERSION = 9; // v9 (2026-07-17): poll window widened 240s -> 900s (see QUEUE_WORKER_POLL_SECONDS); version bump forces the prompt refresh that carries the new --wait-seconds onto existing installs. v8: worker polls internally (claude_job.py next --wait-seconds) instead of single-shot check-then-die. Empirically verified (2026-07-06) that a single long-running Bash call survives well past the host's ~90s between-tool-call inactivity kill — that timer only fires on MODEL silence, not on one in-flight tool call — so one Bash call can safely poll for QUEUE_WORKER_POLL_SECONDS before giving up. This cuts the every-minute spin-up-empty-then-die husk cycle down to roughly one session per poll window instead of one per cron tick. v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
+// v10 (PLANNED, NOT IMPLEMENTED): delegate the actual drafting to a fresh
 // sub-agent per claimed job (claim -> delegate -> wait -> claim next, looped
 // within one continuous worker session) instead of drafting inline. Validated
 // via throwaway probe tasks 2026-07-07/08 (10 loop iterations, ~210s of real
@@ -3961,16 +3961,23 @@ const QUEUE_WORKER_PROMPT_VERSION = 8; // v8: worker polls internally (claude_jo
 // Bump this constant to 9 only once that plan is actually implemented.
 const QUEUE_WORKER_PROMPT_MARKER = "s4l_queue_worker_prompt_version";
 // How long ONE `next --wait-seconds` call polls before giving up and exiting.
-// 240s (4 min): comfortably inside the 900s single-Bash-call survival verified
-// live on 2026-07-06, and covers a meaningful chunk of the ~8min average
-// real job inter-arrival gap measured on the box, while still keeping each
-// worker session bounded. The cron's `* * * * *` cadence remains the outer
-// safety net for whatever the poll window doesn't catch.
+// 900s (15 min, per Matthew 2026-07-17, up from 240s): sits AT the single-
+// Bash-call survival ceiling verified live on 2026-07-06 (the host's ~90s
+// inactivity kill fires only on model silence, and one in-flight tool call
+// survived a full 900s probe). This covers the ~8min average real job
+// inter-arrival gap outright, so most jobs are claimed by an already-polling
+// session instead of paying a fresh spin-up, and MCP boot side effects
+// (backfill checks, backlog drains) run 1/15min instead of 1/5min. Watch
+// point: 900s has zero margin below the verified ceiling — if workers start
+// dying mid-poll with no reaper kill recorded, the host clipped the call;
+// back off to 600s. The cron's `* * * * *` cadence remains the outer safety
+// net for whatever the poll window doesn't catch.
 // COUPLING: scripts/reap_stale_claude_sessions.py's S4L_REAPER_CLAIM_GRACE_SEC
 // default MUST stay >= this value + margin — a claimless session inside this
 // poll window is legitimately still working, not a husk, and a too-tight
 // claim_grace would SIGTERM it mid-poll before it ever gets to claim.
-const QUEUE_WORKER_POLL_SECONDS = 240;
+// (Bumped to 1020s alongside this change.)
+const QUEUE_WORKER_POLL_SECONDS = 900;
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
