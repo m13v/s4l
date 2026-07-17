@@ -3720,7 +3720,58 @@ class S4LMenuBar(rumps.App):
         # "Review N pending drafts") — per user request 2026-07-15, most useful
         # when the reveal cadence is "Never" and this count is the only signal
         # that drafts are waiting.
+        # Setting self.title first lays down the PLAIN title (rumps clears any
+        # prior attributed title via setTitle_), so a backlog that drops back
+        # under the threshold automatically loses its highlight without extra
+        # bookkeeping. _highlight_title_count then re-decorates just the number
+        # when the backlog is large enough to warrant a colored pill.
         self.title = f"{base} · {pending_count}" if pending_count > 0 else base
+        if pending_count > 5:
+            self._highlight_title_count(base, pending_count)
+
+    def _highlight_title_count(self, base, pending_count):
+        """Draw a colored background pill behind the pending-draft NUMBER in the
+        menu-bar title once the backlog gets large: yellow for >5 (6-10), red
+        for >10 (11+). Per user request 2026-07-17 — a plain count is easy to
+        miss, a colored one pulls the eye when drafts are piling up. Applied as
+        an NSAttributedString on the status item's button; on any failure we
+        leave the plain title (already set by the caller) untouched."""
+        try:
+            from AppKit import (
+                NSColor,
+                NSMutableAttributedString,
+                NSForegroundColorAttributeName,
+                NSBackgroundColorAttributeName,
+            )
+            from Foundation import NSMakeRange
+
+            item = getattr(self._nsapp, "nsstatusitem", None)
+            if item is None:
+                return
+            button = item.button() if hasattr(item, "button") else None
+            if button is None:
+                return
+
+            if pending_count > 10:
+                bg = NSColor.systemRedColor()
+                fg = NSColor.whiteColor()
+            else:
+                bg = NSColor.systemYellowColor()
+                fg = NSColor.blackColor()
+
+            num = str(pending_count)
+            # Pad the number with hair spaces so the colored pill has a little
+            # breathing room around the digits instead of hugging them tight.
+            pill = f" {num} "
+            full = f"{base} · {pill}"
+            attr = NSMutableAttributedString.alloc().initWithString_(full)
+            start = full.rfind(pill)
+            rng = NSMakeRange(start, len(pill))
+            attr.addAttribute_value_range_(NSBackgroundColorAttributeName, bg, rng)
+            attr.addAttribute_value_range_(NSForegroundColorAttributeName, fg, rng)
+            button.setAttributedTitle_(attr)
+        except Exception:
+            pass
 
     # ---- menu construction ------------------------------------------------
     def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, attention=False, schedule_state="ok", pending_count=0):
