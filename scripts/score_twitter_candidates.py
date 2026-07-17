@@ -538,8 +538,10 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
             # composite unique gives each account its own candidate row.
             # Without this, account A's 'posted' status on tweet X would lock
             # account B out of the same tweet (ON CONFLICT preserved 'posted').
-            # Defaults server-side to 'm13v_' if omitted; new callers should
-            # always pass it explicitly.
+            # If omitted, the server stamps a per-install 'unknown:<install_id>'
+            # sentinel (2026-07-18; it used to default to 'm13v_', silently
+            # impersonating the repo owner). Callers should always pass it —
+            # _resolve_twitter_handle() covers env -> config -> cookie mirror.
             "our_account": _twitter_handle or "",
             # Repost provenance (2026-06-04). The scan derives the author from
             # the status URL, so author_handle/tweet_url already point at the
