@@ -68,7 +68,7 @@ MANAGED_LISTS = ("audience_avoid", "audience_prefer", "thread_avoid", "draft_sty
 # Existing config fields the digest may APPEND to (never remove from).
 APPEND_ONLY_FIELDS = ("voice_never_add", "guardrails_do_not_add")
 
-MAX_HISTORY = 50
+MAX_HISTORY = 1000
 
 # Edit examples: (original, final) pairs from the user's own card rewrites,
 # recorded DETERMINISTICALLY by feedback_digest via record_edit_examples()
