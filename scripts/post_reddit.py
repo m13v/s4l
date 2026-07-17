@@ -1190,42 +1190,33 @@ def _prefetch_thread_digests(candidates, reddit_username=None):
 
 
 def build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                       style_assignment_a=None, style_assignment_b=None, digests=None):
-    """DRAFT phase: write comments only for ripen-survivors.
+                       style_assignment_a=None, style_assignment_b=None, digests=None,
+                       batch_id=None, recent_self=""):
+    """DRAFT phase: assemble reddit ingredients, render via draft_prompt_core.
 
-    `candidates` is the list of decisions that passed the delta gate, each
-    annotated with ripen data (delta_up, delta_comments, composite). Thread
-    content is pre-fetched by _prefetch_thread_digests and inlined per
-    candidate (tool-free turn since 2026-07-14; the model must not fetch).
+    The prompt TEXT lives in scripts/draft_prompt_core.py, the single source
+    of truth shared with the X cycle: shared sections (arm-aware DRAFT
+    DIRECTIVE, ACCOUNT VOICE CORPUS, cross-cycle self-memory, PROJECT
+    ROUTING with the ops-filtered project config + global learned
+    preferences, on-demand top-performers instructions) exist once there and
+    every drafting experiment applies to both platforms on the same commit.
+    This function only builds the reddit-specific candidate block and passes
+    ingredients through.
 
-    2026-05-19: `style_assignment_a`/`style_assignment_b` are two independent
-    pick_style_for_post() results the draft phase picks up front, so the
-    model enforces the SAME two assignments instead of free-picking (and
-    overwhelmingly defaulting to pattern_recognizer).
+    `recent_comments` stays in the signature for the generation-trace caller
+    contract but no longer feeds the prompt; the cross-cycle self-memory
+    block (`recent_self`, rendered by recent_self_posts.py with explicit
+    do-not-imitate rules) replaced it 2026-07-16.
 
-    2026-07-15: two independent drafts (A/B, mirroring run-twitter-cycle.sh's
-    Draft A/Draft B) are requested per thread instead of one, so the review
-    card can show both and the reviewer picks. Card rendering and the
-    edit-learning digest already handle a 2-element `drafts[]` generically
-    (built for twitter); this just needs to populate it.
+    2026-05-19: style_assignment_a/b are two independent
+    pick_style_for_post() results picked up front, so the model enforces the
+    SAME two assignments instead of free-picking. 2026-07-15: two
+    independent drafts (A/B) per thread, mirroring run-twitter-cycle.sh.
+    2026-07-16: arm-aware. The caller MUST run
+    draft_prompt_core.pick_draft_prompt_arm() first (it exports
+    S4L_DRAFT_PROMPT_VARIANT) so the style blocks below and the directive
+    render under the same arm that active_experiments.collect() stamps.
     """
-    content_angle = build_content_angle(project, config)
-
-    recent_ctx = ""
-    if recent_comments:
-        # _recent_comment_text handles both legacy str and current (id, content) shapes.
-        snippets = "\n".join(
-            f"  - {_recent_comment_text(c)}"
-            for c in recent_comments
-            if _recent_comment_text(c)
-        )
-        recent_ctx = f"\nYour last {len(recent_comments)} comments (don't repeat talking points):\n{snippets}\n"
-
-    top_ctx = ""
-    if top_report:
-        lines = top_report.split("\n")[:20]
-        top_ctx = f"\n## Past performance feedback:\n{chr(10).join(lines)}\n"
-
     candidate_lines = []
     for c in candidates:
         rip = c.get("ripen") or {}
@@ -1256,102 +1247,23 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
         )
     candidates_block = "\n".join(candidate_lines)
 
-    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to draft TWO independent comments (Draft A and Draft B, one under Draft A's assigned style and one under Draft B's assigned style below) for the ones where you can write something genuinely useful to that audience. Do not judge or rank them, the reviewer reads both and picks. Lean toward DRAFTING when the audience overlaps even partially with the project's user, and only OMIT on clear no-bridge cases.
-
-Content angle: {content_angle}
-{recent_ctx}{top_ctx}
-## Candidate threads (post-ripen):
-{candidates_block}
-
-## SELECTION GATE — soft fits are OK; reject only clear mismatches
-
-The ripen step proves a thread is alive (people are voting/commenting). It does NOT prove the thread fits the project. Reddit search returns false positives based on raw token overlap (e.g. a search for "no-code app maker" surfaces r/gamemaker shader threads because of the word "maker"; a search for "E2E testing developer productivity QA" can surface a JonBenet murder thread because of how Reddit indexes acronyms). The gate exists to catch those token-overlap false positives, NOT to demand a perfect product fit on every thread.
-
-For each thread, ask the **bridge test**:
-"Could a thoughtful person from {project.get('name', 'this project')}'s audience plausibly read my comment and find it useful, regardless of whether they ever try the product?"
-
-DRAFT it if YES. OMIT only if NO bridge exists at all (clear off-topic / hostile audience / token-overlap false positive). Soft / partial / adjacent fits are GOOD enough — a useful comment in an adjacent sub builds reputation even when no one converts. Don't optimize for purity. Don't artificially cap output. The post-phase will cap actual posting at a reasonable number, so feel free to draft for any thread that passes the soft bridge test.
-
-DRAFT THESE (broad, inclusive — not just direct hits):
-- Project: AI test automation (Assrt). Thread: "Playwright selectors keep breaking on every refactor" → direct fit. DRAFT.
-- Project: AI test automation. Thread: r/QualityAssurance "How are people handling flaky CI tests?" → adjacent topic, same audience. DRAFT.
-- Project: AI app builder (mk0r). Thread: "I want to prototype a tip calculator without learning React" → direct fit. DRAFT.
-- Project: AI app builder. Thread: r/SaaS "Indie hackers shipping MVPs in a weekend" → adjacent: same builder mindset. DRAFT (helpful comment about iteration speed).
-- Project: study tool (Studyly). Thread: r/medschool "best way to handle 200-slide lectures" → direct fit. DRAFT.
-- Project: study tool. Thread: r/GetStudying "I'm burnt out, can't retain anything" → adjacent: study-habit audience. DRAFT (empathetic comment about active recall, even if no product mention).
-- Project: home security camera (Cyrano). Thread: r/HomeImprovement "wired vs wireless cameras" → direct fit. DRAFT.
-
-OMIT THESE (clear no-bridge cases only):
-- Project: AI test automation. Thread: r/JonBenet "The Absurdity of the BDI Theory" → token-overlap false positive (BDI ≠ a testing acronym here). 1996 murder case audience. NO bridge. OMIT.
-- Project: AI app builder. Thread: r/BostonSocialClub "Events worth leaving the house for this weekend" → matched on "tried"/"maker". Locals planning weekends. NO bridge. OMIT.
-- Project: AI app builder. Thread: r/gamemaker "Using surfaces to create paper-like behavior" → GameMaker is a code IDE, not a no-code generator. Audience writes GML shaders. NO bridge. OMIT.
-- Project: study tool. Thread: r/SubredditDrama "the alternative option is still running" → meta drama, no study angle. OMIT.
-- Project: study tool. Thread: r/trichotillomania "the trich trance" → medical condition, not studying. OMIT.
-- Project: study tool. Thread where you've ALREADY commented under any of our accounts (`already_posted=true` or our usernames in the comment list): obvious astroturfing. OMIT.
-- Any thread where you'd be embarrassed to have your comment shown next to a {project.get('name', 'this project')} link in the same Reddit thread.
-
-## THREAD CONTENT (pre-fetched)
-Each candidate above carries a THREAD CONTENT block (OP + top comments), already fetched for you. You have NO tools this session: do NOT fetch, search, or browse anything. Apply the SELECTION GATE using the inlined content only. If a candidate is somehow missing its THREAD CONTENT block, OMIT it.
-
-## CRITICAL CONTENT RULES (apply only to threads that pass the gate)
-- Go BIMODAL on length: 1 punchy sentence (<100 chars) OR 4-5 sentences of real substance. Avoid 2-3 sentence middle-ground.
-- GROUNDING RULE — pick ONE lane per comment:
-  LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this", "scenario:") then you may invent specifics freely.
-  LANE 2 - NO FABRICATION: every specific (numbers, durations, places, tools) must appear verbatim in the content_angle above. Otherwise drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is...").
-- VOICE RELATIONSHIP: see the dedicated section below; it governs whether you speak AS the maker or as an outside observer.
-- NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l).
-- NEVER include URLs or links in your comment text.
-- Prefer replying to OP (top-level reply). ONE comment per thread.
-- Statements beat questions. Be authoritative, not inquisitive.
-
-## Content rules
-{get_content_rules("reddit")}
-
-## DRAFT A: assigned style
-{get_styles_prompt("reddit", context="posting", assignment=style_assignment_a)}
-
-## DRAFT B: assigned style
-{get_styles_prompt("reddit", context="posting", assignment=style_assignment_b)}
-
-{_learned_prefs_block(project)}
-{get_voice_relationship_rule()}
-
-## OUTPUT FORMAT
-Return ONE JSON object with two arrays (a JSON schema is enforced on this session). Both draft_a_text and draft_b_text are REQUIRED for every posts[] entry — write both, under their respective assigned styles above, applying the CRITICAL CONTENT RULES and Content rules to each independently:
-
-{{"posts": [...], "rejects": [...]}}
-
-Each posts[] entry is one thread that PASSES the SELECTION GATE:
-{{"thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "draft_a_text": "your Draft A comment here", "draft_a_style": "{(style_assignment_a or {}).get('style') or 'style_name'}", "draft_a_new_style": null, "draft_b_text": "your Draft B comment here", "draft_b_style": "{(style_assignment_b or {}).get('style') or 'style_name'}", "draft_b_new_style": null, "thread_author": "username", "thread_title": "thread title", "search_topic": "the seed concept"}}
-
-For threads that FAIL the gate, simply leave them out of posts. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads). When nothing passes, return {{"posts": [], "rejects": []}}.
-
-## OPTIONAL: rejects[] (self-improving denylist)
-When you OMIT a thread because of a recurring CLASS of false-positive (the SUB itself surfaces wrong-audience threads, not just this one thread), you MAY add a rejects[] entry for that thread:
-
-{{"thread_url": "SAME_URL_AS_GIVEN", "reason": "short reason", "proposed_excludes": ["subreddit:bestofredditorupdates"]}}
-
-Rules:
-- proposed_excludes entries MUST use the typed form `subreddit:<slug>` (lowercase, no `r/` prefix). Future shape: `keyword:<word>` is accepted but unused today.
-- DO emit when: the false-positive is structural — e.g. r/bestofredditorupdates is family drama matching on the word "alternative"; r/hfy is sci-fi narrative matching on the word "spaced"; r/superstonk is GME meme stock matching on "anki" via a random comment. The SUB is the false positive, not just this one post.
-- DO NOT emit when: this specific thread is bad but the sub is fine in general (e.g. r/{project.get('name', 'project')}'s natural audience like r/medicalschool, r/anki, r/getstudying — never propose excluding a top-performing sub).
-- Activation gate: a term needs >=2 SEPARATE batches to propose it before it goes live on future Reddit searches. A single mistaken proposal cannot mute a sub. Propose if a thoughtful future cycle would likely agree; otherwise omit.
-- 1-3 entries per reject is plenty. When in doubt, omit the field. Default (no reject line) is safe.
-
-Examples of GOOD proposals:
-- Reject r/bestofredditorupdates "Husband lied" → ["subreddit:bestofredditorupdates"]
-- Reject r/hfy "The Trial of Humanity" → ["subreddit:hfy"]
-- Reject r/battlefield6 "GAME UPDATE 1.3.1.0" → ["subreddit:battlefield6"]
-- Reject r/superstonk "GMERICA acquisition" → ["subreddit:superstonk"]
-- Reject r/nosleep "cursed doll" → ["subreddit:nosleep"]
-
-Examples of WRONG proposals (do not emit):
-- Reject a specific r/nursing thread because OP is venting → DO NOT exclude r/nursing (it's our target audience; just omit this thread)
-- Reject one r/anki thread that's off-topic → DO NOT exclude r/anki (core ICP)
-
-Do NOT narrate. Gate, draft-or-reject, return the single JSON object.
-"""
-
+    ing = {
+        "project_name": project.get("name", "this project"),
+        "content_angle": build_content_angle(project, config),
+        "candidates_block": candidates_block,
+        "n_candidates": len(candidates),
+        "batch_id": batch_id or "",
+        "repo_dir": REPO_DIR,
+        "top_report": top_report or "",
+        "styles_block_a": get_styles_prompt("reddit", context="posting",
+                                            assignment=style_assignment_a),
+        "styles_block_b": get_styles_prompt("reddit", context="posting",
+                                            assignment=style_assignment_b),
+        "style_a_name": (style_assignment_a or {}).get("style") or "style_name",
+        "style_b_name": (style_assignment_b or {}).get("style") or "style_name",
+        "recent_self_block": recent_self or "",
+    }
+    return _dpc.render_reddit_prompt(ing)
 
 def parse_candidates(output):
     """Extract action=candidate JSON objects from Claude's discover output."""
@@ -1830,7 +1742,7 @@ def post_via_cdp(thread_url, reply_to_url, text):
     return {"ok": False, "error": "all_attempts_failed"}
 
 
-def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None, link_source=None):
+def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None, link_source=None, draft_prompt_variant=None):
     """Log a successful post to the database. Returns the new post_id, or None.
 
     generation_trace_path (2026-05-12): optional path to a JSON file with
@@ -1860,6 +1772,12 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
             cmd.extend(["--generation-trace", generation_trace_path])
         if link_source:
             cmd.extend(["--link-source", link_source])
+        # draft_prompt_variant (2026-07-16): the arm that shaped this draft,
+        # read from the decision's stamped experiments dict (never from env;
+        # the MCP-approval poster runs in a different process than the
+        # cycle). Mirrors twitter_post_plan.py -> log_post.py.
+        if draft_prompt_variant:
+            cmd.extend(["--draft-prompt-variant", draft_prompt_variant])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         try:
             payload = json.loads((result.stdout or "").strip())
@@ -2441,6 +2359,15 @@ def _draft_iteration(plan, config, reddit_username):
     # to the assigned style → embed the assignment block in the prompt →
     # JSON example shows the literal assigned style name. End-to-end
     # adherence comes from those three lined-up signals.
+    # Draft-prompt A/B arm (2026-07-16): the SAME experiment the X cycle
+    # runs, picked with the SAME precedence (env override -> server-side
+    # per-install pin -> coin flip). pick_draft_prompt_arm exports
+    # S4L_DRAFT_PROMPT_VARIANT, so (a) engagement_styles renders the style
+    # blocks arm-aware, (b) active_experiments.collect() below stamps the
+    # arm that ACTUALLY shaped this prompt onto every candidate (before
+    # this, reddit cards carried an inert arm that never touched the text).
+    _arm, _arm_source = _dpc.pick_draft_prompt_arm()
+    print(f"[post_reddit] draft-prompt arm: {_arm} (source={_arm_source})")
     style_assignment_a = pick_style_for_post("reddit", context="posting")
     style_assignment_b = pick_style_for_post("reddit", context="posting")
     picked_style_a = style_assignment_a.get("style")
@@ -2449,8 +2376,18 @@ def _draft_iteration(plan, config, reddit_username):
           f"style={picked_style_a or '(invent)'}")
     print(f"[post_reddit] draft style B assigned: mode={style_assignment_b['mode']} "
           f"style={picked_style_b or '(invent)'}")
-    top_report = get_top_performers(project_name, style=picked_style_a)
+    # treatment_v4 skips the per-style exemplar report entirely (voice-first:
+    # cross-account style winners compete with the account's own voice);
+    # control_v4 keeps it. Same gate, same reason as the X cycle's
+    # TOP_REPORT skip; the decision lives in draft_prompt_core.
+    if _dpc.skip_top_report(_arm):
+        top_report = ""
+    else:
+        top_report = get_top_performers(project_name, style=picked_style_a)
     recent_comments = get_recent_comments()
+    # Cross-cycle self-memory (anti-repetition negative context), the same
+    # block the X prep prompt carries. Empty string on failure, never blocks.
+    _recent_self = _dpc.recent_self_block("reddit")
     # We don't have a Reddit equivalent of top_search_topics_report in
     # the draft phase (the discover phase loads it for the search step).
     # Pass empty string; the trace audit still captures top_performers
@@ -2478,7 +2415,16 @@ def _draft_iteration(plan, config, reddit_username):
 
     prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments,
                                 style_assignment_a=style_assignment_a,
-                                style_assignment_b=style_assignment_b, digests=digests)
+                                style_assignment_b=style_assignment_b, digests=digests,
+                                batch_id=plan.get("batch_id"),
+                                recent_self=_recent_self)
+    # Durable full-prompt record per batch (same prep-prompts dir the X
+    # cycle writes; reddit-draft-prompt-<batch>.md, newest 50 kept), so
+    # prompt-block presence is verifiable after any release.
+    _snap_path = _dpc.snapshot_prompt(prompt, plan.get("batch_id") or "unknown", "reddit")
+    if _snap_path:
+        print(f"[draft_prompt_snapshot] batch={plan.get('batch_id')} "
+              f"bytes={len(prompt)} path={_snap_path}")
 
     # Build the generation_trace audit blob: what Claude is about to see.
     # Captured BEFORE the Claude call so we never end up with a post row
@@ -2744,6 +2690,11 @@ def _post_iteration(plan, reddit_username):
             assigned_mode=_cand_mode,
         )
         search_topic = decision.get("search_topic") or None
+        # The draft-prompt arm rides the decision's experiments dict (stamped
+        # at draft time by _collect_exps after pick_draft_prompt_arm); posts
+        # get it via log_post -> reddit_tools.py --draft-prompt-variant so
+        # per-arm readouts cover reddit rows exactly like twitter's.
+        draft_prompt_variant = (decision.get("experiments") or {}).get("draft_prompt")
 
         applied_campaign_ids = []
         for camp in active_campaigns:
@@ -2847,7 +2798,8 @@ def _post_iteration(plan, reddit_username):
                      # draft phase used a reused/cached draft (no Claude
                      # call) — that's fine, audit just records no trace.
                      generation_trace_path=plan.get("generation_trace_path"),
-                     link_source=audience_page_link_source)
+                     link_source=audience_page_link_source,
+                     draft_prompt_variant=draft_prompt_variant)
             bump_campaigns("posts", new_post_id, applied_campaign_ids)
             # Backfill post_links.post_id for the codes minted at wrap time
             # so /api/short-links/<code> resolver knows which post each
