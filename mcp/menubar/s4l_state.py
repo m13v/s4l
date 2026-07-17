@@ -1434,11 +1434,10 @@ def approved_queue_set_status(batch, n, status, error=None):
             _write_approved_queue(d)
 
 
-def approved_queue_pending():
-    """Approvals not yet confirmed posted (queued or posting). Re-enqueued by the
-    menu bar on startup so a restart RESUMES the drain instead of re-presenting."""
-    return [it for it in read_approved_queue()["items"]
-            if it.get("status") in ("queued", "posting")]
+# approved_queue_pending() REMOVED (2026-07-17): the legacy approved-queue.json
+# resume lane was a third source of truth whose entries could never settle (the
+# ledger stopped being written), so it re-enqueued dead approvals forever. The
+# store lane (store_pending_posts) is the only resume source now.
 
 
 def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
