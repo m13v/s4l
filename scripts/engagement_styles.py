@@ -1048,6 +1048,51 @@ def compute_target_distribution(platform, context="posting"):
 INVENT_RATE = 0.0  # retired inline roll (was 0.05, ~1 in 20 posts)
 CURATED_TOP_N = 5   # size of the invent-mode reference list (top 5 by score)
 
+# Draft-prompt treatment_v4 assigns NO real engagement style, on ANY platform
+# that participates in the S4L_DRAFT_PROMPT_VARIANT experiment (currently
+# Twitter and Reddit, both of which export it via
+# draft_prompt_core.pick_draft_prompt_arm() before picking a style). This is
+# the ONE place that decision is made: pick_style_for_post() and
+# pick_exploration_style() below both short-circuit on it, so every caller
+# (Twitter's s4l_pick_style bash wrapper, Reddit's direct Python call, and
+# any future platform driver) gets the same behavior for free, with nothing
+# to remember to wire up per-platform. A caller that reads the env var
+# directly instead of routing through these functions is the only way to
+# miss this. Must match draft_prompt_core.py's ARM_TREATMENT = "treatment_v4".
+# 2026-07-17: consolidated here after a real bug -- the same "treatment_v4 =
+# no style" check used to live only in run-twitter-cycle.sh (Twitter's bash
+# driver), one layer above this shared function, so Reddit (which calls
+# pick_style_for_post() directly, bypassing that bash script entirely) never
+# got it: Reddit kept assigning a real style, the model still correctly
+# wrote "voice_first" per get_assigned_style_prompt()'s render-side check
+# below, and validate_or_register()'s USE-mode drift protection silently
+# coerced "voice_first" back to the real assigned style at post time.
+STYLE_SENTINEL_TREATMENT = "voice_first"
+
+
+def _is_treatment_v4():
+    return (os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or "").strip() == "treatment_v4"
+
+
+def _treatment_v4_assignment():
+    """The single no-style assignment returned by both pickers below when
+    _is_treatment_v4(). style is the literal sentinel, not None/empty, on
+    purpose: this makes the assignment identical to what the model is told
+    to output (see get_assigned_style_prompt), so validate_or_register's
+    first, simplest check (style == assigned_style -> valid) accepts it
+    with no special-casing anywhere downstream, on either platform."""
+    return {
+        "mode": "use",
+        "style": STYLE_SENTINEL_TREATMENT,
+        "description": None,
+        "example": None,
+        "note": None,
+        "target_chars": None,
+        "reference_styles": [],
+        "distribution_snapshot": [],
+        "picked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
 # Fallback target comment length (chars) for any style that lacks an explicit
 # target_chars (legacy DB rows, cold-start before the registry is reachable).
 # Set just above the top-human-reply median (~74) so the long tail of styles
@@ -1207,6 +1252,9 @@ def pick_style_for_post(platform, context="posting",
             "picked_at": ISO-8601 UTC,
         }
     """
+    if _is_treatment_v4():
+        return _treatment_v4_assignment()
+
     rnd = rng or random
 
     # Human-derived branch (2026-05-22, second pass): on every platform,
@@ -1377,6 +1425,12 @@ def pick_exploration_style(platform, context="posting", exclude=None,
     posted draft's engagement write the style's first real score, and
     winners graduate into the Draft-A pool through the normal sampler.
     """
+    if _is_treatment_v4():
+        # No exploration under treatment_v4 (see STYLE_SENTINEL_TREATMENT
+        # above): return None so the caller's existing "pool empty, fall
+        # back to the scored picker" path fires, which routes through
+        # pick_style_for_post() and converges on the same sentinel.
+        return None
     rnd = rng or random
     try:
         never = set(PLATFORM_POLICY.get(platform, {}).get("never", []))
@@ -1482,19 +1536,12 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
     # env) renders the legacy block below unchanged — that block IS the v4
     # control arm, same as it was the v3 control arm.
     #
-    # STYLE_SENTINEL must match draft_prompt_core.STYLE_SENTINEL_TREATMENT
-    # (duplicated literal, not imported, matching how ARM_TREATMENT's
-    # "treatment_v4" string is already duplicated across these two modules).
-    # The picker still runs upstream for treatment_v4 cycles (cheaper to
-    # leave the pick than to thread a skip-the-picker flag through the
-    # locked shell script), but its result is discarded here and in
-    # draft_prompt_core.render_twitter_prompt's @PICKED_STYLE@ overrides —
-    # never let the real pick reach this block, the output JSON, or the
-    # --assigned-style drift-coercion path, or a real style name will leak
-    # back onto a "voice_first" row.
-    STYLE_SENTINEL = "voice_first"
-    _dp_arm = (os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or "").strip()
-    if _dp_arm == "treatment_v4":
+    # pick_style_for_post()/pick_exploration_style() (above, in this same
+    # module) already refuse to assign a real style under treatment_v4 and
+    # return STYLE_SENTINEL_TREATMENT itself as `assignment["style"]`, so
+    # this render-side check and that pick-side check agree by construction
+    # instead of by convention -- no separate literal to keep in sync here.
+    if _is_treatment_v4():
         lines.append(
             "## Engagement style: not used for this draft (voice-first mode)"
         )
@@ -1505,7 +1552,7 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
             "named engagement style — no style name, description, example, "
             "or length target is assigned this draft. "
             f'In your output JSON, set "engagement_style" to exactly '
-            f'"{STYLE_SENTINEL}" and leave "new_style" as null, for BOTH '
+            f'"{STYLE_SENTINEL_TREATMENT}" and leave "new_style" as null, for BOTH '
             "Draft A and Draft B. Do not invent, reuse, or reference any "
             "other style name for this draft."
         )
