@@ -727,6 +727,11 @@ def candidate_state(c):
     """Canonical lifecycle state of ONE review-queue candidate. Use this instead
     of ad hoc flag checks — "not posted" is NOT "awaiting review".
 
+    LOCKSTEP: mcp/src/index.ts::candidateState() is the TS mirror of this exact
+    precedence; change one and you MUST change the other. Every past divergence
+    between a hand-rolled raw-flag filter and this function became an incident
+    (post_failed drain asymmetry 2026-07-17, get_stats lane blindness).
+
     The review queue (review-queue.json) is an APPEND-FOREVER LEDGER: handled
     candidates are never removed, they are flag-stamped in place, so most rows
     in an old queue are retired. States, in precedence order:
