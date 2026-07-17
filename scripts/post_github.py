@@ -803,7 +803,8 @@ def main():
     log(f"=== GitHub run: sleep={args.sleep}s ===")
 
     config = load_config()
-    github_username = config.get("accounts", {}).get("github", {}).get("username", "m13v")
+    from account_resolver import resolve as _resolve_account
+    github_username = _resolve_account("github") or ""
 
     # ---- Pick project ------------------------------------------------------
     if args.project:
