@@ -1119,6 +1119,12 @@ async function ensureTwitterBrowserForPost() {
 // thread still exists. Without this override, a card approved while (or just
 // before) the sync stamped it is refused as already-decided and the approval
 // silently no-ops (2 of 3 approvals lost on 2026-07-10).
+// Give-up bound for approved cards whose post attempts keep failing
+// transiently (browser lock contention, timeouts). 5 attempts spans several
+// drain cycles — plenty for genuine transients to clear — while guaranteeing
+// no card can retry forever (2026-07-17 zombie-card incident).
+const MAX_POST_ATTEMPTS = 5;
+
 function expiredStampOverridable(c: PlanCandidate): boolean {
   return (
     c.terminal === true &&
@@ -1177,10 +1183,28 @@ function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: Plan
             f.posted = true;
             f.terminal = false;
             if (c.our_url) f.our_url = c.our_url;
+            // A post outcome closes the card's history: the pre-approval
+            // freshness stamp must not survive it.
+            delete f.discard_reason;
           } else if (c.terminal === true && f.posted !== true) {
             f.terminal = true;
             f.terminal_reason = c.terminal_reason;
+            // CRITICAL (2026-07-17 Nhat zombie-card incident, 438 retries over
+            // 5 days): a stale discard_reason="backend_status_expired" left on
+            // the fresh copy makes expiredStampOverridable() treat THIS
+            // post-outcome terminal as overridable, so every later drain
+            // resurrects the card, re-posts, dedup-skips, and re-stamps —
+            // forever. A terminal that came from an actual post attempt is
+            // final; delete the expiry stamp so the override can never fire
+            // on it again. (The drain's own `delete c.discard_reason` happens
+            // on an in-memory copy that is never the write source; this line
+            // is the one that persists.)
+            delete f.discard_reason;
           }
+          // Carry the retry counter so the give-up bound survives across
+          // drains (each drain reads the store fresh).
+          if (typeof c.post_attempts === "number" && c.post_attempts > ((f.post_attempts as number) || 0))
+            f.post_attempts = c.post_attempts;
         }
       }
       writePlan(batchId, fresh);
@@ -1727,6 +1751,23 @@ async function postApproved(batchId: string, plan: Plan) {
         // here (found 2026-07-16) silently and permanently discarded 7 real
         // approved drafts on nothing worse than lock contention — Reddit's
         // equivalent transient failures self-healed on the very next drain.
+        //
+        // BOUNDED (2026-07-17): sticky is right, sticky-forever is not — an
+        // unbounded retry is a zombie generator (one card retried 438 times
+        // over 5 days on the Nhat install). Count the transient failures and
+        // give up loudly after MAX_POST_ATTEMPTS; the terminal_reason keeps
+        // the last failure visible so the give-up is diagnosable, and the
+        // on-disk post-events trail records it for forensics.
+        const attempts = (typeof c.post_attempts === "number" ? c.post_attempts : 0) + 1;
+        c.post_attempts = attempts;
+        if (attempts >= MAX_POST_ATTEMPTS) {
+          c.terminal = true;
+          c.terminal_reason = `gave_up_after_${attempts}_failed_attempts:${r.reason || "failed"}`;
+          console.error(
+            `[post] giving up on candidate ${r.candidate_id} after ${attempts} failed attempts (last: ${r.reason || "failed"})`
+          );
+          logPostEvent(`retry_budget_exhausted candidate=${r.candidate_id} attempts=${attempts} last=${r.reason || "failed"}`);
+        }
         touchedPlan = true;
       }
     });
@@ -6207,36 +6248,18 @@ registerAppResource(
   })
 );
 
-// Post any cards the user APPROVED that never landed — e.g. a restart killed the
-// batch mid-way. "Proceed to post the already-approved items." postApproved is
-// idempotent (it filters posted/terminal), so this only drains the genuine
-// backlog and never double-posts. Best-effort; never throws.
-async function drainApprovedBacklog(): Promise<void> {
-  try {
-    const plan = readPlan(REVIEW_QUEUE_ID);
-    const cands = (plan?.candidates as PlanCandidate[]) || [];
-    const backlog = cands.filter(
-      (c) =>
-        c.approved === true &&
-        c.posted !== true &&
-        (c.terminal !== true || expiredStampOverridable(c)) &&
-        // Same sandbox exclusion as postApproved's own filter: a sandbox
-        // replay can never post, so it must never count as backlog.
-        !isSandboxCandidate(c)
-    );
-    if (!backlog.length) return;
-    console.error(
-      `[post] draining ${backlog.length} approved-but-unposted card(s) left from before`
-    );
-    await postApproved(REVIEW_QUEUE_ID, plan!);
-  } catch (e: any) {
-    console.error("[post] drainApprovedBacklog error:", e?.message || e);
-    // Same reasoning as the other postApproved call site: don't let an
-    // escaped exception leave the cross-instance posting flag stuck true.
-    postingActive = false;
-    stopPostingFlagHeartbeat();
-  }
-}
+// REMOVED (2026-07-17): drainApprovedBacklog. It ran 30s after EVERY MCP boot,
+// which was sane when boots meant "user launched Claude Desktop" — but each
+// queue-worker session boots its own MCP server, so the drain had silently
+// become a ~5-minute cron running across up to 4 concurrent MCP instances.
+// Combined with universal posting preemption, every drain wakeup SIGKILLed
+// whatever held the twitter-browser lock (profile scans included), and any
+// stamp bug turned into an infinite retry loop (438 retries over 5 days on
+// one Nhat card). Backlog recovery is now owned by ONE long-lived process:
+// the menubar's _resume_approved_queue, which runs on loopback-reachable and
+// periodically thereafter (mcp/menubar/s4l_menubar.py). Do NOT re-add a
+// boot-time drain here; if the menubar is dead, ensureMenubar() below revives
+// it and its resume covers the backlog.
 
 async function main() {
   initSentry();
@@ -6409,12 +6432,9 @@ async function main() {
   void startLocalPanel()
     .then((url) => console.error(`[social-autoposter-mcp] panel loopback ready at ${url}`))
     .catch((e) => console.error("[social-autoposter-mcp] panel loopback start failed:", e?.message || e));
-  // Resume posting any approved-but-unposted cards a prior run/restart left behind.
-  // Delayed so the runtime + harness Chrome have settled; never blocks boot.
-  {
-    const t = setTimeout(() => void drainApprovedBacklog(), 30_000);
-    if (typeof t.unref === "function") t.unref();
-  }
+  // NOTE (2026-07-17): the boot-time drainApprovedBacklog() call that lived
+  // here is gone — backlog recovery is owned by the menubar's periodic
+  // _resume_approved_queue (single drainer; see the removal note above).
   // Ensure the macOS menu bar mini-dashboard is installed + running. Idempotent
   // and cheap when already present, so existing installs pick it up on the next
   // Claude restart without re-provisioning. Best-effort: never blocks boot.
