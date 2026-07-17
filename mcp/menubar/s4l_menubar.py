@@ -1158,7 +1158,6 @@ class S4LMenuBar(rumps.App):
         if st.read_review_layout() == layout:
             return
         st.write_review_layout(layout)
-        swapped = False
         if self._panel_open:
             try:
                 # _review_mod() is still pinned to the module that owns the
@@ -1176,23 +1175,26 @@ class S4LMenuBar(rumps.App):
                 if self._posts_outstanding <= 0:
                     self._review_active = False
                     self._reset_posting_progress_locked()
-            # Drop the dedup signature so the same pending set presents
-            # fresh on the new surface instead of being suppressed as
-            # "already shown".
-            self._last_review_sig = None
-            swapped = True
-        if swapped:
-            # The user was mid-review and explicitly asked for the other
-            # surface: reopen right away (focus=True also bypasses the
-            # reveal-cadence hold, same as "Review N pending drafts"). If
-            # posting is still draining, _maybe_start_review defers and the
-            # backlog presents on the new surface once the drain completes.
-            try:
-                self._set_snooze(0.0)
-                self._maybe_start_review(focus=True)
-            except Exception as e:
-                sys.stderr.write(f"[s4l-menubar] view mode swap reopen failed: {e}\n")
-                sys.stderr.flush()
+        # Changing the View Mode is a deliberate ask to see the pending drafts in
+        # the newly chosen surface, whether or not a panel was open at the time.
+        # When one was open we just dismissed it above; when none was (the user
+        # had closed/snoozed the stack, THEN switched mode) the old behavior left
+        # nothing on screen and the new surface never appeared until a separate
+        # "Review N pending drafts" click -- the 2026-07-17 Nhat report where a
+        # flip to Canvas seemed to do nothing. Present in the new surface either
+        # way, same posture as that menu click: focus=True clears the snooze and
+        # bypasses the reveal-cadence hold. Drop the dedup signature first so the
+        # same pending set presents fresh on the new surface. With no pending
+        # drafts _maybe_start_review no-ops, so setting the mode ahead of time
+        # still doesn't pop anything; if posting is draining it defers and the
+        # backlog presents on the new surface once the drain completes.
+        self._last_review_sig = None
+        try:
+            self._set_snooze(0.0)
+            self._maybe_start_review(focus=True)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] view mode present failed: {e}\n")
+            sys.stderr.flush()
         self._sig = None
         try:
             self._tick(None)
