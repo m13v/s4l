@@ -419,68 +419,38 @@ def _arm_self_liveness_watchdog():
 # _get_browser_and_page_raw, and find_twitter_cdp_port discovery. The
 # harness-profile discovery fallback stays as a belt for a closed tab.
 _PARK_URL = "https://x.com/robots.txt"
-_PARK_REGISTERED = False
 
 
 def _park_twitter_tabs():
-    try:
-        import urllib.request
+    # Thin alias kept for callers/tests; ONE implementation lives in
+    # scripts/browser_lifecycle.py (shared with reddit_browser.py — user
+    # directive 2026-07-17: share the machinery, don't fork failure points).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from browser_lifecycle import park_tabs
 
-        base = (
-            os.environ.get("TWITTER_CDP_URL", "").strip()
-            or "http://127.0.0.1:9555"
-        ).rstrip("/")
-        resp = urllib.request.urlopen(base + "/json/list", timeout=3)
-        targets = json.loads(resp.read())
-        for t in targets:
-            url = t.get("url", "")
-            if t.get("type") != "page":
-                continue
-            if "x.com" not in url and "twitter.com" not in url:
-                continue
-            if url.split("?", 1)[0].rstrip("/").endswith("/robots.txt"):
-                continue  # already parked
-            ws_url = t.get("webSocketDebuggerUrl")
-            if not ws_url:
-                continue
-            try:
-                import websocket
-
-                # suppress_origin: Chrome 111+ rejects CDP websocket clients
-                # that send an Origin header not in --remote-allow-origins
-                # (same pattern as restore_twitter_session.py).
-                ws = websocket.create_connection(
-                    ws_url, timeout=3, suppress_origin=True
-                )
-                try:
-                    ws.send(json.dumps({
-                        "id": 1,
-                        "method": "Page.navigate",
-                        "params": {"url": _PARK_URL},
-                    }))
-                    ws.recv()
-                finally:
-                    ws.close()
-                print(
-                    f"[twitter_browser] parked tab on {_PARK_URL} (was {url[:80]})",
-                    file=sys.stderr,
-                )
-            except Exception:
-                continue
-    except Exception:
-        pass
+    base = (
+        os.environ.get("TWITTER_CDP_URL", "").strip()
+        or "http://127.0.0.1:9555"
+    ).rstrip("/")
+    park_tabs(base, ("x.com", "twitter.com"), _PARK_URL, "twitter_browser")
 
 
 def _register_park_on_exit():
     """Arm parking once per process, only for processes that actually used the
     browser. Registered AFTER the module-level _release_browser_lock atexit,
     so it runs BEFORE it (LIFO): park while still holding the python lock,
-    then release. S4L_NO_TAB_PARK=1 is the escape hatch."""
-    global _PARK_REGISTERED
-    if _PARK_REGISTERED or os.environ.get("S4L_NO_TAB_PARK"):
-        return
-    _PARK_REGISTERED = True
-    atexit.register(_park_twitter_tabs)
+    then release. S4L_NO_TAB_PARK=1 is the escape hatch (honored inside
+    browser_lifecycle)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from browser_lifecycle import register_park_on_exit
+
+    base = (
+        os.environ.get("TWITTER_CDP_URL", "").strip()
+        or "http://127.0.0.1:9555"
+    ).rstrip("/")
+    register_park_on_exit(
+        base, ("x.com", "twitter.com"), _PARK_URL, "twitter_browser"
+    )
 
 
 def get_browser_and_page(playwright):

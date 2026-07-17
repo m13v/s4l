@@ -46,7 +46,13 @@ import s4l_log_relay
 
 # A managed harness Chrome is one launched on a profile under this marker
 # (browser-harness = twitter 9555, browser-harness-linkedin = 9556, ...).
-_PROFILE_MARKER = os.path.join(".claude", "browser-profiles", "browser-harness")
+# Any managed harness profile under browser-profiles/ counts — matching the
+# literal "browser-harness" prefix silently EXCLUDED the reddit harness
+# (profile "reddit-harness"), so reddit-Chrome activations went unlogged and
+# unattributable for days (2026-07-17). The remote-debugging-port requirement
+# in the check below keeps the user's own Chrome / MCP-agent profiles (which
+# use the debugging PIPE, not a port) out of scope.
+_PROFILE_MARKER = os.path.join(".claude", "browser-profiles", "")
 
 # Within this window, repeats of the same (cause, pid) are counted, not emitted.
 # A screencast-reconnect storm raises Chrome every few seconds; one line per

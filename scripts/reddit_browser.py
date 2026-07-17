@@ -341,6 +341,29 @@ def _touch_browser_heartbeat(*_args):
         pass
 
 
+def _register_reddit_park_on_exit(cdp_base=""):
+    """Shared tab lifecycle (2026-07-17 unification): park reddit tabs on
+    reddit's own /robots.txt at process exit — the SAME single implementation
+    twitter_browser uses (scripts/browser_lifecycle.py). Static page = no SPA
+    to leak/crash while idle, URL still matches the reddit.com reuse
+    preference above so no new tabs (Target.createTarget is the proven
+    focus-steal trigger). S4L_NO_TAB_PARK=1 escape hatch inside the module.
+    Best-effort: parking must never fail an attach."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from browser_lifecycle import register_park_on_exit
+
+        register_park_on_exit(
+            (cdp_base or os.environ.get("REDDIT_CDP_URL", "").strip()
+             or "http://127.0.0.1:9557").rstrip("/"),
+            ("reddit.com",),
+            "https://www.reddit.com/robots.txt",
+            "reddit_browser",
+        )
+    except Exception:
+        pass
+
+
 def get_browser_and_page(playwright):
     """Instrumented entry point: attach via _get_browser_and_page_raw, then
     (L1) set default per-op/navigation timeouts so no page call can hang
@@ -395,6 +418,7 @@ def _get_browser_and_page_raw(playwright):
         try:
             cdp_browser = playwright.chromium.connect_over_cdp(cdp_url_env)
             _bh_activity_log("attach_harness", cdp_url_env)
+            _register_reddit_park_on_exit(cdp_url_env)
             # Prefer a context that already carries a live reddit_session; else
             # fall back to the first context (harness is single-profile, logged in).
             chosen = None
