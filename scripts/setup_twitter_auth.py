@@ -1328,10 +1328,23 @@ def cmd_resolve_handle(args) -> dict:
             ws.close()
         except Exception:
             pass
+    # Live DOM/API resolution is brittle (hardcoded bearer + selector scrape) and
+    # silently returns None on an X redesign or API pushback. When it does, fall
+    # back to the @handle the cookie mirror already stamped at connect time — same
+    # authenticated session, ground truth, not a guess. Without this fallback a
+    # failed live scrape leaves accounts.twitter.handle empty for the life of the
+    # install, and twitter_browser.py refuses EVERY reply with no_account_configured
+    # (approved cards post 0/N and look stuck), even though the durable session — and
+    # status/doctor via _durable_handle() — already know the real account.
+    source = "live"
+    if not handle:
+        handle = _mirror_handle()
+        source = "mirror"
     if not handle:
         return {"ok": False, "state": "no_handle"}
     persisted = _write_handle_to_config(handle)
-    return {"ok": True, "state": "resolved", "handle": handle, "persisted": persisted}
+    return {"ok": True, "state": "resolved", "handle": handle,
+            "source": source, "persisted": persisted}
 
 
 def main() -> int:
