@@ -2,7 +2,7 @@
 # engage-linkedin.sh — LinkedIn engagement loop
 # Phase A: Discover replies/mentions from LinkedIn notifications (Claude-driven MCP).
 # Phase B: Respond to pending LinkedIn replies (Claude-driven, OAuth API for posting).
-# Called by launchd every 3 hours.
+# Called by launchd every 4 hours (03:30/07:30/11:30/15:30/19:30/23:30).
 #
 # IMPORTANT: all LinkedIn browser work goes through the linkedin-harness MCP
 # (bh_run, CDP-driven real Chrome on port 9556), driven by Claude (the LLM).
