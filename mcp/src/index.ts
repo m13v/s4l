@@ -954,7 +954,9 @@ function renderDraftsTable(plan: Plan): string {
     // Number by FULL-array index (matches post_drafts + the menu bar), then drop
     // already-finished entries so the cards only show what's still pending.
     .map((c, i) => ({ c, n: i + 1 }))
-    .filter((e) => e.c.posted !== true && e.c.terminal !== true && e.c.approved !== true)
+    // awaiting_review is the ONLY state the review surfaces present (same rule
+    // as the menubar cards and the review-request.json count).
+    .filter((e) => candidateState(e.c) === "awaiting_review")
     // The queue is append-only; newest drafts have the highest stable index.
     // Show those first so review starts with likely-live tweets instead of stale
     // low-number drafts that have been sitting around for hours.
@@ -1131,6 +1133,23 @@ function isSandboxCandidate(c: PlanCandidate): boolean {
     return true;
   const id = Number(c.candidate_id);
   return Number.isFinite(id) && id >= 900_000_000;
+}
+
+// Canonical review-queue candidate lifecycle state — the TS mirror of
+// mcp/menubar/s4l_state.py::candidate_state(). The two MUST stay in lockstep:
+// every divergence between a hand-rolled raw-flag filter here and the Python
+// state machine has produced a real incident (menubar skipped post_failed cards
+// the drain swept, get_stats lane blindness — the "never hand-roll review-queue
+// state" rule has now recurred three times). READ state through this function;
+// stamping outcomes (writes) still sets the raw flags directly.
+// Precedence: posted > terminal > post_failed > approved > awaiting_review.
+type CandidateState = "posted" | "terminal" | "post_failed" | "approved" | "awaiting_review";
+function candidateState(c: PlanCandidate): CandidateState {
+  if (c.posted === true) return "posted";
+  if (c.terminal === true) return "terminal";
+  if (c.post_failed) return "post_failed";
+  if (c.approved === true) return "approved";
+  return "awaiting_review";
 }
 
 // Write field patches into the review-queue store UNDER ITS LOCK by shelling
@@ -1365,17 +1384,29 @@ async function postApproved(batchId: string, plan: Plan) {
   // An approved card whose only blocker is an overridable backend-expiry stamp is
   // included: approval outranks the freshness gate (see expiredStampOverridable),
   // and the stamp is cleared so every downstream terminal check agrees it's live.
-  const approved = (plan.candidates || []).filter(
-    (c: PlanCandidate) =>
-      c.approved === true &&
-      c.posted !== true &&
-      (c.terminal !== true || expiredStampOverridable(c)) &&
-      // Prompt-sandbox replays can never post (twitter_post_plan.py post_one()
-      // hard-refuses them), so draining one is pure churn: it burns a browser
-      // lock turn and, if its terminal stamp later loses a store-write race,
-      // loops forever. Exclude them here regardless of stamp state.
-      !isSandboxCandidate(c)
-  );
+  // Drain-eligible, in canonical state terms (candidateState — keep in lockstep
+  // with s4l_state.candidate_state). DELIBERATE deviations from a plain
+  // state === "approved" check, each load-bearing:
+  //   - post_failed cards DO drain again (the transient-retry path, bounded by
+  //     MAX_POST_ATTEMPTS at result time). The menubar's restart-resume path
+  //     (store_pending_posts) skips them by design; this drain is where they
+  //     get their bounded retries.
+  //   - an approved card whose ONLY terminal stamp is the freshness gate's
+  //     backend_status_expired is resurrected: the human approval outranks the
+  //     expiry (2 of 3 approvals lost on 2026-07-10 without this).
+  //   - sandbox replays never drain (twitter_post_plan.py post_one()
+  //     hard-refuses them, so draining one is pure churn and can loop forever
+  //     if its terminal stamp loses a store-write race).
+  const approved = (plan.candidates || []).filter((c: PlanCandidate) => {
+    if (isSandboxCandidate(c)) return false;
+    if (c.approved !== true) return false;
+    const s = candidateState(c);
+    return (
+      s === "approved" ||
+      s === "post_failed" ||
+      (s === "terminal" && expiredStampOverridable(c))
+    );
+  });
   for (const c of approved) {
     if (c.terminal === true) {
       c.terminal = false;
@@ -3281,7 +3312,7 @@ tool(
         return;
       }
       const c = candidates[n - 1];
-      if (c.posted === true) {
+      if (candidateState(c) === "posted") {
         warnings.push(`#${n} already posted; not rejecting`);
         return;
       }
