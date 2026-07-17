@@ -26,7 +26,9 @@ source "$(dirname "$0")/lock.sh"
 # honor TWITTER_CDP_URL exported by the lib.
 source "$(dirname "$0")/lib/twitter-backend.sh"
 acquire_lock "twitter-browser" 1800
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail" | tee -a "$LOG_FILE"
 acquire_lock "scan-twitter-followups" 0
 
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
