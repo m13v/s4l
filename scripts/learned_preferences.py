@@ -68,20 +68,17 @@ MANAGED_LISTS = ("audience_avoid", "audience_prefer", "thread_avoid", "draft_sty
 # Existing config fields the digest may APPEND to (never remove from).
 APPEND_ONLY_FIELDS = ("voice_never_add", "guardrails_do_not_add")
 
-MAX_ENTRIES_PER_LIST = 10
-MAX_ENTRY_CHARS = 200
 MAX_HISTORY = 50
 
-# Few-shot edit examples (2026-07-06, ported from the s4l-email inbox repo's
-# original_draft_body/draft_body pair): when the user rewrites a draft on the
-# review card before approving, the (original, final) pair is the strongest
-# style signal we have; showing recent pairs to the drafting model beats any
-# distilled negative rule (measured: the draft-prompt A/B's one-bullet skeleton
-# ban moved nothing, treatment 30% ~= control 28%). Written DETERMINISTICALLY
-# by feedback_digest.record via record_edit_examples(), never by the digest
-# LLM's mutation plan (apply_mutations drops 'edit_examples' as unknown).
-MAX_EDIT_EXAMPLES = 5
-MAX_EXAMPLE_CHARS = 600
+# Edit examples: (original, final) pairs from the user's own card rewrites,
+# recorded DETERMINISTICALLY by feedback_digest via record_edit_examples()
+# (never by the digest LLM's mutation plan). As of 2026-07-17 these are read
+# ONLY by the feedback digest, which distills recurring corrections into
+# draft_style_notes (optionally embedding a short before/after fragment as an
+# anchor); the drafting/judging prompts NO LONGER embed them. Kept newest-first
+# and capped at MAX_EDIT_EXAMPLES so the digest sees a deep rewrite history.
+# No per-entry length cap: a rewrite is the user's exact words, stored verbatim.
+MAX_EDIT_EXAMPLES = 100
 
 # Travels inside the global block the prep prompt embeds (once, via
 # GLOBAL_LEARNED_PREFS_JSON), so the drafting model reads its own operating
@@ -156,15 +153,15 @@ def normalized(block) -> dict:
     }
     for key in MANAGED_LISTS:
         vals = b.get(key)
-        out[key] = [str(v).strip()[:MAX_ENTRY_CHARS] for v in vals if str(v).strip()] if isinstance(vals, list) else []
+        out[key] = [str(v).strip() for v in vals if str(v).strip()] if isinstance(vals, list) else []
     # Few-shot before/after pairs from the user's card edits (newest first).
     # Preserved through normalization so apply_mutations round-trips never
     # drop them; only record_edit_examples() writes this list.
     ex = b.get("edit_examples")
     out["edit_examples"] = [
         {
-            "original": str(e.get("original") or "")[:MAX_EXAMPLE_CHARS],
-            "final": str(e.get("final") or "")[:MAX_EXAMPLE_CHARS],
+            "original": str(e.get("original") or ""),
+            "final": str(e.get("final") or ""),
             "ts": e.get("ts"),
         }
         for e in (ex if isinstance(ex, list) else [])
