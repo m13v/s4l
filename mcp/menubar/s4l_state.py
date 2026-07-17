@@ -1029,6 +1029,10 @@ def review_drafts(plan, batch="review-queue"):
                 "platform": c.get("platform"),
                 "thread_author": c.get("thread_author"),
                 "thread_text": c.get("thread_text"),
+                # Reddit selftext body (2026-07-17): the card renders the title
+                # bold with this beneath it. Absent on twitter and on plans
+                # written before merge_review_queue started stamping it.
+                "thread_selftext": c.get("thread_selftext"),
                 "reply_text": c.get("reply_text") or "",
                 # English translations stamped at draft time (prep step) when
                 # language != en. Display-only: the card shows them so the
