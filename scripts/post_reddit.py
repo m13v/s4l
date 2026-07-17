@@ -31,6 +31,12 @@ from http_api import api_get, api_post, api_patch
 from author_history_block import render as _render_author_history
 from project_topics import topics_for_project
 from active_experiments import collect as _collect_exps
+# Single source of truth for drafting prompts (2026-07-16): the reddit draft
+# prompt is rendered by draft_prompt_core (same module the X cycle renders
+# from), so shared sections (arm-aware directive, voice corpus, self-memory,
+# learned preferences, project routing) exist ONCE and every drafting
+# experiment applies to both platforms on the same commit.
+import draft_prompt_core as _dpc
 
 # Honor S4L_REPO_DIR so managed-package installs resolve helper scripts inside
 # the package instead of a nonexistent ~/social-autoposter (the same $HOME
