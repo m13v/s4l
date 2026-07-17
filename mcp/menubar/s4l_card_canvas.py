@@ -457,6 +457,15 @@ class _CanvasController(NSObject):
         self._reflow_from(idx)
         self._resize_doc()
         self._refresh_header()
+        # Last card decided -> nothing left to review, so close the canvas
+        # instead of leaving an empty "0 pending drafts" window on screen.
+        # _finish() fires on_complete with every decision made this session,
+        # exactly like the corner card auto-finishing past its final draft
+        # (s4l_card._advance). Reached from a tile completing (approve/reject)
+        # and from prune_drafts draining the last candidate; either way an
+        # empty canvas has no reason to stay up.
+        if not self._order and self._panel is not None:
+            self._finish()
 
     # Approve All / Discard All buttons live in the header row (see
     # _render()), not a dedicated card -- these two actions just target the
