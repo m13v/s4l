@@ -1778,86 +1778,11 @@ Project match: $cproject${DRAFT_LINE}${AUTHOR_HISTORY_LINE}
 "
 done <<< "$CANDIDATES"
 
-ALL_PROJECTS_JSON=$(python3 -c "
-import json, os, sys
-repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
-sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
-# Prompt-sandbox config override (2026-07-15): a sandbox run testing another
-# install's real voice/persona (scripts/admin_fetch_install_config.py
-# materializes it) points this at a fetched copy instead of the operator's
-# own config.json. Checked BEFORE the real path since the repo-root
-# config.json is a symlink to the state dir -- the override must never
-# follow that symlink back to the operator's own config.
-_sandbox_dir = os.environ.get('S4L_SANDBOX_CONFIG_DIR')
-_config_path = os.path.join(_sandbox_dir, 'config.json') if _sandbox_dir else os.path.join(repo_dir, 'config.json')
-config = json.load(open(_config_path))
-projects = config.get('projects', [])
-# learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
-# scripts/learned_preferences.py). Since 2026-07-14 it is NO LONGER stamped
-# into each project entry: the prep prompt embeds it exactly ONCE via
-# GLOBAL_LEARNED_PREFS_JSON (the 'Global learned preferences' line right
-# after this JSON). The old per-project stamping quintupled the block in
-# promotion prompts (~100KB of a ~283KB prompt was 5 identical copies).
-lane = os.environ.get('S4L_ACTIVE_LANE', '')
-if lane == 'personal_brand':
-    # Personal-brand lane is pure organic growth: the drafter must NOT see any
-    # product config at all (no website, links, booking_link, get_started_link,
-    # features, pricing, CTAs). We emit ONLY the persona project, and ONLY the
-    # drafting-relevant fields, so there is literally no product context in the
-    # prompt to accidentally pitch, quote, or link. This also kills cross-routing
-    # (no 'other project' exists to route a candidate to). Whitelist, not
-    # denylist: any field added to the persona entry later stays out unless
-    # explicitly allowed here. (learned_preferences left the whitelist
-    # 2026-07-14: it now travels once, globally, not inside the entry.)
-    ALLOWED = {
-        'name', 'description', 'content_angle', 'voice',
-        'voice_relationship', 'content_guardrails',
-    }
-    persona = next((p for p in projects if p.get('persona') is True), None)
-    out = {}
-    if persona:
-        out[persona['name']] = {k: v for k, v in persona.items() if k in ALLOWED}
-    print(json.dumps(out, indent=2))
-else:
-    # Promotion lane: full product config MINUS ops-only plumbing the drafter
-    # can never use (analytics ids, contact/SEO bylines, link-infra flags,
-    # onboarding metadata). Denylist, not whitelist, on purpose: an unknown
-    # future MARKETING field should reach the drafter by default; add a key
-    # here only when it is provably non-drafting plumbing. landing_pages must
-    # stay (the plan schema's has_landing_pages is defined against it).
-    OPS_KEYS = {
-        'posthog', 'contact', 'seo_author', 'seo_roundup', 'web_chat',
-        'short_links_host', 'short_links_live', 'external_short_links',
-        'force_utm_only', 'booking_link_auto_share', 'onboarded_at',
-        'client', 'client_engagement', 'geo_focus', 'engagement_start',
-        'weight', 'enabled', 'demo_video', 'platforms_disabled',
-        'brand_domain', 'learned_preferences',
-    }
-    out = {}
-    for p in projects:
-        out[p['name']] = {k: v for k, v in p.items() if k not in OPS_KEYS}
-    print(json.dumps(out, indent=2))
-" 2>/dev/null || echo "{}")
-
-# The install-wide learned_preferences block, embedded ONCE in the prep prompt
-# (see the 'Global learned preferences' line under PROJECT ROUTING). history is
-# the feedback loop's audit changelog: it lives in config.json for humans and
-# has NO reader in any prompt (the digest's own prompt embeds only the four
-# managed lists), so it is stripped here; it was ~15KB per copy and rode into
-# every drafting prompt as dead weight before 2026-07-14.
-GLOBAL_LEARNED_PREFS_JSON=$(python3 -c "
-import json, os, sys
-repo_dir = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
-sys.path.insert(0, os.path.join(repo_dir, 'scripts'))
-import learned_preferences as lp
-# Same sandbox config override as ALL_PROJECTS_JSON above (see that comment).
-_sandbox_dir = os.environ.get('S4L_SANDBOX_CONFIG_DIR')
-_config_path = os.path.join(_sandbox_dir, 'config.json') if _sandbox_dir else os.path.join(repo_dir, 'config.json')
-config = json.load(open(_config_path))
-block = lp.get_global_block(config)
-block.pop('history', None)
-print(json.dumps(block, indent=2))
-" 2>/dev/null || echo "{}")
+# ALL_PROJECTS_JSON, GLOBAL_LEARNED_PREFS_JSON, and the ACCOUNT VOICE CORPUS
+# block are no longer assembled in shell: scripts/draft_prompt_core.py
+# computes them at render time from config.json / persona_corpus.txt
+# (honoring the same S4L_SANDBOX_CONFIG_DIR override and lane whitelist/ops
+# denylist). See the render-twitter call below.
 
 # Engagement-style picker (2026-05-19): pick ONE assigned style for this
 # cycle. The picked style flows two places: (1) --style filter for
@@ -1964,178 +1889,19 @@ fi
 export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
 log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)} source=$DRAFT_B_SOURCE"
 
-# --- Draft-prompt A/B: voice-first (v4, 2026-07-15) --------------------------
-# Per-CYCLE arm (the prep session drafts the whole batch from ONE prompt, so
-# assignment is at cycle granularity, not per post; the whole batch shares it).
-#   control_v4   = the plain draft directive (v3's control text verbatim).
-#   treatment_v4 = voice-first package: real, human-verified voice signal (the
-#                  account's own corpus + voice.examples + learned_preferences)
-#                  is made the DOMINANT signal, elevated above and prioritized
-#                  over the assigned engagement style, which is demoted from a
-#                  binding FORM (v3's treatment) to an optional idea, rendered
-#                  arm-aware by engagement_styles.get_assigned_style_prompt,
-#                  which reads S4L_DRAFT_PROMPT_VARIANT at render time IN this
-#                  cycle process. Also skips the per-style top_performers
-#                  exemplar report entirely (TOP_REPORT/TOP_REPORT_B below) so
-#                  no cross-account "what wins in this style" signal competes
-#                  with the account's own real voice. Applied GLOBALLY: both
-#                  the promotion-lane and personal_brand-lane directives are
-#                  arm-aware, not just personal_brand (learned_preferences is
-#                  install-wide and voice.examples is per-project already).
-#   History: v1 (2026-06-29) decoupled the product pivot; the model kept the
-#   skeleton (30% ~= 28% on 857 replies). v2 (2026-07-06) banned the
-#   concede-then-reverse STRUCTURE. v3 (2026-07-10) made the style block the
-#   binding FORM of the draft, testing whether structural specificity beat a
-#   uniform length clamp. v4 (2026-07-15) replaces v3's treatment wholesale:
-#   rather than testing HOW MUCH the style should structure the draft, it
-#   tests whether the account's own real voice (corpus + examples +
-#   learned_preferences) should dominate over the style and other generic
-#   exemplars entirely. Retiring v3 rather than running v4 alongside it as an
-#   independent axis: v4 directly manipulates the same style-block-bindingness
-#   variable v3 already owned, and running both independently would produce
-#   literal contradictions in the same prompt in one of the four combinations
-#   (v3-treatment saying "commit to this style's form", v4-treatment saying
-#   "the style is optional"), not just a statistical interaction to control for.
-# The arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
-# (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
-# mirroring the tail_link_variant plumbing. Split tunable via
-# TWITTER_DRAFT_PROMPT_AB_RATE = fraction of cycles assigned to 'treatment'.
-# CODE DEFAULT 0.5 = 50/50 EVERYWHERE (2026-07-06): every install runs a real
-# holdback so treatment can always be measured against the plain control
-# prompt. The old default of 1 (100% treatment) was changed because it
-# silently dropped the control arm whenever the .env pin did not propagate to the
-# running env (the installed-package driver reads its OWN .env, not the source
-# tree's), leaving no control data. Robustly defaulting to 0.5 in code, not via an
-# .env override, prevents that. The dashboard reads the SAME var with the SAME
-# default (bin/server.js), so display and routing never diverge.
-DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
-# Arm VALUE versioned to '..._v4' on 2026-07-15 to RESET the experiment. The old
-# v1/v2/v3 rows stay in the DB under their old labels but the dashboard now
-# counts only the '_v4' arms, so the voice-first experiment starts fresh from
-# zero. Bump this suffix again on any future reset (keep bin/server.js
-# DRAFT_PROMPT_VARIANT_DEFS, scripts/active_experiments.py DESCRIPTIONS, and the
-# treatment_v4 gate in scripts/engagement_styles.py get_assigned_style_prompt in
-# sync).
-# Explicit override (2026-07-16): if a caller (the sandbox tooling, or
-# anyone else) already exported S4L_DRAFT_PROMPT_VARIANT, respect it instead
-# of overwriting it with a fresh coin flip -- lets a sandbox run force
-# treatment_v4 or control_v4 deliberately instead of leaving it to a random
-# 50/50, which is the whole point of an A/B comparison tool. No real caller
-# ever pre-sets this var today, so live cycles are unaffected.
-if [ -n "${S4L_DRAFT_PROMPT_VARIANT:-}" ]; then
-    log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (forced via env, no coin flip)"
-else
-    # Server-side per-install pin (2026-07-16): lets the operator remotely pin
-    # ONE specific install to always draft under one arm (e.g. Nhat's real
-    # account -> treatment_v4), via POST /api/v1/installations/draft-prompt-variant.
-    # Mirrors the posting_mode precedent (2026-07-13) exactly: NULL/unset is
-    # the default for every install, so the 50/50 A/B holdback (2026-07-06:
-    # every install runs a real split so treatment can always be measured
-    # against control) stays intact unless explicitly overridden here. This
-    # pins DRAFTING ONLY; it does not change discovery, posting, or anything
-    # else. Fetch failure fails OPEN to the random coin flip below, same
-    # fail-open contract as the VIRALITY_THRESHOLD fetch elsewhere in this
-    # phase -- a down/slow API must never block or bias drafting.
-    S4L_DRAFT_PROMPT_VARIANT_PIN=$(python3 -c "
-import os, sys
-_repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
-sys.path.insert(0, os.path.join(_repo, 'scripts'))
-from http_api import api_get
-try:
-    r = api_get('/api/v1/installations/draft-prompt-variant')
-    v = (r or {}).get('data', {}).get('variant')
-    if v:
-        print(v)
-except BaseException:
-    pass
-" 2>/dev/null || echo "")
-    if [ -n "${S4L_DRAFT_PROMPT_VARIANT_PIN:-}" ]; then
-        S4L_DRAFT_PROMPT_VARIANT="$S4L_DRAFT_PROMPT_VARIANT_PIN"
-        log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (server-side pin for this install, no coin flip)"
-    else
-        S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
-import random
-try:
-    rate = float('$DRAFT_PROMPT_AB_RATE')
-except Exception:
-    rate = 0.5
-rate = min(1.0, max(0.0, rate))
-print('treatment_v4' if random.random() < rate else 'control_v4')
-" 2>/dev/null || echo treatment_v4)
-        log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
-    fi
-fi
+# --- Draft-prompt A/B arm (v4, voice-first) ----------------------------------
+# Owned by scripts/draft_prompt_core.py (single source of truth, shared with
+# the Reddit draft lane): the full experiment history, both arm texts, the
+# Draft-B divergence note, the persona-lane directive, and the pick
+# precedence (pre-set env for sandbox forcing -> server-side per-install pin
+# -> 50/50 coin flip via TWITTER_DRAFT_PROMPT_AB_RATE) ALL live there. The
+# arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
+# (active_experiments.collect -> plan candidates -> twitter_post_plan.py ->
+# posts.draft_prompt_variant), and engagement_styles.get_assigned_style_prompt
+# reads the SAME env var at render time in this process.
+S4L_DRAFT_PROMPT_VARIANT=$(python3 "$REPO_DIR/scripts/draft_prompt_core.py" pick-arm 2>>"$LOG_FILE" || echo treatment_v4)
 export S4L_DRAFT_PROMPT_VARIANT
-# v4 RESET (2026-07-15, replaces v3 wholesale): v3 tested whether the
-# assigned engagement style should be a binding structural FORM. v4 tests a
-# different, bigger claim: that real, measured voice signal (the account's
-# own corpus + voice.examples + learned_preferences, all human-verified)
-# should dominate the draft over EVERY other competing signal — including the
-# style block's structure, which is now demoted to an optional idea
-# (scripts/engagement_styles.py), and the per-style top-performers exemplar
-# report, which treatment_v4 skips computing entirely (see TOP_REPORT below).
-# Applied GLOBALLY (both lanes), not personal_brand-only: learned_preferences
-# has been install-wide since 2026-07-08 and voice.examples exists per-project
-# for every project, persona or product. v1-v3 arm strings are retired; the
-# dashboard (bin/server.js DRAFT_PROMPT_VARIANT_DEFS) and
-# scripts/active_experiments.py DESCRIPTIONS now count only v4.
-if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
-    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. PRIORITY ORDER for how you write this, highest first: (1) learned_preferences.draft_style_notes and edit_examples under PROJECT ROUTING are the strongest signal available, real human corrections to this account's own past drafts, and are MANDATORY, not advisory. (2) The ACCOUNT VOICE CORPUS block and the matched project's voice.examples are VERBATIM GROUND TRUTH for how this account actually writes: capitalization, punctuation, contractions, sentence length, terseness. Match those mechanics exactly. (3) voice.tone is a supporting description only, never ground truth: if it ever conflicts with what the corpus/examples actually show, follow the examples, not the tone description. (4) The assigned engagement style is an optional idea for angle and length, not a required structure; draw on it only when it fits naturally, never at the cost of (1)-(3). Do NOT use the concede-then-reverse skeleton in ANY form. Banned openings include: 'X is the easy part/half/win, the hard part is Y'; 'X was never the [thing], it's Y'; 'X isn't the [problem], it's Y'; 'the real/actual/harder part is Y'; 'what actually breaks/ships/matters is Y'; 'the part nobody says/shows is Y'; 'X is solved, Y is what breaks'. Lead with substance from ONE entry point and vary the entry point across replies: a concrete first-hand specific or number; a direct answer to the exact question asked; one sharp opinion with no hedge; a genuine question that moves the thread forward; or a relevant pointer. No warm-up framing sentence before the substance. Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes. Never violate voice.never. Treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
-else
-    DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present. The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing (it overrides the engagement style's structural template on conflict), and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
-fi
-# Draft A/B divergence note (2026-07-16, treatment_v4 only): style assignment
-# is otherwise the ONLY instructed reason draft_a_text and draft_b_text ever
-# differ (see the fixed "they must diverge... because they follow different
-# style templates" line below) -- confirmed live on Nhat's PersonalBrand
-# project: Draft B's engagement style is picked in INVENT mode as often as
-# not (a fresh model-invented style, not a vetted registry entry), and that
-# invention kept landing on the exact formulaic "'X' is the Y" reframe opener
-# her learned_preferences.draft_style_notes explicitly bans, regardless of
-# the invented style's name. Style alone isn't a reliable enough divergence
-# mechanism when the style itself is freshly improvised. This does NOT touch
-# style assignment (both slots still get a picked/assigned style exactly as
-# before); it adds genuine distinctness as its OWN explicit requirement,
-# independent of style, so the two drafts stay real alternatives even when
-# style differences alone fail to force them apart. control_v4 is unaffected.
-if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
-    DRAFT_B_DIVERGENCE_NOTE=" Beyond following different style templates: draft_a_text and draft_b_text must be genuinely distinct takes on this thread -- think of them as variant 1a and variant 1b: different entry point, different specific detail seized on, different rhetorical move -- not two phrasings of the same underlying observation dressed in different style language. If 1a and 1b would say essentially the same thing, pick a different angle entirely for 1b rather than just rewording 1a."
-else
-    DRAFT_B_DIVERGENCE_NOTE=""
-fi
-# Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by s4l_mode.py):
-# replace the product-framed directive entirely. This lane is pure organic
-# growth: no product, no link, no CTA. The reply must add real value grounded in
-# the persona's first-hand material (the ACCOUNT VOICE CORPUS block + the
-# persona voice block), not concede-and-agree filler. Replaces the
-# product-framed promotion directives above, but is itself arm-aware (see
-# below): treatment_v4 adds the skeleton ban AND the voice/preferences
-# priority order; control_v4 keeps the plain persona directive, so the A/B
-# runs in this lane too.
-if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
-    # Arm-aware persona lane (v4 RESET, 2026-07-15): treatment_v4 adds the
-    # concede-then-reverse ban clause AND a PRIORITY ORDER clause making the
-    # ACCOUNT VOICE CORPUS / voice.examples and learned_preferences outrank
-    # the freeform voice.tone description and the assigned engagement style
-    # whenever they disagree. voice.tone is synthesized LLM prose written at
-    # onboarding and can drift from what the corpus actually shows (seen in
-    # the wild: a persona's tone said "lowercase is fine" while every scanned
-    # example was properly capitalized) — the old directive never told the
-    # model which one wins on conflict; v4 does. control_v4 keeps the plain
-    # persona directive. The style block itself (STYLES_BLOCK, rendered in
-    # this process) is also arm-aware: it renders as an optional idea, not a
-    # binding FORM, on treatment_v4 (scripts/engagement_styles.py).
-    if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
-        PERSONA_SKELETON_BAN=" Also do NOT use the concede-then-reverse skeleton in ANY form: banned openings include 'X is the easy part/half/win, the hard part is Y', 'X was never the [thing], it's Y', 'X isn't the [problem], it's Y', 'the real/actual/harder part is Y', 'what actually breaks/ships/matters is Y', 'the part nobody says/shows is Y', and 'X is solved, Y is what breaks'; if a draft has that pivot, rewrite it from one of the entry points above."
-        PERSONA_VOICE_PRIORITY_CLAUSE=" PRIORITY ORDER for how you write this, highest first: (1) learned_preferences.draft_style_notes and edit_examples are the strongest signal available, real human corrections to this account's own past drafts, and are MANDATORY. (2) The ACCOUNT VOICE CORPUS block and voice.examples above are VERBATIM GROUND TRUTH for how they actually write: capitalization, punctuation, contractions, sentence length, terseness. Match those mechanics exactly. (3) voice.tone is a supporting description only, never ground truth: if it ever conflicts with what the corpus/examples actually show (for example tone says lowercase is fine but every real example is properly capitalized), follow the examples. (4) The assigned engagement style is an optional idea for angle and length, not a required structure."
-        PERSONA_PREFS_RELATION="(per the PRIORITY ORDER above: learned_preferences and the account's real voice outrank the engagement style whenever they disagree)"
-    else
-        PERSONA_SKELETON_BAN=""
-        PERSONA_VOICE_PRIORITY_CLAUSE=""
-        PERSONA_PREFS_RELATION="(it overrides the engagement style's structural template on conflict)"
-    fi
-    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the ACCOUNT VOICE CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is').${PERSONA_SKELETON_BAN} This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed by the per-style LENGTH LIMIT in the style block above. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.${PERSONA_VOICE_PRIORITY_CLAUSE} The global learned_preferences block under PROJECT ROUTING is distilled human review feedback and is MANDATORY, not advisory: follow every learned_preferences.draft_style_notes entry when writing ${PERSONA_PREFS_RELATION}, and treat learned_preferences.audience_avoid / thread_avoid matches as strong reasons to skip the candidate. Never violate content_guardrails.do_not."
-fi
+log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (draft_prompt_core pick-arm: env>pin>coin)"
 
 # 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
 # winner corpus (~400 lines of "Top Posts by Project" + summary table) that
@@ -2323,33 +2089,6 @@ else
     rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 fi
 
-# --- ACCOUNT VOICE CORPUS injection (both lanes, 2026-07-15) -----------------
-# build_persona.py apply / voice_exemplars.py write a raw first-hand corpus
-# sidecar (persona_corpus.txt) next to config.json, scanned from the
-# account's OWN real posts/replies. It reflects the ACCOUNT HOLDER, not a
-# specific project, so it is equally valid grounding whether this cycle is
-# drafting a personal_brand reply or a promotion-lane reply for a product
-# project: same human, same fingers, same account. Previously gated to the
-# personal_brand lane only, which withheld real grounding data from every
-# promotion-lane draft for no reason tied to the data itself; ungated so
-# every lane gets it whenever the file exists. This is NOT part of the
-# draft_prompt A/B — both v4 arms (and any legacy card mid-flight) see it;
-# withholding real examples from control would confound "does showing real
-# examples help" with "does emphasizing them differently help."
-CORPUS_BLOCK=""
-# Same sandbox override as the config.json reads above: persona_corpus.txt is
-# a flat repo-root file (not symlinked), so it needs its own override branch
-# rather than following $REPO_DIR.
-_PERSONA_CORPUS_PATH="${S4L_SANDBOX_CONFIG_DIR:+$S4L_SANDBOX_CONFIG_DIR/persona_corpus.txt}"
-_PERSONA_CORPUS_PATH="${_PERSONA_CORPUS_PATH:-$REPO_DIR/persona_corpus.txt}"
-if [ -f "$_PERSONA_CORPUS_PATH" ]; then
-    CORPUS_BLOCK="## ACCOUNT VOICE CORPUS (raw first-hand material — ground your reply in THIS)
-This is the account holder's own public writing and work, verbatim. Quote and draw real specifics from it: actual projects, real numbers, sharp opinions, real failures. Do NOT invent anything not supported here or in the project's voice block. Use it to make the reply concrete and unmistakably human, and as ground truth for HOW they write (capitalization, punctuation, contractions, length) regardless of which project this reply is for.
-$(cat "$_PERSONA_CORPUS_PATH")
-"
-    log "Phase 2b-prep: injected account voice corpus ($(wc -c < "$_PERSONA_CORPUS_PATH" | tr -d ' ') bytes)."
-fi
-
 log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
 
 # Pre-assign the prep session UUID in the parent shell so it survives the
@@ -2374,128 +2113,38 @@ export CLAUDE_SESSION_ID
 # validate_or_register call accepts the block without a second schema layer.
 PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"is_reused_draft":{"type":"boolean"},"draft_a_text":{"type":"string"},"draft_a_style":{"type":"string"},"draft_a_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_a_text_en":{"type":["string","null"]},"draft_b_text":{"type":["string","null"]},"draft_b_style":{"type":["string","null"]},"draft_b_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_b_text_en":{"type":["string","null"]},"language":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","is_reused_draft","draft_a_text","draft_a_style","draft_b_text","draft_b_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
-PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
-
-Your ONLY job in THIS session:
-  1. Read each candidate's thread context from the PRE-SCORED CANDIDATES block below (each entry's 'Text:' field is the parent tweet). You have WebSearch and WebFetch available: use them ONLY when a thread hinges on a current fact, a name, a release, or a claim you are not sure about, so your reply is specific and correct instead of vague. You do NOT have the Twitter/X browser this session — never fetch, navigate, or open a tweet/x.com URL, and never try to load the thread itself; the thread text you need is already inlined below. Most replies need no search at all; reach for it only when it materially improves the reply.
-  2. Draft TWO independent replies for each fresh candidate, one under Draft A's assigned style and one under Draft B's assigned style below. Do not judge or rank them, the reviewer reads both and picks.
-  3. Persist the recommended fresh draft via log_draft.py.
-  4. Emit a structured plan describing the chosen candidates, both draft texts, and (when applicable) the SEO link keyword + slug.
-
-You will NOT post anything. You will NOT generate landing pages. You will NOT call log_post.py. The shell handles all of that AFTER your session ends, with the browser lock released for the long landing-page build.
-
-Read $SKILL_FILE for content rules and voice context.
-Read $REPO_DIR/config.json for project metadata.
-
-## PRE-SCORED CANDIDATES (sorted by Virality DESC, highest first)
-Virality is a composite predictor of how big this thread will get AFTER you reply: it combines engagement velocity (eng/hour), author reach (follower tier), age decay (6h half-life), retweet ratio, reply count, and discussion quality (reply:like ratio). On historical posted data the highest-Virality cohort (score >= 10000) received ~36x the median reply views of the lowest cohort (score < 10), so prioritize on-brand candidates with HIGH Virality. Rule of thumb: Virality >= 100 = strong thread on a real growth curve, your reply is likely to land 10-100x more eyeballs than a low-Virality thread. Delta (5min) is the raw T1-T0 engagement count and is shown for context only; do not re-rank on Delta.
-$CANDIDATE_BLOCK
-$MEDIA_BLOCK
-$CORPUS_BLOCK
-
-## PROJECT ROUTING (per-candidate)
-Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
-All project configs: $ALL_PROJECTS_JSON
-Global learned preferences (ONE install-wide block; it applies to EVERY project. Any directive in this prompt that references a project's learned_preferences block means THIS block): $GLOBAL_LEARNED_PREFS_JSON
-
-## PROJECT TOP PERFORMERS (query on demand, do NOT skip routing first)
-The feedback reports below carry a per-style exemplar only; project winners are no longer bulk-injected. AFTER you have decided which project a candidate's draft is for, you MAY pull that project's own recent winners (last 30 days, ranked by real click rate) when you are unsure how this product converts in replies:
-   python3 $REPO_DIR/scripts/top_performers.py --platform twitter --project 'PROJECT_NAME' --top 3 --brief --invoked-by '$BATCH_ID'
-(PROJECT_NAME exactly as it appears in the candidate's 'Project match' / config.json.) Treat the results as evidence of which CLAIMS and ANGLES landed for that product, never as structural templates: do not copy their sentence shape, opener, or pivot wording. One call per project at most; skip the call entirely for projects you already queried this session.
-
-$RECENT_SELF_BLOCK
-
-## DRAFT A: assigned style + feedback from past performance
-$TOP_REPORT
-
-$STYLES_BLOCK
-
-## DRAFT B: assigned style + feedback from past performance
-$TOP_REPORT_B
-
-$STYLES_BLOCK_B
-
-## WORKFLOW
-There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
-
-For each chosen candidate:
-1. Read the candidate's parent tweet from its 'Text:' field in the PRE-SCORED CANDIDATES block above.
-2. Understand the context from that inlined text (the thread text is already in this prompt; you do NOT have the Twitter browser, but you MAY use WebSearch/WebFetch for external facts when a thread needs them to be answered well).
-3. DRAFT HANDLING (existing vs fresh):
-   - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim as draft_a_text/draft_a_style (set is_reused_draft=true, draft_b_text=null, draft_b_style=null). Do NOT call log_draft.py; do NOT redraft; do NOT write a second variant, prior cycle already paid the LLM cost for the one draft you have.
-   - Otherwise (fresh candidate, is_reused_draft=false): write TWO independent drafts. Do NOT judge, rank, or pick a favorite between them, both are shown to the reviewer, who decides.
-     - draft_a_text: follow the DRAFT A style block above (its own description/example/note/length limit).
-     - draft_b_text: follow the DRAFT B style block above, written INDEPENDENTLY from scratch as if draft_a_text did not exist. Do NOT lightly reword draft_a_text into draft_b_text, they must diverge in length and rhetorical move because they follow different style templates, not just differ in phrasing. If you notice draft_b_text ending up as a paraphrase of draft_a_text, stop and rewrite it from Style B's own example instead.$DRAFT_B_DIVERGENCE_NOTE
-   - $DRAFT_DIRECTIVE (applies to both drafts on fresh candidates; each still obeys its OWN style's length limit, not a shared one).
-3a. PERSIST DRAFT A (skip entirely for reused drafts):
-     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'DRAFT_A_TEXT' --style DRAFT_A_STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
-   Always persist draft_a_text/draft_a_style here (Draft A is the single-draft representative used if a near-immediate next cycle reuses this candidate's draft verbatim per step 3 above); never draft_b.
-   The --assigned-style / --assigned-mode flags carry the orchestrator's picker output (this cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}') into the candidate row so the post pipeline can coerce drift and register invented styles. Pass them VERBATIM as shown.
-   If Draft A used an invented style (i.e. mode is invent and its STYLE is a new snake_case name not in the Draft A style block), ALSO pass:
-     --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
-   with the same description/example/why_existing_didnt_fit you put in draft_a_new_style in your output JSON for this candidate.
-   Failure here is non-fatal, log a warning and continue.
-4. EMIT one entry in the structured 'candidates' array with these fields:
-   - candidate_id (int): from the candidate block
-   - candidate_url (string): the parent tweet URL
-   - thread_author (string): the @handle (no leading @)
-   - thread_text (string): the parent tweet's text, condensed to <=500 chars if needed
-   - matched_project (string): the project name to attribute this post to
-   - is_reused_draft (bool, REQUIRED): true iff you reused an existing draft verbatim per step 3 above, false for a freshly-drafted candidate.
-   - draft_a_text (string, REQUIRED): the FINAL Draft A reply text WITHOUT any URL appended (the shell appends the URL later). 250 chars is the hard ceiling (leaves room for a 23-char t.co link inside the 280-char cap) — stay well under it, not up to it. On a reused candidate this IS the reused text.
-   - draft_a_style (string, REQUIRED): style name applied to draft_a_text (or the reused candidate's existing style). In USE mode ($PICKED_MODE=use) this MUST be the Draft A assigned style name '${PICKED_STYLE}' verbatim; the orchestrator silently coerces drift back. In INVENT mode ($PICKED_MODE=invent) this MUST be a NEW snake_case style name not in the Draft A style block.
-   - draft_a_new_style (object, REQUIRED iff Draft A's INVENT mode produced a new name; OMIT or set null otherwise): {description (string), example (string), why_existing_didnt_fit (string), note (string, optional), target_chars (integer, REQUIRED)}. target_chars is the comment length THIS new style wins at, in characters; the example you write must be EXACTLY that length, write the example first, count its characters, then set target_chars to that count. Bias SHORT: one-liner style ~45, story-arc style up to ~180, never above 220.
-   - draft_a_text_en (string, REQUIRED when language != 'en'; null when language == 'en'): a faithful English translation of draft_a_text. Display-only: the review card shows it so the operator can understand a non-English draft; it is NEVER posted. Translate meaning, not word-by-word; no added commentary.
-   - draft_b_text (string, REQUIRED when is_reused_draft=false; null when is_reused_draft=true): the FINAL Draft B reply text, same rules as draft_a_text, written under the DRAFT B style block instead.
-   - draft_b_style (string, REQUIRED when is_reused_draft=false; null when is_reused_draft=true): style name applied to draft_b_text, same rules as draft_a_style but against the Draft B assignment (USE mode style '${PICKED_STYLE_B}', mode $PICKED_MODE_B).
-   - draft_b_new_style (object, REQUIRED iff Draft B's INVENT mode produced a new name; OMIT or set null otherwise): same shape as draft_a_new_style.
-   - draft_b_text_en (string, REQUIRED when is_reused_draft=false AND language != 'en'; null otherwise): faithful English translation of draft_b_text, same display-only rules as draft_a_text_en.
-   - language (string): ISO 639-1 code (en, ja, zh, es, ...)
-   - thread_text_en (string, REQUIRED when language != 'en'; OMIT when language == 'en'): a faithful English translation of thread_text (same <=500 char condensation). Display-only, never posted.
-   - has_landing_pages (bool): true iff the matched project has BOTH landing_pages.repo AND landing_pages.base_url set in config.json. Otherwise false.
-   - link_keyword (string, REQUIRED when has_landing_pages=true; OMIT otherwise): a SHORT 3-6 word phrase that captures the ESSENCE OF YOUR REPLY (not just the thread topic). Think: what would a reader search to find a useful page about what you just said?
-   - link_slug (string, REQUIRED when has_landing_pages=true; OMIT otherwise): kebab-case, alphanumeric+hyphens only, max 50 chars.
-   - search_topic (string, REQUIRED): normally the EXACT 'Search query' value from this candidate's block above, copied verbatim (do not paraphrase, normalise, or trim). EXCEPTION (cross-route): if the matched_project you chose for this candidate is DIFFERENT from the candidate's 'Project match' field (i.e. you re-routed the thread to a better-fitting project), set search_topic to an empty string \"\" instead. The origin query's topic belongs to the project that ISSUED that query, not the one you routed to; copying it onto the new project's post miscredits the new project's topic ranking and the issuing project's query bank. When matched_project equals the 'Project match' field, copy the topic verbatim as before. The shell stamps this onto posts.search_topic so the next cycle's Phase 1 can rank which topics convert (clicks per post) and evolve the universe accordingly.
-
-5. CLASSIFY EVERY PRE-SCORED CANDIDATE into ONE of THREE outcomes. There is NO post cap and NO per-project quota: post EVERY thread you judge genuinely on-brand.
-   (a) 'candidates' — an on-brand pick you are replying to this cycle (step 4 above). No cap.
-   (b) 'rejected' — ONLY for a PERMANENT, thread-intrinsic reason this thread should NEVER be replied to for the matched project: off-topic for the project, toxic / hateful, low-quality / spam / promo / shill, audience or ICP mismatch, our own account, or stale. Reason must be <=200 chars, plain text, no quotes. CRITICAL: the shell marks every 'rejected' entry status='skipped', and a skipped (thread, project) is filtered out of ALL future scans for this account PERMANENTLY. Only reject things that will never be a good fit.
-   (c) OMIT from BOTH arrays — for a TIMING-ONLY reason where the thread itself is fine but you are simply not posting to it right NOW. Omitting keeps it 'pending' so a later cycle can re-judge it. ALWAYS omit (NEVER reject) when your only reason is one of:
-       - you preferred a stronger candidate this cycle (there is no cap, so ideally just post this one too; if you still defer, omit it),
-       - it is a near-duplicate of another thread you are already picking THIS cycle,
-       - you already engaged this author / a similar thread this cycle and want to avoid back-to-back over-engagement.
-       These are DEFERRALS, not rejections. Putting any of them in 'rejected' would permanently blacklist a thread that is actually fine. Do NOT do that.
-   It is fine for 'candidates' to be empty (nothing on-brand) and fine for 'rejected' to be empty (nothing permanently unsuitable).
-   Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you omit or forget.
-
-5a. SELF-IMPROVING PROJECT-WIDE EXCLUSION LIST (optional, on rejected entries only):
-    When you put a candidate in 'rejected' BECAUSE of a stable, recurring CLASS of false-positive (not a one-off bad tweet), you MAY include a 'proposed_excludes' array of 1-3 specific keywords. If you do, the pipeline will (after a 2-distinct-batch activation gate) automatically append \`-keyword\` to ALL future Twitter searches for the matched_project, project-wide and persistent. This is the ONLY upstream block against the entire class of false-positive that a tighter Phase 1 query alone cannot prevent.
-
-    USE THIS POWER NARROWLY. False-negatives (legit tweets being filtered out) are far worse than the cost of seeing one more cricket tweet. Apply ALL of these rules:
-
-    - DO emit when: the false-positive is caused by a SPECIFIC ambiguous proper noun, brand, or domain term that has a wholly unrelated meaning collisional with the project. Example for Vipassana: an IPL/cricket thread surfaced because the search query included \`Goenka\` (the meditation teacher S.N. Goenka shares a surname with Sanjiv Goenka, owner of an IPL team). Right proposed_excludes: ['cricket','kohli','ipl','lsg','rcb']. WRONG proposed_excludes: ['goenka'] (would mute legit S.N. Goenka tweets).
-
-    - DO NOT emit when: the candidate is just personally low-quality (spam, low engagement, generic), the language is wrong, the author is bot-like, or the thread is just slightly off-topic. Those are one-offs, NOT classes. Use the 'reason' field instead.
-
-    - Each proposed term must be:
-      * a SINGLE token, lowercase, ascii letters/digits/hyphen only, no spaces, length 3-32. (e.g. 'cricket', 'kohli', 'ipl', 'lsg', 'rcb-fan', 'crypto', 'memecoin').
-      * SPECIFIC and unambiguous in the project's domain. Proper nouns, brand names, narrow jargon, sport/team/franchise terms preferred. Generic words like 'practice', 'retreat', 'meditation', 'work', 'tips', 'app', 'tool', 'help' are FORBIDDEN — they will produce false-negatives.
-      * NOT a core search topic of the matched_project (the validator rejects any term in the project's search_topics, so don't waste tokens proposing one).
-
-    - Cap: at most 3 terms per rejected entry. If you need more, you're probably proposing too generically — narrow the list.
-
-    - Activation gate: each term needs >=2 SEPARATE batches to propose it before it goes live, so a single false-rejection cannot mute a search. You don't need to think about this — propose if you'd be confident a future cycle's Claude would also propose it; if not, leave proposed_excludes off.
-
-    - When in doubt, omit the field entirely. The default behavior (no proposed_excludes) is safe; over-proposing is not.
-
-CRITICAL:
-- DO NOT post anything. The shell handles posting.
-- DO NOT call twitter_browser.py.
-- DO NOT call generate_page.py (the shell runs it AFTER your session, outside the lock).
-- DO NOT call log_post.py or campaign_bump.py.
-- You do NOT have the Twitter/X browser this session: never navigate, fetch, or open a tweet/x.com URL, and never try to reload the thread. WebSearch/WebFetch ARE available for external fact-checking only; use them sparingly and never to open the tweet itself.
-- NEVER use em dashes. Use commas, periods, or regular dashes (-).
-- Reply in the SAME LANGUAGE as the parent tweet."
+# --- PREP_PROMPT assembly (2026-07-16): NO PROMPT TEXT IN SHELL --------------
+# The entire prep prompt (skeleton, arm-aware DRAFT DIRECTIVE, ACCOUNT VOICE
+# CORPUS, PROJECT ROUTING JSON, global learned preferences, Draft-B
+# divergence note) is rendered by scripts/draft_prompt_core.py, the single
+# source of truth shared with the Reddit draft lane. A drafting experiment is
+# implemented THERE (arm-aware rendering) and applies to every platform on
+# the same commit. Do NOT add prompt text back to this file: pass new dynamic
+# context as an ingredient file below and render it in the core.
+# Multiline blocks ride as files (printf builtin, immune to ARG_MAX); scalars
+# ride as S4L_PREP_* env vars; arm/lane/prefix come from the exported cycle
+# env (S4L_DRAFT_PROMPT_VARIANT / S4L_ACTIVE_LANE / TW_ENGINE_PREFIX).
+_PREP_ING_DIR=$(mktemp -d -t s4l_prep_ing_XXXXXX)
+printf '%s' "$CANDIDATE_BLOCK" > "$_PREP_ING_DIR/candidate_block"
+printf '%s' "$MEDIA_BLOCK" > "$_PREP_ING_DIR/media_block"
+printf '%s' "$TOP_REPORT" > "$_PREP_ING_DIR/top_report"
+printf '%s' "$TOP_REPORT_B" > "$_PREP_ING_DIR/top_report_b"
+printf '%s' "$STYLES_BLOCK" > "$_PREP_ING_DIR/styles_block"
+printf '%s' "$STYLES_BLOCK_B" > "$_PREP_ING_DIR/styles_block_b"
+printf '%s' "$RECENT_SELF_BLOCK" > "$_PREP_ING_DIR/recent_self_block"
+PREP_PROMPT=$(S4L_PREP_BATCH_ID="$BATCH_ID" \
+    S4L_PREP_SKILL_FILE="$SKILL_FILE" \
+    S4L_PREP_PICKED_STYLE="$PICKED_STYLE" \
+    S4L_PREP_PICKED_MODE="$PICKED_MODE" \
+    S4L_PREP_PICKED_STYLE_B="$PICKED_STYLE_B" \
+    S4L_PREP_PICKED_MODE_B="$PICKED_MODE_B" \
+    TW_ENGINE_PREFIX="$TW_ENGINE_PREFIX" \
+    python3 "$REPO_DIR/scripts/draft_prompt_core.py" render-twitter --ingredients-dir "$_PREP_ING_DIR" 2>>"$LOG_FILE")
+rm -rf "$_PREP_ING_DIR" 2>/dev/null || true
+if [ -z "$PREP_PROMPT" ]; then
+    log "FATAL: draft_prompt_core render-twitter returned an empty prompt; aborting before drafting (candidates stay pending for Phase 0 salvage)."
+    exit 1
+fi
 
 # Pipe the prep prompt via stdin instead of passing as a shell argument.
 # On Linux ARG_MAX is 2MB; the assembled prompt (config.json + top_report +
