@@ -84,25 +84,20 @@ def _diag_log(msg):
         pass
 VIEWPORT = {"width": 911, "height": 1016}
 
-# Load Reddit username from config.
-# Prefers the new top-level `reddit_account.username` (2026-05-15) over the
-# legacy `accounts.reddit.username` path. Drift between the two silently
-# broke the post-permalink lookup on the VM (wrong username → JS finds 0
-# matching comments → permalink=None → pipeline records `failed` despite
-# the comment landing on Reddit).
+# Our Reddit username, via the ONE resolver (account_resolver.resolve('reddit'):
+# env -> reddit_account.username login ground truth -> accounts.reddit.username).
+# The dual-key precedence used to be duplicated here; drift between the two keys
+# silently broke the post-permalink lookup on the VM (wrong username → JS finds 0
+# matching comments → permalink=None → pipeline records `failed` despite the
+# comment landing on Reddit). "" means "unknown account" — never a hardcoded
+# fallback, which would mis-attribute on a misconfigured install.
 _config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
-OUR_USERNAME = "Deep_Ad1959"
-if os.path.exists(_config_path):
-    try:
-        with open(_config_path) as f:
-            _cfg = json.load(f)
-        OUR_USERNAME = (
-            (_cfg.get("reddit_account") or {}).get("username")
-            or _cfg.get("accounts", {}).get("reddit", {}).get("username")
-            or OUR_USERNAME
-        )
-    except Exception:
-        pass
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from account_resolver import resolve as _resolve_account
+    OUR_USERNAME = _resolve_account("reddit") or ""
+except Exception:
+    OUR_USERNAME = ""
 
 
 def _ban_entry_to_slug(entry):
@@ -141,7 +136,9 @@ def _load_comment_blocked_subs():
     try:
         with open(_config_path) as f:
             cfg = json.load(f)
-        current_account = (cfg.get("reddit_account") or {}).get("username") or None
+        # Same value as OUR_USERNAME above; resolved once through the ONE
+        # resolver so ban scoping and permalink lookup can never disagree.
+        current_account = OUR_USERNAME or None
         blocked = set()
         bans = cfg.get("subreddit_bans") or {}
         if isinstance(bans, dict):
