@@ -912,7 +912,7 @@ def main():
     p_log.add_argument("project")
     p_log.add_argument("thread_author")
     p_log.add_argument("thread_title")
-    p_log.add_argument("--account", default="Deep_Ad1959")
+    p_log.add_argument("--account", default=(_resolve_account("reddit") or ""))
     p_log.add_argument("--engagement-style", default=None)
     p_log.add_argument("--search-topic", dest="search_topic", default=None,
                        help="The seed topic/query used to find this thread (feedback loop input)")
