@@ -2922,6 +2922,11 @@ class S4LMenuBar(rumps.App):
         flight, and not snoozed (the snooze label and gate take precedence)."""
         if pending_count <= 0 or self._review_active:
             return 0.0
+        # The reveal cadence is a cards-mode concept (its menu control is
+        # hidden in canvas mode, 2026-07-16); never hold canvas presentations
+        # on a stale cadence value the user can no longer see or change.
+        if st.read_review_layout() != "cards":
+            return 0.0
         now = time.time()
         if now < self._review_snooze_until:
             return 0.0
@@ -3042,7 +3047,12 @@ class S4LMenuBar(rumps.App):
         # card keeps growing live) and skipped for focus=True (the menu's
         # "Review N pending drafts" is an explicit ask). _last_review_sig is NOT
         # stamped on a hold, so the same set still presents fresh when due.
-        if not focus:
+        # Cards mode only (2026-07-16): the cadence control is hidden while
+        # View Mode is Canvas, so a stale value must not silently pace or
+        # suppress canvas presentations. No panel is open past the
+        # _review_active branch above, so the preference IS the layout that
+        # is about to present.
+        if not focus and st.read_review_layout() == "cards":
             cadence = st.read_reveal_cadence()
             if cadence < 0:
                 # "Never" preset: cards never auto-pop, only an explicit
