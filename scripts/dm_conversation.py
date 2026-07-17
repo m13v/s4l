@@ -85,15 +85,17 @@ def load_config():
 
 def get_our_account(config, platform):
     accounts = config.get("accounts", {})
+    # No hardcoded fallback on any platform: a default handle/username/name stamped
+    # on a DM silently mis-attributes it to the repo owner. Resolve from config / env
+    # through the one resolver; "" means unknown (caller decides how to degrade).
+    from account_resolver import resolve as _resolve_account
     if platform == "reddit":
-        return accounts.get("reddit", {}).get("username", "Deep_Ad1959")
+        return accounts.get("reddit", {}).get("username") or _resolve_account("reddit") or ""
     elif platform == "linkedin":
-        return accounts.get("linkedin", {}).get("name", "Matthew Diakonov")
+        return accounts.get("linkedin", {}).get("name") or _resolve_account("linkedin") or ""
     elif platform == "x":
-        # No hardcoded fallback: stamping a default handle on an outbound DM
-        # silently mis-attributes it to the repo owner. Resolve from config / env
-        # and fail loud if absent.
-        from account_resolver import resolve as _resolve_account
+        # Twitter fails LOUD if unresolved (an outbound DM must carry a real
+        # sender); reddit/linkedin above degrade to "" since their callers can.
         h = _resolve_account("twitter")
         if not h:
             raise RuntimeError(
