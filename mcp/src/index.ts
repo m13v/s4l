@@ -1055,38 +1055,26 @@ function parsePostCandidateResults(stdout: string): PostCandidateResult[] {
   return [...byId.values()];
 }
 
-// Resolve the configured posting handle the SAME way account_resolver.py does:
-// AUTOPOSTER_TWITTER_HANDLE env first, then config.json accounts.twitter.handle.
-// Returns the bare handle (no @) or null. The post preflight uses it so a missing
-// handle fails ONCE, loudly, instead of as N silent per-reply no_account_configured
-// skips (twitter_browser.py refuses to post with no handle — no impersonation).
-function readConfiguredTwitterHandle(): string | null {
+// Resolve the posting @handle through the ONE resolver (scripts/account_resolver.py:
+// env AUTOPOSTER_TWITTER_HANDLE -> config.json accounts.twitter.handle -> the durable
+// connect-time cookie mirror). Deferring to it, instead of re-reading config.json here,
+// keeps a single resolution path shared with the poster (twitter_browser.our_handle),
+// and keeps the handle in a single durable home (the cookie mirror) rather than a
+// second copy in config.json. Returns the bare handle (no @) or null; the preflight
+// refuses loudly on null so a missing handle fails ONCE, not as N silent per-reply
+// no_account_configured skips (and never as a hardcoded impersonation fallback).
+async function resolvePostingHandle(): Promise<string | null> {
   const env = (process.env.AUTOPOSTER_TWITTER_HANDLE || "").trim().replace(/^@/, "");
   if (env) return env;
   try {
-    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf-8"));
-    const h = cfg?.accounts?.twitter?.handle;
-    const s = (typeof h === "string" ? h : "").trim().replace(/^@/, "");
-    return s || null;
-  } catch {
-    return null;
-  }
-}
-
-// Self-heal a missing handle: read the live logged-in @handle from the managed
-// Chrome and persist it to config.json accounts.twitter.handle. This is ground
-// truth (the poster posts through that exact session), NOT a guess — so it's safe
-// where a hardcoded fallback would not be. Closes the onboarding gap where
-// connect_x's best-effort handle capture silently no-op'd and left posting dead.
-// Best-effort; never throws — the caller re-checks and refuses loudly if still unset.
-async function ensurePostingHandle(): Promise<void> {
-  try {
-    await runPython("scripts/setup_twitter_auth.py", ["resolve-handle"], {
-      timeoutMs: 60_000,
+    const r = await runPython("scripts/account_resolver.py", ["twitter"], {
+      timeoutMs: 30_000,
       env: ({ S4L_REPO_DIR: repoDir(), PATH: pipelinePath() }),
     });
+    const h = (r.stdout || "").trim().replace(/^@/, "");
+    return h || null;
   } catch {
-    /* best effort */
+    return null;
   }
 }
 
@@ -1601,8 +1589,8 @@ async function postApproved(batchId: string, plan: Plan) {
   // If onboarding never persisted it, self-heal from the live session; if even that
   // can't determine it, refuse here with a clear reason rather than launching a
   // poster that silently burns the whole batch.
-  if (!readConfiguredTwitterHandle()) await ensurePostingHandle();
-  if (!readConfiguredTwitterHandle()) {
+  const postingHandle = await resolvePostingHandle();
+  if (!postingHandle) {
     postingActive = false;
     stopPostingFlagHeartbeat();
     return {
@@ -1611,9 +1599,9 @@ async function postApproved(batchId: string, plan: Plan) {
       posted: 0,
       summary: "no_account_configured",
       error:
-        "X is connected but no posting @handle is configured, so every reply would be refused " +
-        "(no_account_configured). Re-run project_config action:'connect_x' to capture the handle, " +
-        "or set accounts.twitter.handle in config.json.",
+        "X is connected but no posting @handle could be resolved (env, config, or the " +
+        "connect-time cookie mirror), so every reply would be refused (no_account_configured). " +
+        "Re-run project_config action:'connect_x' to re-capture the handle.",
     };
   }
   // Mark posting active so the draft-cycle scan DEFERS launching any scan for the
