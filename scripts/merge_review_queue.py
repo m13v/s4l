@@ -383,137 +383,156 @@ def main() -> int:
     # cycle process and only that process knows them.
 
     dst = store_path()
-    existing = []
-    plan_created_at = None
-    if os.path.exists(dst):
+    # ---- store lock ---------------------------------------------------
+    # Hold the SAME fcntl.flock the menubar's _store_update and the MCP's
+    # store_patch.py take, for the whole read->merge->write span. Without
+    # it this function was a last-writer-wins whole-file rewrite: a card
+    # decision stamped between our read (below) and _atomic_write was
+    # silently erased (the 2026-07-17 truth-loss family, including the
+    # resurrected sandbox approval that posted for real). The lock covers
+    # one bulk API call (_sync_with_backend); worst case a menubar decision
+    # write blocks for a few seconds once per cycle, which beats losing it.
+    import fcntl
+    _lk = open(dst + ".lock", "w")
+    fcntl.flock(_lk, fcntl.LOCK_EX)
+    try:
+        existing = []
+        plan_created_at = None
+        if os.path.exists(dst):
+            try:
+                with open(dst) as f:
+                    prev = json.load(f)
+                existing = prev.get("candidates") or []
+                plan_created_at = prev.get("created_at")
+            except Exception:
+                existing = []
+                plan_created_at = None
+        # Absorb a REAL file at the legacy /tmp location (pre-upgrade store, or one
+        # written by old code after a reboot) so no pending draft or decision flag
+        # is lost, then ensure_store_symlink() below replaces it with the link.
+        legacy = plan_path(REVIEW_QUEUE_ID)
+        if os.path.exists(legacy) and not os.path.islink(legacy):
+            try:
+                with open(legacy) as f:
+                    lp = json.load(f)
+                lc = lp.get("candidates") or []
+                have = {_dedup_key(c) for c in existing}
+                absorbed = [c for c in lc if _dedup_key(c) not in have]
+                existing.extend(absorbed)
+                plan_created_at = plan_created_at or lp.get("created_at")
+                if absorbed:
+                    print(
+                        f"[merge_review_queue] absorbed {len(absorbed)} candidate(s) "
+                        "from legacy /tmp plan into the durable store",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(f"[merge_review_queue] legacy plan absorb failed: {e}", file=sys.stderr)
+        # Generation stamp: set ONLY when starting a fresh plan (the /tmp plan dies
+        # on reboot/tmp-sweep and numbering restarts at 1). The menu bar's durable
+        # approved-queue ledger uses this to ignore decisions that belong to a dead
+        # plan generation; without it, stale (batch, n) entries silently swallow
+        # every new draft after a reset. An existing unstamped plan is left
+        # unstamped: back-stamping it "now" would invalidate live decisions.
+        if not existing and not plan_created_at:
+            plan_created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        seen = {_dedup_key(c) for c in existing}
+        added = 0
+        merged = list(existing)
+        for c in new_cands:
+            k = _dedup_key(c)
+            if k in seen:
+                continue
+            seen.add(k)
+            merged.append(c)
+            added += 1
+
+        stamped, pruned = _sync_with_backend(merged)
+        if stamped:
+            print(f"[merge_review_queue] stamped stats on {stamped} candidate(s)", file=sys.stderr)
+        if pruned:
+            print(
+                f"[merge_review_queue] pruned {pruned} candidate(s) already retired by the "
+                "backend (expired/etc.) before they were reviewed",
+                file=sys.stderr,
+            )
+
+        plan_obj = {"candidates": merged}
+        if plan_created_at:
+            plan_obj["created_at"] = plan_created_at
+
+        # This is the actual delivery: if anything below throws, the cycle's drafts
+        # were computed but never reached the store the menu bar reads, and the
+        # wrapper (run-draft-and-publish.sh) captures this process's whole stdout+
+        # stderr with `|| true`, so a crash here previously vanished into a local
+        # log nothing central reads — the exact blind spot that cost the 2026-07-08
+        # Karol investigation its root cause. Report it like any other handled
+        # pipeline failure (see twitter_post_plan.py's post-failure capture).
         try:
-            with open(dst) as f:
-                prev = json.load(f)
-            existing = prev.get("candidates") or []
-            plan_created_at = prev.get("created_at")
-        except Exception:
-            existing = []
-            plan_created_at = None
-    # Absorb a REAL file at the legacy /tmp location (pre-upgrade store, or one
-    # written by old code after a reboot) so no pending draft or decision flag
-    # is lost, then ensure_store_symlink() below replaces it with the link.
-    legacy = plan_path(REVIEW_QUEUE_ID)
-    if os.path.exists(legacy) and not os.path.islink(legacy):
-        try:
-            with open(legacy) as f:
-                lp = json.load(f)
-            lc = lp.get("candidates") or []
-            have = {_dedup_key(c) for c in existing}
-            absorbed = [c for c in lc if _dedup_key(c) not in have]
-            existing.extend(absorbed)
-            plan_created_at = plan_created_at or lp.get("created_at")
-            if absorbed:
-                print(
-                    f"[merge_review_queue] absorbed {len(absorbed)} candidate(s) "
-                    "from legacy /tmp plan into the durable store",
-                    file=sys.stderr,
-                )
+            _atomic_write(dst, plan_obj)
+            ensure_store_symlink()
+
+            # Refresh the review-request marker the menu bar polls. count = cards
+            # actually awaiting review (mirrors s4l_state.candidate_state()'s
+            # awaiting_review bucket): approved-unposted and post_failed rows are
+            # settled decisions, counting them inflated the badge and misled every
+            # human/agent reading the marker.
+            pending_count = len(
+                [
+                    c
+                    for c in merged
+                    if not c.get("posted")
+                    and not c.get("terminal")
+                    and not c.get("post_failed")
+                    and not c.get("approved")
+                ]
+            )
+            project = ns.project or batch.get("project") or (new_cands[0].get("matched_project") if new_cands else None)
+            _atomic_write(
+                review_request_path(),
+                {
+                    "batch_id": REVIEW_QUEUE_ID,
+                    "project": project,
+                    "count": pending_count,
+                    "plan_path": dst,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                },
+            )
         except Exception as e:
-            print(f"[merge_review_queue] legacy plan absorb failed: {e}", file=sys.stderr)
-    # Generation stamp: set ONLY when starting a fresh plan (the /tmp plan dies
-    # on reboot/tmp-sweep and numbering restarts at 1). The menu bar's durable
-    # approved-queue ledger uses this to ignore decisions that belong to a dead
-    # plan generation; without it, stale (batch, n) entries silently swallow
-    # every new draft after a reset. An existing unstamped plan is left
-    # unstamped: back-stamping it "now" would invalidate live decisions.
-    if not existing and not plan_created_at:
-        plan_created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"[merge_review_queue] delivery failed (drafts NOT merged into cards): {e}", file=sys.stderr)
+            try:
+                import sentry_init
 
-    seen = {_dedup_key(c) for c in existing}
-    added = 0
-    merged = list(existing)
-    for c in new_cands:
-        k = _dedup_key(c)
-        if k in seen:
-            continue
-        seen.add(k)
-        merged.append(c)
-        added += 1
+                sentry_init.init()
+                sentry_init.capture_message(
+                    f"merge_review_queue delivery failed: {e}",
+                    level="error",
+                    tags={"component": "merge_review_queue", "added": str(added)},
+                    extra={"plan_src": src},
+                )
+                sentry_init.flush(2.0)
+            except Exception:
+                pass
+            return 1
 
-    stamped, pruned = _sync_with_backend(merged)
-    if stamped:
-        print(f"[merge_review_queue] stamped stats on {stamped} candidate(s)", file=sys.stderr)
-    if pruned:
         print(
-            f"[merge_review_queue] pruned {pruned} candidate(s) already retired by the "
-            "backend (expired/etc.) before they were reviewed",
+            f"[merge_review_queue] merged {added} new draft(s) into {REVIEW_QUEUE_ID} "
+            f"({pending_count} pending total) from {os.path.basename(src)}",
             file=sys.stderr,
         )
-
-    plan_obj = {"candidates": merged}
-    if plan_created_at:
-        plan_obj["created_at"] = plan_created_at
-
-    # This is the actual delivery: if anything below throws, the cycle's drafts
-    # were computed but never reached the store the menu bar reads, and the
-    # wrapper (run-draft-and-publish.sh) captures this process's whole stdout+
-    # stderr with `|| true`, so a crash here previously vanished into a local
-    # log nothing central reads — the exact blind spot that cost the 2026-07-08
-    # Karol investigation its root cause. Report it like any other handled
-    # pipeline failure (see twitter_post_plan.py's post-failure capture).
-    try:
-        _atomic_write(dst, plan_obj)
-        ensure_store_symlink()
-
-        # Refresh the review-request marker the menu bar polls. count = cards
-        # actually awaiting review (mirrors s4l_state.candidate_state()'s
-        # awaiting_review bucket): approved-unposted and post_failed rows are
-        # settled decisions, counting them inflated the badge and misled every
-        # human/agent reading the marker.
-        pending_count = len(
-            [
-                c
-                for c in merged
-                if not c.get("posted")
-                and not c.get("terminal")
-                and not c.get("post_failed")
-                and not c.get("approved")
-            ]
-        )
-        project = ns.project or batch.get("project") or (new_cands[0].get("matched_project") if new_cands else None)
-        _atomic_write(
-            review_request_path(),
-            {
-                "batch_id": REVIEW_QUEUE_ID,
-                "project": project,
-                "count": pending_count,
-                "plan_path": dst,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            },
-        )
-    except Exception as e:
-        print(f"[merge_review_queue] delivery failed (drafts NOT merged into cards): {e}", file=sys.stderr)
+        # Clean up the consumed batch plan so /tmp doesn't fill with orphans.
         try:
-            import sentry_init
-
-            sentry_init.init()
-            sentry_init.capture_message(
-                f"merge_review_queue delivery failed: {e}",
-                level="error",
-                tags={"component": "merge_review_queue", "added": str(added)},
-                extra={"plan_src": src},
-            )
-            sentry_init.flush(2.0)
+            os.remove(src)
         except Exception:
             pass
-        return 1
-
-    print(
-        f"[merge_review_queue] merged {added} new draft(s) into {REVIEW_QUEUE_ID} "
-        f"({pending_count} pending total) from {os.path.basename(src)}",
-        file=sys.stderr,
-    )
-    # Clean up the consumed batch plan so /tmp doesn't fill with orphans.
-    try:
-        os.remove(src)
-    except Exception:
-        pass
-    return 0
+        return 0
+    finally:
+        try:
+            fcntl.flock(_lk, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        _lk.close()
 
 
 if __name__ == "__main__":
