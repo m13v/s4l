@@ -27,6 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post
+from account_resolver import resolve as _resolve_account
 
 EXTRACT_FILE = "/Users/matthewdi/.claude/projects/-/0152159f-c679-488f-954a-8312a9a58060/tool-results/toolu_01FaaCg5i5D5xp5ELcp1TiVS.txt"
 
@@ -140,7 +141,7 @@ def main():
                         "our_content": "[discovered thread, engagement reply pending]",
                         "project": "general",
                         "thread_author": author or "(unknown)",
-                        "our_account": "Matthew Diakonov",
+                        "our_account": _resolve_account("linkedin") or "",
                         "engagement_style": "curious_probe",
                         "status": "active",
                     },
