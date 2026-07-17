@@ -261,6 +261,11 @@ export interface PlanCandidate {
   // can stay honest while review cards stop re-offering dead drafts.
   terminal?: boolean;
   terminal_reason?: string;
+  // Approved but the post attempt errored (post_error says why). Stamped by the
+  // menubar (store_mark_post_failed) and cleared by a fresh approval or a posted
+  // outcome. Read through candidateState() in index.ts — never raw.
+  post_failed?: boolean;
+  post_error?: string;
   // Count of post attempts that ended in a transient "failed" outcome. Sticky
   // approved cards retry across drains; when this reaches the give-up bound
   // (see MAX_POST_ATTEMPTS in index.ts) the card flips terminal instead of
