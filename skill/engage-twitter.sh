@@ -29,7 +29,9 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Acquiring twitter-browser lock (pid=$$)..
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] twitter-browser lock held (pid=$$)" | tee -a "$LOG_FILE"
 # Probe + launch harness Chrome on port 9555 if needed, then sweep leftover tabs.
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail" | tee -a "$LOG_FILE"
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Acquiring twitter (pipeline) lock (pid=$$)..." | tee -a "$LOG_FILE"
 acquire_lock "twitter" 3600 2>>"$LOG_FILE"
 
