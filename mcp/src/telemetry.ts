@@ -299,7 +299,8 @@ function collectStateSnapshot(): { state: Record<string, unknown>; sha: string }
     ["install_progress", "install-progress.json", 64_000],
     ["onboarding_progress", "onboarding-progress.json", 256_000],
     ["review_queue", "review-queue.json", 256_000],
-    ["approved_queue", "approved-queue.json", 256_000],
+    // approved-queue.json removed 2026-07-17: the ledger is gone; the review
+    // store is the only local decision record.
   ];
   for (const [key, file, cap] of stateFiles) {
     const val = readJsonCapped(path.join(stateDir, file), cap);
