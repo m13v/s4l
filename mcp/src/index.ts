@@ -27,6 +27,7 @@ import {
   readPlan,
   writePlan,
   planPath,
+  TMP_DIR,
   type Plan,
   type PlanCandidate,
 } from "./repo.js";
@@ -1144,7 +1145,37 @@ function isSandboxCandidate(c: PlanCandidate): boolean {
   return Number.isFinite(id) && id >= 900_000_000;
 }
 
-function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: PlanCandidate[]) {
+// Write field patches into the review-queue store UNDER ITS LOCK by shelling
+// to scripts/store_patch.py, which takes the same fcntl.flock the menubar's
+// _store_update and merge_review_queue.py hold around their read-modify-write.
+// Node has no native flock, and this process writing the store directly was
+// the last unlocked writer (the race that erased posted stamps on 2026-07-17).
+// Returns false on any failure so callers can fall back to the legacy write.
+async function patchReviewStore(patches: object[]): Promise<boolean> {
+  if (!patches.length) return true;
+  const tmp = path.join(
+    TMP_DIR,
+    `s4l-store-patches-${process.pid}-${Date.now()}.json`
+  );
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ patches }), "utf-8");
+    const res = await runPython("scripts/store_patch.py", [tmp], {
+      timeoutMs: 30_000,
+      env: { S4L_REPO_DIR: repoDir(), PATH: pipelinePath() },
+    });
+    return res.code === 0;
+  } catch {
+    return false;
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+async function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: PlanCandidate[]) {
   // Merge posted/terminal stamps into a FRESH read of the store instead of
   // rewriting the whole plan from the copy taken minutes ago. The old
   // whole-file write was last-writer-wins: while a batch posted, the menubar
@@ -1156,6 +1187,45 @@ function mergeApprovedStampsIntoStore(batchId: string, plan: Plan, stamped: Plan
   // overwrites a fresh `posted=true`. Fallback: candidates without a
   // candidate_id can't be matched into the fresh copy, so keep the legacy
   // whole-plan write for those older plans.
+  //
+  // Review-queue store: go through the LOCKED patch path (store_patch.py)
+  // first. The fresh-read merge below closes most of the race window but not
+  // all of it — a menubar decision landing between our readPlan and writePlan
+  // still gets erased. The locked path holds the store's flock for the whole
+  // read-mutate-replace, applies to every sibling row sharing a candidate_id,
+  // and enforces the same posted-sticky rules. Legacy path stays as the
+  // fallback and for per-batch /tmp plans (single writer, no lock needed).
+  try {
+    const mergeableForPatch = stamped.every(
+      (c) => c.candidate_id !== undefined && c.candidate_id !== null
+    );
+    if (batchId === REVIEW_QUEUE_ID && mergeableForPatch) {
+      const patches = stamped.map((c) => {
+        const set: Record<string, unknown> = {};
+        const unset: string[] = [];
+        if (c.posted === true) {
+          set.posted = true;
+          set.terminal = false;
+          if (c.our_url) set.our_url = c.our_url;
+          unset.push("discard_reason");
+        } else if (c.terminal === true) {
+          set.terminal = true;
+          set.terminal_reason = c.terminal_reason ?? null;
+          // See the zombie-card note in the legacy branch below: a terminal
+          // from a real post attempt must clear the overridable expiry stamp.
+          unset.push("discard_reason");
+        }
+        if (typeof c.post_attempts === "number") set.post_attempts = c.post_attempts;
+        return { candidate_id: c.candidate_id, set, unset };
+      });
+      if (await patchReviewStore(patches)) return;
+      console.error(
+        "[post] store_patch.py failed; falling back to unlocked stamp merge"
+      );
+    }
+  } catch {
+    /* fall through to the legacy write */
+  }
   try {
     const mergeable = stamped.every(
       (c) => c.candidate_id !== undefined && c.candidate_id !== null
@@ -1509,7 +1579,7 @@ async function postApproved(batchId: string, plan: Plan) {
         summary: "reddit: skipped (peer drain active); cards stay approved for the next drain",
       };
     }
-    if (approvedReddit.length) mergeApprovedStampsIntoStore(batchId, plan, approvedReddit);
+    if (approvedReddit.length) await mergeApprovedStampsIntoStore(batchId, plan, approvedReddit);
     return {
       attempted: approvedReddit.length,
       posted: redditPosted,
@@ -1780,7 +1850,7 @@ async function postApproved(batchId: string, plan: Plan) {
   // Reddit stamps (set in the reddit drain above) merge alongside the twitter
   // ones: `approved` here spans both platforms.
   if (touchedPlan || redditPosted || redditFailed) {
-    mergeApprovedStampsIntoStore(batchId, plan, approved);
+    await mergeApprovedStampsIntoStore(batchId, plan, approved);
   }
   // Post failures are HANDLED in the pipeline (it returns a count, never throws),
   // so they never reach Sentry on their own. Capture an explicit event whenever
