@@ -451,7 +451,10 @@ def main():
     # (HTTP-only now; per-account scoping is resolved inside the helper.)
     from github_tools import _dynamic_owner_blocklist
     excluded_repos = excluded_repos | _dynamic_owner_blocklist()
-    our_username = config.get("accounts", {}).get("github", {}).get("username", "m13v")
+    # Resolved identity, never a hardcoded default (the old "m13v" fallback
+    # silently self-filtered/attributed as the repo owner on other installs).
+    from account_resolver import resolve as _resolve_account
+    our_username = _resolve_account("github") or ""
 
     start_time = time.time()
     processed = 0
