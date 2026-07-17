@@ -76,12 +76,11 @@ def _config_path():
 ARM_TREATMENT = "treatment_v4"
 ARM_CONTROL = "control_v4"
 
-# Must match the duplicated "voice_first" literal in
-# engagement_styles.get_assigned_style_prompt (not imported across modules,
-# matching how ARM_TREATMENT's "treatment_v4" string is itself duplicated
-# there). treatment_v4 assigns NO real engagement style as of 2026-07-17;
-# every treatment_v4 Twitter post is stamped with this sentinel instead.
-STYLE_SENTINEL_TREATMENT = "voice_first"
+# The "treatment_v4 assigns no real style" decision (and its sentinel value)
+# lives ONLY in engagement_styles.py now (STYLE_SENTINEL_TREATMENT,
+# pick_style_for_post, pick_exploration_style, 2026-07-17 consolidation):
+# every platform's picker routes through those two functions, so this
+# module never needs its own copy of the sentinel or the arm check for it.
 
 
 def pick_draft_prompt_arm(env=None, export=True):
@@ -147,7 +146,8 @@ def _treatment_core(voice_examples_ref):
     (promotion scopes to "the matched project's voice.examples"; persona
     scopes to "voice.examples above" since it's already narrowed to the one
     persona project). No mention of engagement style anywhere in here on
-    purpose: treatment_v4 assigns none (see STYLE_SENTINEL_TREATMENT).
+    purpose: treatment_v4 assigns none (see engagement_styles.py's
+    STYLE_SENTINEL_TREATMENT / pick_style_for_post).
     """
     return (
         "PRIORITY ORDER for how you write this, highest first: (1) "
@@ -511,22 +511,18 @@ def render_twitter_prompt(ing):
     """
     arm = ing.get("arm") or os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or ""
     lane = ing.get("lane") if ing.get("lane") is not None else os.environ.get("S4L_ACTIVE_LANE", "")
+    # picked_style/picked_style_b already carry the sentinel for treatment_v4
+    # (engagement_styles.pick_style_for_post/pick_exploration_style refuse to
+    # assign a real style under that arm, 2026-07-17 consolidation), no
+    # override needed here -- this used to re-derive the sentinel from `arm`
+    # independently of the picker, which is exactly the kind of duplicated
+    # decision that let a second, unfixed copy (Reddit's post_reddit.py,
+    # which calls the picker directly and never went through this function)
+    # silently keep assigning real styles under treatment_v4.
     picked_style = ing.get("picked_style") or ""
     picked_style_b = ing.get("picked_style_b") or ""
     picked_mode = ing.get("picked_mode") or "use"
     picked_mode_b = ing.get("picked_mode_b") or "use"
-    if arm == ARM_TREATMENT:
-        # No engagement style is assigned for treatment_v4 (2026-07-17). The
-        # picker may still have run upstream in run-twitter-cycle.sh (cheaper
-        # to leave that call in the locked shell script than to thread a
-        # skip-the-picker flag through it), but its result must never reach
-        # the prompt, the --assigned-style drift-coercion path in
-        # twitter_post_plan.py, or the output JSON -- only this sentinel may.
-        # Must match engagement_styles.py's duplicated "voice_first" literal.
-        picked_style = STYLE_SENTINEL_TREATMENT
-        picked_style_b = STYLE_SENTINEL_TREATMENT
-        picked_mode = "use"
-        picked_mode_b = "use"
     return (
         _TW_TEMPLATE
         .replace("@PREFIX@", ing.get("prefix") or "")
