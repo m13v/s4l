@@ -153,6 +153,7 @@ ensure_reddit_browser_for_backend() {
     HC_WINDOW_POS="${BH_REDDIT_WINDOW_POS:-2131,-1032}" \
     HC_WINDOW_SIZE="${BH_REDDIT_WINDOW_SIZE:-911,1016}" \
     HC_PRE_LAUNCH_HOOK=_reddit_defer_if_posting \
+    HC_EXTRA_FLAGS="${BH_REDDIT_PROXY:+--proxy-server=$BH_REDDIT_PROXY}" \
     hc_ensure_browser
 }
 
