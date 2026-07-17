@@ -106,12 +106,20 @@ def _venue(post: dict) -> str | None:
     return None
 
 
-def _removed_event(post: dict) -> dict:
+def _removed_event(post: dict, venue_count: int = 0) -> dict:
     venue = _venue(post)
     is_own_thread = bool(post.get("thread_url")) and post.get("thread_url") == post.get("our_url")
     kind = "top-level post" if is_own_thread else "comment/reply"
     posted = str(post.get("posted_at") or "")[:10]
     detected = str(post.get("status_checked_at") or "")[:10]
+    # venue_count = how many of our posts were removed in this same venue inside
+    # the sweep window. Surfaces clustering (one venue removing many of our
+    # posts is a venue-fit lesson, not N unrelated content lessons) directly in
+    # the note the digest reads.
+    cluster = ""
+    if venue and venue_count > 1:
+        cluster = (f" This is 1 of {venue_count} of our posts removed in"
+                   f" {venue} in the recent window (a venue-level pattern).")
     note = (
         f"Platform moderation strike: our {post.get('platform')} {kind}"
         f"{' in ' + venue if venue else ''} is now status='{post.get('status')}'"
@@ -120,6 +128,7 @@ def _removed_event(post: dict) -> dict:
         f" account {post.get('our_account')}."
         f" Machine-derived signal, not a human card decision: a moderator or"
         f" platform filter judged this content unwelcome in that venue."
+        f"{cluster}"
     )
     return {
         "event_uuid": str(uuid.uuid5(EVENT_NS, f"platform_removed:post:{post['id']}")),
