@@ -263,7 +263,9 @@ def _load_comment_blocked_subs(project_name=None):
         # without this filter, account A's real ban would suppress a sub for
         # account B that has no such ban. Entries with account=null are
         # treated as global (apply regardless), preserving pre-2026-05-15 data.
-        current_account = (config.get("reddit_account") or {}).get("username") or None
+        # The ONE resolver (env -> reddit_account.username -> accounts.reddit
+        # .username) — keeps ban scoping in lockstep with every other reader.
+        current_account = _resolve_account("reddit") or None
         blocked = set()
         bans = config.get("subreddit_bans") or {}
         if isinstance(bans, dict):
