@@ -1871,38 +1871,16 @@ log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (draft_prompt_core pick-arm
 # prompt block embeds the same assignment. On invent mode picked_style is
 # empty and top_performers stays unfiltered (model sees full landscape).
 #
-# SKIPPED ENTIRELY for treatment_v4 (2026-07-17): no engagement style is
-# assigned or shown to the model in that arm (see get_assigned_style_prompt
-# in engagement_styles.py and render_twitter_prompt in draft_prompt_core.py).
-# Running the picker anyway would (a) waste a live API round-trip for both
-# Draft A's and Draft B's style on every treatment cycle for an answer
-# nobody uses, and (b) worse: leave PICKED_STYLE/PICKED_MODE holding a REAL
-# style name that flows unchanged into assigned_style/assigned_mode on the
-# plan JSON below, which twitter_post_plan.py's validate_or_register() then
-# reads as "the picker assigned X, the model drifted to voice_first" and
-# silently COERCES the model's correct "voice_first" output back to that
-# real style at post time -- the USE-mode drift-protection path exists
-# specifically to fight this kind of mismatch and does not know
-# "voice_first" is an intentional sentinel, not drift. Static placeholder
-# assignment files (valid JSON, zero network calls) are written instead so
-# s4l_render_style_block still renders its non-style content (voice
-# relationship rule, content rules, anti-patterns) correctly for treatment;
-# PICKED_STYLE/PICKED_STYLE_B stay EMPTY so assigned_style ends up None on
-# the plan JSON and validate_or_register takes the passthrough path instead
-# of the coercion path, letting "voice_first" survive to posts.engagement_style.
-if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
-    STYLE_ASSIGN_FILE=$(mktemp -t s4l_twitter_assign_XXXXXX.json)
-    STYLE_ASSIGN_FILE_B=$(mktemp -t s4l_twitter_assign_b_XXXXXX.json)
-    printf '%s' '{"mode":"use","style":null,"description":null,"example":null,"note":null,"target_chars":null}' > "$STYLE_ASSIGN_FILE"
-    printf '%s' '{"mode":"use","style":null,"description":null,"example":null,"note":null,"target_chars":null}' > "$STYLE_ASSIGN_FILE_B"
-    PICKED_STYLE=""
-    PICKED_MODE="use"
-    PICKED_STYLE_B=""
-    PICKED_MODE_B="use"
-    DRAFT_B_SOURCE="skipped_voice_first"
-    export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
-    log "Engagement style picker SKIPPED (treatment_v4: voice-first, no style assigned)"
-else
+# Called UNCONDITIONALLY regardless of arm (2026-07-17 consolidation): under
+# treatment_v4, pick_style_for_post()/pick_exploration_style() themselves
+# (scripts/engagement_styles.py) refuse to assign a real style and return
+# the "voice_first" sentinel directly -- no network round-trip, and no arm
+# check needed here in the shell. This used to be a Twitter-only branch
+# here that skipped the picker and blanked PICKED_STYLE by hand; that logic
+# moved into the picker functions themselves so every caller (this bash
+# driver AND scripts/post_reddit.py, which calls the same functions
+# directly and was never covered by the old Twitter-only branch) gets the
+# same behavior automatically. Do not reintroduce an arm check in this file.
 STYLE_ASSIGN_FILE=$(mktemp -t s4l_twitter_assign_XXXXXX.json)
 s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
 PICKED_STYLE=$(python3 -c "
@@ -2000,7 +1978,6 @@ except Exception:
 fi
 export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
 log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)} source=$DRAFT_B_SOURCE"
-fi
 
 # 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
 # winner corpus (~400 lines of "Top Posts by Project" + summary table) that
