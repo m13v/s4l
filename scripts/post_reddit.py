@@ -438,6 +438,12 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
             return None
         return {
             "project_name": data.get("project_name") or "general",
+            # batch_id must ride the plan file into --phase draft: the
+            # snapshot filename, the prompt's top_performers --invoked-by,
+            # and the proposed_excludes 2-distinct-batch activation gate all
+            # read plan["batch_id"] there (it was silently None before
+            # 2026-07-17, which defeated the excludes gate's distinctness).
+            "batch_id": batch_id,
             "decisions": data.get("decisions") or [],
             "cost": float(data.get("cost") or 0.0),
             "salvaged": bool(data.get("salvaged", True)),
@@ -2243,7 +2249,11 @@ def _discover_iteration(args, config, reddit_username, already_picked):
             except Exception as e:
                 print(f"[post_reddit] WARNING: seed backfill failed: {e}", file=sys.stderr)
 
+    # batch_id rides the plan file into --phase draft (snapshot filename,
+    # top_performers --invoked-by, proposed_excludes activation gate). Same
+    # reason as the salvage plan's batch_id above.
     return {"project_name": project_name, "decisions": selected,
+            "batch_id": queue_batch,
             "cost": 0.0, "session_id": None,
             "phase": "discover"}
 
