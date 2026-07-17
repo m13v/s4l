@@ -331,7 +331,7 @@ def _truncate(s, n=320):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _set_thread_text(thread_tv, text, link_url, *, font_size=12):
+def _set_thread_text(thread_tv, text, link_url, *, font_size=12, title=None):
     """Set the thread-quote text on `thread_tv`: the FULL text, never
     trimmed (2026-07-16 user direction -- the box scrolls instead when it
     doesn't fit; see its NSScrollView wrapper in _render()). A leading
@@ -340,8 +340,15 @@ def _set_thread_text(thread_tv, text, link_url, *, font_size=12):
     of how long the thread is or where the box happens to be scrolled to
     (the old trailing-link placement could end up scrolled out of view, or
     -- before scrolling existed at all -- get silently truncated off the
-    end; see the superseded _fit_thread_body this replaced)."""
+    end; see the superseded _fit_thread_body this replaced).
+
+    `title` (2026-07-17 user direction, Reddit): when given, it's drawn BOLD
+    on its own line ahead of `text`, so a Reddit card shows the post title in
+    bold with the selftext body beneath it in the same quote box. Twitter and
+    title-only Reddit threads pass title=None and render `text` alone,
+    exactly as before."""
     text = (text or "").strip()
+    title = (title or "").strip()
     body = NSMutableAttributedString.alloc().initWithString_attributes_("", {})
     if link_url:
         body.appendAttributedString_(
@@ -353,6 +360,19 @@ def _set_thread_text(thread_tv, text, link_url, *, font_size=12):
                     # click as a thread_click interaction, then opens the
                     # URL itself via NSWorkspace.
                     NSLinkAttributeName: NSURL.URLWithString_(link_url),
+                },
+            )
+        )
+    if title:
+        # Bold title on its own line; a trailing newline separates it from the
+        # body only when there IS a body (a title with no selftext shouldn't
+        # leave a dangling blank line).
+        body.appendAttributedString_(
+            NSAttributedString.alloc().initWithString_attributes_(
+                title + ("\n" if text else ""),
+                {
+                    NSFontAttributeName: NSFont.boldSystemFontOfSize_(font_size),
+                    NSForegroundColorAttributeName: NSColor.labelColor(),
                 },
             )
         )
@@ -1598,7 +1618,19 @@ class _ReviewController(NSObject):
             pass
         if thread_url:
             thread_tv.setDelegate_(self)
-        _set_thread_text(thread_tv, thread_en or d.get("thread_text"), thread_url)
+        # Reddit (2026-07-17 user direction): the thread has a TITLE and a
+        # BODY (selftext). Render the title bold with the body beneath it in
+        # this same quote box. thread_text carries the title (see
+        # merge_review_queue._reddit_plan_to_candidates); thread_selftext is
+        # the body, empty for link posts / title-only threads (then this falls
+        # through to the plain title-only render). Twitter has no selftext, so
+        # it always takes the else branch and renders exactly as before.
+        _thread_title = thread_en or d.get("thread_text")
+        _thread_body = (d.get("thread_selftext") or "").strip() if _plat == "reddit" else ""
+        if _thread_body:
+            _set_thread_text(thread_tv, _thread_body, thread_url, title=_thread_title)
+        else:
+            _set_thread_text(thread_tv, _thread_title, thread_url)
         thread_scroll.setDocumentView_(thread_tv)
         content.addSubview_(thread_scroll)
         # Reply heading — bold. A concise "project/lane · viral N" tag rides
