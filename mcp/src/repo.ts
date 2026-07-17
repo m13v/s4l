@@ -261,6 +261,12 @@ export interface PlanCandidate {
   // can stay honest while review cards stop re-offering dead drafts.
   terminal?: boolean;
   terminal_reason?: string;
+  // Count of post attempts that ended in a transient "failed" outcome. Sticky
+  // approved cards retry across drains; when this reaches the give-up bound
+  // (see MAX_POST_ATTEMPTS in index.ts) the card flips terminal instead of
+  // retrying forever (2026-07-17: unbounded stickiness is how a single card
+  // retried 438 times over 5 days on the Nhat install).
+  post_attempts?: number;
   our_url?: string;
   // Two-draft cards (2026-07-07; no-recommendation pass 2026-07-08): a
   // fresh candidate carries both drafts (one per assigned engagement style
