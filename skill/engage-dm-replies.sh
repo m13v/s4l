@@ -1302,7 +1302,10 @@ case "${PLATFORM:-all}" in
         hc_exit_if_deferred "${_RD_BOOT_RC:-0}" "reddit-harness"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         ;;
-    twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
+    twitter|x)
+        acquire_lock "twitter-browser" 3600
+        ensure_twitter_browser_for_backend || log "WARNING: twitter-harness bootstrap failed (rc=$?); continuing anyway, downstream browser calls may fail"
+        ;;
     all)
         acquire_lock "linkedin-browser" 3600
         # rc=78 skip (see the `linkedin` branch). A LinkedIn skip exits the
@@ -1328,7 +1331,7 @@ case "${PLATFORM:-all}" in
         hc_exit_if_deferred "${_RD_BOOT_RC:-0}" "reddit-harness"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         acquire_lock "twitter-browser" 3600
-        ensure_twitter_browser_for_backend
+        ensure_twitter_browser_for_backend || log "WARNING: twitter-harness bootstrap failed (rc=$?); continuing anyway, downstream browser calls may fail"
         ;;
 esac
 
