@@ -131,6 +131,32 @@ _hc_capture_wedge_diagnostics() {
         # fix is a wider strike window, not a kill.
         sample "$_wd_pid" 10 -mayDie -file "${_wd_out%.txt}.sample.txt" >/dev/null 2>&1 &
         local _wd_sampler=$!
+        # Raw-ws discriminator (v3, 2026-07-17): the v2 capture proved Chrome's
+        # DevTools thread sits IDLE in kevent64 during a "failing" Playwright
+        # handshake — the connect may never leave the client. This probe does
+        # the same handshake with websocket-client only (no node driver; the
+        # exact mechanism the tab-parker uses successfully every cycle).
+        # RAW_WS_OK here + Playwright STILL FAILING below = the wedge is a
+        # client-side driver stall and Chrome should NOT be killed for it.
+        local _wd_raw=""
+        _wd_raw=$("${S4L_PYTHON:-python3}" - "$_wd_port" <<'PYEOF' 2>&1
+import json, sys, urllib.request
+port = sys.argv[1]
+try:
+    import websocket
+    info = json.loads(urllib.request.urlopen(
+        f"http://127.0.0.1:{port}/json/version", timeout=5).read())
+    ws = websocket.create_connection(
+        info["webSocketDebuggerUrl"], timeout=5, suppress_origin=True)
+    ws.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+    r = json.loads(ws.recv())
+    ws.close()
+    print("RAW_WS_OK " + r.get("result", {}).get("product", "?"))
+except Exception as e:
+    print(f"RAW_WS_FAIL {type(e).__name__}: {e}")
+PYEOF
+)
+        echo "--- raw-ws probe (no Playwright): ${_wd_raw}" >> "$_wd_out"
         local _wd_v3=""
         if _wd_v3=$(hc_cdp_ready "http://127.0.0.1:${_wd_port}"); then
             echo "--- third probe DURING sample: READY (wedge is TRANSIENT): ${_wd_v3}" >> "$_wd_out"
