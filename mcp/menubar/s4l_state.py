@@ -1003,67 +1003,22 @@ def _plan_generation(batch):
         return None
 
 
-def _ts_before(a, b):
-    """True when iso timestamp a is strictly before b. Tolerates the two stamp
-    shapes in play ('...Z' from merge_review_queue, '+00:00' from time_iso)."""
-    try:
-        import datetime
-
-        def parse(s):
-            return datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-
-        return parse(a) < parse(b)
-    except Exception:
-        return False
-
-
-def _stale_for_plan(it, gen):
-    """A ledger item that predates the current plan generation refers to a DEAD
-    plan's numbering; its `n` must never match against the live plan."""
-    return bool(gen) and bool(it.get("ts")) and _ts_before(it.get("ts"), gen)
-
-
-def _ledger_items_for_plan(batch, gen):
-    """Decided ledger items that belong to the CURRENT plan generation."""
-    return [
-        it
-        for it in read_approved_queue()["items"]
-        if it.get("batch") == batch
-        and it.get("status") in ("queued", "posting", "posted", "failed", "rejected")
-        and not _stale_for_plan(it, gen)
-    ]
-
-
 def review_drafts(plan, batch="review-queue"):
     """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
     posted, terminal (rejected/dead), or already approved is a settled decision and
     must never be re-presented for review (approved ones proceed to post).
 
-    Also excludes cards with ANY durable decision (approved, edited, rejected, or a
-    decided-but-failed post) via _ledger_items_for_plan() below. approve/reject/edit
-    each write a durable local record via store_stamp_decision() the INSTANT the
-    user clicks (see s4l_menubar.py::_on_card_decision), so a
-    decided card never re-presents even if the loopback (Claude Desktop) is down
-    when the decision's plan-flag write is attempted. The main plan's
-    `approved`/`terminal`/`posted` flags are only stamped once the loopback write
-    lands, so without this a card the user just decided would re-present (the exact
-    "I already decided these" bug)."""
-    gen = (plan or {}).get("created_at") or _plan_generation(batch)
-    items = _ledger_items_for_plan(batch, gen)
-    settled_ids = {
-        it.get("candidate_id") for it in items if it.get("candidate_id") is not None
-    }
-    settled_ns = {it.get("n") for it in items if it.get("candidate_id") is None}
+    Decision durability lives in the store itself: approve/reject/edit each
+    write approved/terminal + the decision payload via store_stamp_decision()
+    the INSTANT the user clicks (see s4l_menubar.py::_on_card_decision), under
+    the store lock, so candidate_state() alone decides what re-presents. The
+    legacy approved-queue.json ledger cross-check that used to live here was
+    removed 2026-07-17 along with the rest of that third state store."""
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
         # Only awaiting_review rows become cards. This also skips post_failed
         # rows (decided-but-failed is settled per the docstring above).
         if candidate_state(c) != "awaiting_review":
-            continue
-        cid = c.get("candidate_id")
-        if cid is not None and cid in settled_ids:
-            continue
-        if (i + 1) in settled_ns:
             continue
         out.append(
             {
