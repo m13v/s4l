@@ -61,14 +61,8 @@ except ImportError:
         "websocket-client not installed (needed for CDP). pip install websocket-client"
     )
 
-# Live-handle resolver (best-effort). Lets connect_x record the real logged-in
-# @handle alongside the locally-mirrored cookies. Guarded so a missing dep never
-# breaks setup.
+# Make scripts-dir siblings (twitter_cookie_mirror, etc.) importable during setup.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from twitter_account import resolve_handle  # noqa: E402
-except Exception:
-    resolve_handle = None
 
 # Local 0600 cookie mirror — the keychain-independent durability layer (Gap B).
 # Always importable (stdlib only); guarded so a path quirk never breaks setup.
@@ -345,12 +339,12 @@ _HANDLE_PLACEHOLDERS = {"", "your-twitter-handle", "@your-twitter-handle"}
 def _resolve_live_handle(send) -> "str | None":
     """Read the logged-in @handle from the LIVE x.com session.
 
-    resolve_handle() only reads config.json (which on a fresh install is the
-    template placeholder), so it can't discover the real account. This reads the
-    actual logged-in handle from the SAME authenticated session connect_x just
-    validated, so connect_x / cmd_resolve_handle can persist ground truth instead
-    of falling back to a hardcoded handle (which would silently mis-attribute
-    every post). Two methods, most reliable first:
+    On a fresh install config.json carries no handle yet, so this reads the actual
+    logged-in handle from the SAME authenticated session connect_x just validated
+    and stamps it on the durable cookie mirror (see _persist_session). That mirror
+    is what account_resolver.resolve('twitter') falls back to, so attribution is
+    ground truth instead of a hardcoded handle that would silently mis-attribute
+    every post. Two methods, most reliable first:
 
       1. X's own account/settings.json (canonical `screen_name`). The web client
          calls this on every load; it is stable across DOM redesigns, unlike the
@@ -405,41 +399,6 @@ def _resolve_live_handle(send) -> "str | None":
     return None
 
 
-def _write_handle_to_config(handle: "str | None") -> bool:
-    """Persist the discovered handle to config.json accounts.twitter.handle, but
-    ONLY when the configured value is empty or the template placeholder, so we
-    never clobber a handle the user set on purpose. Returns True if written.
-
-    This is what makes account_resolver.resolve('twitter') return the REAL
-    account, so our_account (attribution, own-reply skip, account-keyed ops) is
-    correct instead of the poisonous 'your-twitter-handle' default. (2026-06-02)
-    """
-    if not handle:
-        return False
-    try:
-        with open(_CONFIG_JSON, encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:
-        return False
-    accounts = cfg.setdefault("accounts", {})
-    if not isinstance(accounts, dict):
-        return False
-    tw = accounts.setdefault("twitter", {})
-    if not isinstance(tw, dict):
-        return False
-    cur = (tw.get("handle") or "").strip()
-    if cur.lower() not in _HANDLE_PLACEHOLDERS:
-        return False  # a real handle is already set; do not overwrite
-    tw["handle"] = "@" + handle.lstrip("@")
-    try:
-        with open(_CONFIG_JSON, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
-        return True
-    except Exception:
-        return False
-
-
 def _persist_session() -> None:
     """Persist the validated live X session for auto-restore after ANY logout
     (hard kill, crash, or a keychain re-lock wiping Chrome's Cookies DB).
@@ -479,17 +438,15 @@ def _persist_session() -> None:
     if not cookies:
         return
 
-    # Fall back to the configured handle if live resolution came up empty.
-    if handle and _write_handle_to_config(handle):
-        print(f"setup_twitter_auth: recorded live X handle @{handle} in config.json "
-              "(accounts.twitter.handle); attribution + own-reply dedup now scoped "
-              "to the real account", file=sys.stderr)
-    if not handle and resolve_handle is not None:
-        try:
-            handle = resolve_handle()
-        except Exception:
-            handle = None
-
+    # The handle's single durable home is the cookie mirror (written just below).
+    # We deliberately do NOT also copy it into config.json: account_resolver
+    # resolves env -> config override -> this mirror, so a second copy in config
+    # would be duplicated state that can drift — and its going missing there was the
+    # "posts land 0/N, no_account_configured" bug. config.accounts.twitter.handle
+    # stays a user-only override. When live resolution came up empty, save_cookies
+    # carries the previously-stamped handle forward, so a known account is never
+    # downgraded to null.
+    #
     # Local mirror — keychain-independent durability. This is the only cookie
     # store; the VM-era server store (/api/v1/twitter/session-cookies) was
     # removed 2026-06-17 when we stopped running AppMaker VMs.
@@ -499,6 +456,10 @@ def _persist_session() -> None:
             print(f"setup_twitter_auth: mirrored {n} x.com cookies to "
                   f"{twitter_cookie_mirror.MIRROR_PATH} (survives keychain re-lock "
                   "/ Cookies-DB wipe on relaunch)", file=sys.stderr)
+            if handle:
+                print(f"setup_twitter_auth: durable X handle @{handle} stamped on the "
+                      "cookie mirror; account_resolver resolves it for attribution + "
+                      "own-reply dedup", file=sys.stderr)
         except Exception as e:
             print(f"setup_twitter_auth: local mirror save skipped ({e})", file=sys.stderr)
 
@@ -1303,50 +1264,6 @@ def cmd_connect(args) -> dict:
     }
 
 
-def cmd_resolve_handle(args) -> dict:
-    """Read the live logged-in @handle from the managed Chrome and persist it to
-    config.json accounts.twitter.handle.
-
-    The MCP post preflight calls this to self-heal a missing handle — the onboarding
-    gap where connect_x's best-effort live-DOM read silently no-op'd, leaving the
-    install logged in but with accounts:null, so twitter_browser.py refused EVERY
-    reply with no_account_configured. Reading the handle from the SAME session the
-    poster posts through is ground truth, not a guess, so it's safe where a hardcoded
-    fallback would not be. Best-effort: returns state=browser_not_running / no_handle
-    on failure and never raises."""
-    try:
-        ws, send = _attach()
-    except Exception as e:
-        return {"ok": False, "state": "browser_not_running", "error": str(e)}
-    handle = None
-    try:
-        handle = _resolve_live_handle(send)
-    except Exception:
-        handle = None
-    finally:
-        try:
-            ws.close()
-        except Exception:
-            pass
-    # Live DOM/API resolution is brittle (hardcoded bearer + selector scrape) and
-    # silently returns None on an X redesign or API pushback. When it does, fall
-    # back to the @handle the cookie mirror already stamped at connect time — same
-    # authenticated session, ground truth, not a guess. Without this fallback a
-    # failed live scrape leaves accounts.twitter.handle empty for the life of the
-    # install, and twitter_browser.py refuses EVERY reply with no_account_configured
-    # (approved cards post 0/N and look stuck), even though the durable session — and
-    # status/doctor via _durable_handle() — already know the real account.
-    source = "live"
-    if not handle:
-        handle = _mirror_handle()
-        source = "mirror"
-    if not handle:
-        return {"ok": False, "state": "no_handle"}
-    persisted = _write_handle_to_config(handle)
-    return {"ok": True, "state": "resolved", "handle": handle,
-            "source": source, "persisted": persisted}
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="Twitter/X session bootstrap for MCP setup.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1354,10 +1271,6 @@ def main() -> int:
     sub.add_parser("detect-sources",
                    help="List browsers/profiles to import the X session from "
                         "(JSON, for the panel dropdown). No keychain prompt.")
-    sub.add_parser("resolve-handle",
-                   help="Read the live logged-in @handle from the managed Chrome and "
-                        "persist it to config.json accounts.twitter.handle. Idempotent "
-                        "self-heal for the post preflight; never overwrites a real handle.")
     c = sub.add_parser("connect", help="Ensure browser + import/validate the X session.")
     c.add_argument("--source", default=None,
                    help="Browser profile to import from (e.g. chrome:Default, arc:Default), "
@@ -1388,8 +1301,6 @@ def main() -> int:
         out = {"ok": False, "state": "error", "error": _WEBSOCKET_IMPORT_ERROR}
     elif args.cmd == "status":
         out = cmd_status(args)
-    elif args.cmd == "resolve-handle":
-        out = cmd_resolve_handle(args)
     else:
         out = cmd_connect(args)
     print(json.dumps(out, indent=2))
