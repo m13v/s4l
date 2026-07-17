@@ -66,7 +66,6 @@ from pathlib import Path
 # Lists the digest may fully manage inside learned_preferences.
 MANAGED_LISTS = ("audience_avoid", "audience_prefer", "thread_avoid", "draft_style_notes")
 
-MAX_HISTORY = 1000
 
 # Edit examples: (original, final) pairs from the user's own card rewrites,
 # recorded DETERMINISTICALLY by feedback_digest via record_edit_examples()
@@ -136,6 +135,31 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def history_path(cfg_path: str | None = None) -> str:
+    """Sidecar audit log for learned_preferences mutations (2026-07-17). Lives
+    next to config.json as an append-only JSONL so the hot config file stays
+    lean; nothing reads it back into any prompt, it is purely a changelog."""
+    cfg_path = cfg_path or config_path()
+    return str(Path(cfg_path).with_name("learned_preferences_history.jsonl"))
+
+
+def _append_history(entries, cfg_path: str | None = None) -> None:
+    """Append audit entries to the sidecar JSONL. Best-effort: never raises into
+    the caller (a failed audit write must never fail a real mutation). Callers
+    already hold the config flock, so appends are serialized."""
+    entries = [e for e in (entries or []) if isinstance(e, dict)]
+    if not entries:
+        return
+    hp = history_path(cfg_path)
+    try:
+        Path(hp).parent.mkdir(parents=True, exist_ok=True)
+        with open(hp, "a") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+    except Exception:
+        pass
+
+
 def normalized(block) -> dict:
     """Coerce whatever is in config into the canonical block shape."""
     b = block if isinstance(block, dict) else {}
@@ -163,8 +187,9 @@ def normalized(block) -> dict:
         if isinstance(e, dict) and str(e.get("original") or "").strip() and str(e.get("final") or "").strip()
     ][:MAX_EDIT_EXAMPLES]
     out["updated_at"] = b.get("updated_at")
-    hist = b.get("history")
-    out["history"] = list(hist)[-MAX_HISTORY:] if isinstance(hist, list) else []
+    # history no longer lives in the block: it moved to the sidecar JSONL
+    # (history_path). Any legacy history still in config is flushed to the
+    # sidecar by the write paths, then dropped here on the next normalized write.
     return out
 
 
@@ -296,15 +321,18 @@ def record_edit_examples(project_name: str, pairs, cfg_path: str | None = None) 
             return {"ok": True, "recorded": 0}
         block["edit_examples"] = (fresh + existing)[:MAX_EDIT_EXAMPLES]
         block["updated_at"] = _now_iso()
-        block["history"] = (block["history"] + [
-            {
-                "ts": _now_iso(),
-                "change": f"edit_examples recorded: {len(fresh)}",
-                "rationale": "user rewrote the draft on the review card",
-                "source_events": [],
-                "project": project_name,
-            }
-        ])[-MAX_HISTORY:]
+        entry = {
+            "ts": _now_iso(),
+            "change": f"edit_examples recorded: {len(fresh)}",
+            "rationale": "user rewrote the draft on the review card",
+            "source_events": [],
+            "project": project_name,
+        }
+        # Flush any legacy in-config history to the sidecar once (pre-sidecar
+        # installs), then append this entry. `block` is normalized (no history
+        # key), so the write below drops history from config.json for good.
+        legacy = (cfg.get("learned_preferences_global") or {}).get("history")
+        _append_history((legacy or []) + [entry], cfg_path)
         cfg["learned_preferences_global"] = block
 
         stamp = _now_iso().replace(":", "-").replace(".", "-")
@@ -421,15 +449,18 @@ def apply_mutations(project_name: str, plan: dict, source_event_ids=None, cfg_pa
             return {"ok": True, "applied": [], "dropped": dropped, "project_found": True}
 
         block["updated_at"] = _now_iso()
-        block["history"] = (block["history"] + [
-            {
-                "ts": _now_iso(),
-                "change": "; ".join(applied)[:1000],
-                "rationale": rationale,
-                "source_events": list(source_event_ids or [])[:100],
-                "project": project_name,
-            }
-        ])[-MAX_HISTORY:]
+        entry = {
+            "ts": _now_iso(),
+            "change": "; ".join(applied)[:1000],
+            "rationale": rationale,
+            "source_events": list(source_event_ids or [])[:100],
+            "project": project_name,
+        }
+        # Flush any legacy in-config history to the sidecar once (pre-sidecar
+        # installs), then append this entry. `block` is normalized (no history
+        # key), so the write below drops history from config.json for good.
+        legacy = (cfg.get("learned_preferences_global") or {}).get("history")
+        _append_history((legacy or []) + [entry], cfg_path)
         cfg["learned_preferences_global"] = block
 
         # Backup + atomic replace (same shape as setup.ts applySetup).
@@ -511,7 +542,8 @@ def migrate_to_global(cfg_path: str | None = None) -> dict:
             return {"ok": True, "migrated": False, "projects_merged": [], "excluded": [], "dropped_at_cap": []}
 
         global_block = normalized(cfg.get("learned_preferences_global"))
-        merged_history = list(global_block["history"])
+        # legacy history still in raw config gets flushed to the sidecar below.
+        merged_history = list((cfg.get("learned_preferences_global") or {}).get("history") or [])
         excluded = []
         dropped_at_cap = []
         projects_merged = []
@@ -540,7 +572,7 @@ def migrate_to_global(cfg_path: str | None = None) -> dict:
                     global_block["edit_examples"].append(e)
                     existing_finals.add(e["final"])
                     touched = True
-            for h in block["history"]:
+            for h in (raw.get("history") or []) if isinstance(raw, dict) else []:
                 merged_history.append({**h, "project": pname})
                 touched = True
             if touched:
@@ -564,7 +596,7 @@ def migrate_to_global(cfg_path: str | None = None) -> dict:
             "excluded": excluded,
             "dropped_at_cap": dropped_at_cap,
         })
-        global_block["history"] = merged_history[-MAX_HISTORY:]
+        _append_history(merged_history, cfg_path)
         global_block["updated_at"] = _now_iso()
         cfg["learned_preferences_global"] = global_block
 
