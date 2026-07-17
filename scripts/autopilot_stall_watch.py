@@ -229,7 +229,14 @@ def _recent_batches_not_progressing(min_batches: int = BATCH_PROGRESSION_MIN_BAT
         import http_api  # noqa: E402
 
         resp = http_api.api_get("/api/v1/twitter-batches", {"list": "1", "limit": str(min_batches)})
-        batches = (resp or {}).get("batches") or []
+        # http_api.api_get returns the RAW envelope {"ok":..,"data":{"batches":[..],
+        # "owner_host":..}} — it does NOT unwrap "data". The batches live at
+        # resp["data"]["batches"], never at resp["batches"]. Reading the wrong key
+        # made this return [] -> len<min -> False on EVERY call, so batches_stuck was
+        # hardwired False and the "drafting is not actually happening" stall cause
+        # could never be selected (missed Nhat's 07-15 phase2b-prep pileup entirely).
+        # Do NOT collapse back to resp.get("batches").
+        batches = ((resp or {}).get("data") or {}).get("batches") or []
         if len(batches) < min_batches:
             return False  # not enough history yet to conclude a stall
         return all((b or {}).get("current_phase") not in BATCH_PROGRESSED_PHASES for b in batches)
