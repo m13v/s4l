@@ -1214,7 +1214,9 @@ class S4LMenuBar(rumps.App):
     # as drafts are ready). Manual mode.json edits can set any value; the
     # checkmark then lands on an exact match or none, same as the lane split.
     REVEAL_CADENCE_PRESETS = (
-        (0, "Immediately"),
+        # "Immediately" alone read as "clicking this pops cards right now";
+        # it only sets the pacing for when the NEXT draft lands (2026-07-16).
+        (0, "Immediately when a new draft is ready"),
         (1800, "Every 30 minutes"),
         (3600, "Every hour"),
         (14400, "Every 4 hours"),
@@ -1243,7 +1245,7 @@ class S4LMenuBar(rumps.App):
             if round(secs) == preset:
                 return label
         m = round(secs / 60)
-        return f"Every {m} min" if m else "Immediately"
+        return f"Every {m} min" if m else "Immediately when a new draft is ready"
 
     def _on_cadence_preset(self, secs, _sender=None):
         """Menu callback shim: rumps passes the clicked MenuItem last."""
