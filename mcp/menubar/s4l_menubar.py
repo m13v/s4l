@@ -2331,7 +2331,6 @@ class S4LMenuBar(rumps.App):
         for it in pending:
             batch, n = it.get("batch"), it.get("n")
             if n in posted_ns:
-                st.approved_queue_set_status(batch, n, "posted")  # reconcile lost update
                 continue
             decision = {
                 "n": n,
@@ -3581,7 +3580,6 @@ class S4LMenuBar(rumps.App):
                 # No "Posting draft N…" banner: the menu-bar spinner already shows
                 # live posting progress, so a Notification Center toast per approved
                 # card is pure noise. Only failures (below) raise a notification.
-                st.approved_queue_set_status(batch, n, "posting")
                 with self._review_lock:
                     activity_label = self._posting_activity_label_locked()
                 cl = [n] if decision.get("drop_link") else None
@@ -3613,32 +3611,25 @@ class S4LMenuBar(rumps.App):
                     # one registered). Unlike a real posting failure, nothing
                     # was ever attempted here — post_drafts never reached a
                     # server — so there's no double-post risk in retrying.
-                    # Deliberately do NOT call store_mark_post_failed / set
-                    # status "failed": both would exclude this card from
-                    # store_pending_posts()/approved_queue_pending(), which is
+                    # Deliberately do NOT call store_mark_post_failed: it would
+                    # exclude this card from store_pending_posts(), which is
                     # exactly what _resume_approved_queue() reads on the next
-                    # unreachable->reachable edge. Leaving it "queued" lets
-                    # that existing restart-recovery path retry it
-                    # automatically once a server re-registers, instead of
-                    # stranding it for manual dashboard retry.
-                    st.approved_queue_set_status(batch, n, "queued", error="loopback_unreachable")
+                    # unreachable->reachable edge. Leaving the store row
+                    # approved-unposted lets that existing restart-recovery
+                    # path retry it automatically once a server re-registers,
+                    # instead of stranding it for manual dashboard retry.
                     self._notify(
                         "S4L", "Server unreachable — will retry automatically once Claude Desktop reconnects."
                     )
                 else:
                     posted = res.get("posted") if isinstance(res, dict) else None
                     if posted == 0:
-                        st.approved_queue_set_status(batch, n, "failed", error="posted_0")
                         st.store_mark_post_failed(batch, n, decision.get("candidate_id"), "posted_0")
                         self._notify("S4L", f"Draft {n} didn't post — see the dashboard for why.")
-                    else:
-                        # Success is silent: the spinner + dashboard already reflect
-                        # it. No per-card "Posted draft N." banner. The server
-                        # stamps posted/our_url into the store itself; the legacy
-                        # set_status only settles pre-store ledger entries.
-                        st.approved_queue_set_status(batch, n, "posted")
+                    # Success is silent: the spinner + dashboard already reflect
+                    # it. No per-card "Posted draft N." banner. The server
+                    # stamps posted/our_url into the store itself.
             except Exception as e:
-                st.approved_queue_set_status(batch, n, "failed", error=str(e)[:200])
                 st.store_mark_post_failed(batch, n, decision.get("candidate_id"), str(e)[:200])
                 sys.stderr.write(f"[s4l-menubar] post draft {n} failed: {e}\n")
                 sys.stderr.flush()
