@@ -3709,15 +3709,23 @@ class S4LMenuBar(rumps.App):
             pass
 
     def _render_title(self, setup_complete, ob, blocker, attention=False, pending_count=0):
-        if blocker or attention:
-            base = "S4L ⚠"  # warning (setup blocked OR autopilot needs attention)
-        elif not setup_complete and ob and not ob.get("complete"):
+        # Base label: onboarding progress ("S4L 2/5") while setup is still
+        # running, plain "S4L" once complete.
+        if not setup_complete and ob and not ob.get("complete"):
             done = sum(1 for m in ob["milestones"] if m.get("status") == "complete")
             base = f"S4L {done}/{len(ob['milestones'])}"
-        elif self._update_available:
-            base = "S4L ⬆"  # update available — open the menu to update
         else:
             base = "S4L"
+        # Status markers are INDEPENDENT — each appends its own glyph when active
+        # so a warning and an available update (and anything added later) surface
+        # at the same time (user request 2026-07-17). They used to be mutually
+        # exclusive if/elif branches, where a warning hid a pending update and an
+        # update hid the onboarding count. Order is fixed (warning before update)
+        # so the bar doesn't reshuffle its glyphs as states toggle.
+        if blocker or attention:
+            base += " ⚠"  # warning (setup blocked OR autopilot needs attention)
+        if self._update_available:
+            base += " ⬆"  # update available — open the menu to update
         # Concise inline backlog count, right on the bar (not just the dropdown's
         # "Review N pending drafts") — per user request 2026-07-15, most useful
         # when the reveal cadence is "Never" and this count is the only signal
