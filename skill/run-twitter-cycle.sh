@@ -2031,6 +2031,79 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
     python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
 fi
+
+# --- PRE-DRAFT VIRALITY GATE (2026-07-15) ------------------------------------
+# The rolling bar used to be fetched AFTER the Claude drafting session and
+# applied only at plan-parse, so on selective settings (p0.99 since 2026-07-13)
+# most cycles spent the pipeline's dominant cost (~5 min of drafting) producing
+# picks a deterministic check then discarded (measured 2026-07-15: 60 of 66
+# cycles ended plan_count=0 with every pick below the bar). Both inputs are
+# deterministic and known BEFORE drafting (candidate T0 virality from the
+# scoring step, threshold from /api/v1), so fetch the bar HERE and short-circuit:
+# if the bar is ACTIVE and NO candidate in the batch clears it, the plan parser
+# could never keep a survivor (max over all candidates < bar implies max over
+# the model's on-brand subset < bar), so skip media capture and the drafting
+# session entirely and synthesize an empty prep envelope. The plan-parse bar
+# below stays as the enforcement point for cycles that DO draft (the top
+# on-brand pick can still be below the bar when a higher-virality candidate
+# was judged off-brand). Semantics preserved exactly:
+#   - candidates stay status='pending' (never rejected); Phase 0 salvages and
+#     re-judges them next cycle, same as a post-draft below-bar drop.
+#   - bar OFF (cold start / thin pool / fetch failure / sandbox) => no gate,
+#     draft as before (fail-open).
+#   - when any candidate clears the bar, drafting runs exactly as before, so
+#     reject-reason learning and the deferred-draft reuse inventory are only
+#     skipped in cycles where no draft could have surfaced anyway.
+# The parse step reuses this VIRALITY_THRESHOLD value (single fetch per cycle).
+if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    # The fetch below reads /api/v1/twitter-candidates/virality-threshold under
+    # THIS machine's own identity (http_api.py's X-Installation), so it would
+    # reflect the OPERATOR's trailing-24h candidate pool -- the wrong baseline
+    # entirely when replaying another install's (e.g. Karol's, Nhat's)
+    # candidates. A sandbox test also wants every model-approved draft
+    # visible, not gated to only the top-1 that would clear a live posting
+    # cadence bar which, again, doesn't apply since nothing is ever posted.
+    VIRALITY_THRESHOLD=""
+    log "Virality bar OFF for sandbox mode (would reflect the operator's own pool, not the replayed install's; every model-approved draft stays visible)."
+else
+    VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.99" \
+        S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+        S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
+        python3 -c "
+import os, sys
+_repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.join(_repo, 'scripts'))
+from http_api import api_get
+try:
+    r = api_get('/api/v1/twitter-candidates/virality-threshold',
+                {'pctile': os.environ['S4L_VPCTILE'], 'hours': 24})
+    d = (r or {}).get('data') or {}
+    thr = d.get('threshold')
+    n = int(d.get('sample_count') or 0)
+    mn = int(os.environ['S4L_VMIN'])
+    if thr is not None and n >= mn:
+        print(f'{float(thr):.4f}')
+except BaseException as e:
+    sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
+" 2>>"$LOG_FILE" || echo "")
+    if [ -n "$VIRALITY_THRESHOLD" ]; then
+        log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
+    else
+        log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
+    fi
+fi
+PREGATE_SKIP=0
+if [ -n "$VIRALITY_THRESHOLD" ]; then
+    MAX_VIR=$(printf '%s\n' "$CANDIDATES" | awk -F'|' 'BEGIN{m=0} NF>=5 {v=$5+0; if(v>m)m=v} END{print m}')
+    CAND_N=$(printf '%s\n' "$CANDIDATES" | grep -c '|' || true)
+    if awk -v a="$MAX_VIR" -v b="$VIRALITY_THRESHOLD" 'BEGIN{exit !(a<b)}'; then
+        PREGATE_SKIP=1
+        log "[virality_pregate] SKIP drafting: max_candidate_virality=$MAX_VIR < bar=$VIRALITY_THRESHOLD (all $CAND_N candidate(s) below the bar; rows stay pending for next-cycle salvage)"
+    else
+        log "[virality_pregate] PASS: max_candidate_virality=$MAX_VIR >= bar=$VIRALITY_THRESHOLD; drafting proceeds"
+    fi
+fi
+
 # Thread-media capture (2026-06-03, gated by S4L_TWITTER_CAPTURE_MEDIA, default
 # OFF). When enabled, does ONE cheap deterministic pass over every candidate
 # thread to pull its media (images/videos/GIFs/link-cards), persist each into
@@ -2047,7 +2120,11 @@ fi
 # capture off). Found live: a sandbox test run waited ~6 minutes in the FIFO
 # lock queue behind a real cycle for a lock it never ended up needing.
 MEDIA_BLOCK=""
-if [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
+if [ "$PREGATE_SKIP" = "1" ]; then
+    # Virality pre-gate: no draft will be produced this cycle, so thread-media
+    # capture would be pure waste; skip it along with the drafting session.
+    rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
+elif [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
     log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
     acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
     log "twitter-browser lock held (pid=$$) Phase 2b-prep"
@@ -2166,20 +2243,29 @@ fi
 # only the exemplar context, so this is the ONLY durable full-prompt record.
 # Local-only, newest 50 kept (file cleanup, not candidate-row retention; the
 # no-retention rule covers DB *_candidates rows). Never blocks the run.
-PREP_PROMPT_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/prep-prompts"
-if mkdir -p "$PREP_PROMPT_DIR" 2>/dev/null; then
-    _PP_FILE="$PREP_PROMPT_DIR/prep-prompt-$BATCH_ID.md"
-    if printf '%s' "$PREP_PROMPT" > "$_PP_FILE" 2>/dev/null; then
-        ls -t "$PREP_PROMPT_DIR"/prep-prompt-*.md 2>/dev/null | tail -n +51 | while IFS= read -r _pp_old; do
-            rm -f "$_pp_old"
-        done
-        log "[prep_prompt_snapshot] batch=$BATCH_ID bytes=$(wc -c < "$_PP_FILE" | tr -d ' ') path=$_PP_FILE"
-    else
-        log "WARN: prep-prompt snapshot write failed for batch=$BATCH_ID (non-fatal)"
+if [ "$PREGATE_SKIP" = "1" ]; then
+    # Virality pre-gate fired: skip the prompt snapshot (nothing is sent) and
+    # the whole Claude drafting session, and synthesize the empty envelope the
+    # plan parser already handles (identical outcome to "drafted, all picks
+    # dropped below bar": plan_count=0, candidates stay pending for salvage).
+    log "[virality_pregate] drafting session skipped; synthesizing empty prep envelope"
+    PREP_OUTPUT='{"type":"result","subtype":"success","is_error":false,"structured_output":{"candidates":[],"rejected":[]}}'
+else
+    PREP_PROMPT_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/prep-prompts"
+    if mkdir -p "$PREP_PROMPT_DIR" 2>/dev/null; then
+        _PP_FILE="$PREP_PROMPT_DIR/prep-prompt-$BATCH_ID.md"
+        if printf '%s' "$PREP_PROMPT" > "$_PP_FILE" 2>/dev/null; then
+            ls -t "$PREP_PROMPT_DIR"/prep-prompt-*.md 2>/dev/null | tail -n +51 | while IFS= read -r _pp_old; do
+                rm -f "$_pp_old"
+            done
+            log "[prep_prompt_snapshot] batch=$BATCH_ID bytes=$(wc -c < "$_PP_FILE" | tr -d ' ') path=$_PP_FILE"
+        else
+            log "WARN: prep-prompt snapshot write failed for batch=$BATCH_ID (non-fatal)"
+        fi
     fi
-fi
 
-PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" --allowedTools WebSearch,WebFetch -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
+    PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" --allowedTools WebSearch,WebFetch -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
+fi
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
 
@@ -2227,43 +2313,10 @@ fi
 # reach-recovery: quality over volume): single source of truth, no env
 # var, no fallback, one path (every install behaves identically regardless of how
 # its plist was generated). Sample floor S4L_TWITTER_VIRALITY_MIN_SAMPLE default 200.
-if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
-    # The fetch below reads /api/v1/twitter-candidates/virality-threshold under
-    # THIS machine's own identity (http_api.py's X-Installation), so it would
-    # reflect the OPERATOR's trailing-24h candidate pool -- the wrong baseline
-    # entirely when replaying another install's (e.g. Karol's, Nhat's)
-    # candidates. A sandbox test also wants every model-approved draft
-    # visible, not gated to only the top-1 that would clear a live posting
-    # cadence bar which, again, doesn't apply since nothing is ever posted.
-    VIRALITY_THRESHOLD=""
-    log "Virality bar OFF for sandbox mode (would reflect the operator's own pool, not the replayed install's; every model-approved draft stays visible)."
-else
-    VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.99" \
-        S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
-        S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
-        python3 -c "
-import os, sys
-_repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
-sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.join(_repo, 'scripts'))
-from http_api import api_get
-try:
-    r = api_get('/api/v1/twitter-candidates/virality-threshold',
-                {'pctile': os.environ['S4L_VPCTILE'], 'hours': 24})
-    d = (r or {}).get('data') or {}
-    thr = d.get('threshold')
-    n = int(d.get('sample_count') or 0)
-    mn = int(os.environ['S4L_VMIN'])
-    if thr is not None and n >= mn:
-        print(f'{float(thr):.4f}')
-except BaseException as e:
-    sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
-" 2>>"$LOG_FILE" || echo "")
-    if [ -n "$VIRALITY_THRESHOLD" ]; then
-        log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
-    else
-        log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
-    fi
-fi
+# VIRALITY_THRESHOLD is fetched ONCE per cycle by the PRE-DRAFT VIRALITY GATE
+# above (2026-07-15; it used to be fetched here, post-draft). The parse below
+# reuses that value so both gates apply the same bar. Sandbox runs carry an
+# empty threshold (bar OFF) from the same block.
 
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
 # 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
