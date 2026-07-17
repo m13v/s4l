@@ -27,7 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
-CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 REPLY_DB = os.path.join(REPO_DIR, "scripts", "reply_db.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 REDDIT_MCP_CONFIG = os.path.expanduser("~/.claude/browser-agent-configs/reddit-agent-mcp.json")
@@ -110,9 +116,6 @@ def _release_browser_lease() -> None:
         pass
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def load_active_reddit_campaigns():
