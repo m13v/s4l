@@ -215,10 +215,14 @@ KNOWN_BOT_LOGINS = {
 
 
 def _is_bot_login(login):
+    # gh's GraphQL surfaces GitHub App actors with an "app/" prefix
+    # (app/github-actions, app/renovate, sometimes bare "app/"); seen live in
+    # the 2026-07-18 phase-1 logs. Match the prefix, the known-login set, and
+    # the [bot]/-bot suffixes.
     l = (login or "").lower()
     return bool(l) and (
-        l in KNOWN_BOT_LOGINS or l.endswith("[bot]") or l.endswith("-bot")
-        or l.endswith("bot]")
+        l.startswith("app/") or l in KNOWN_BOT_LOGINS or l.endswith("[bot]")
+        or l.endswith("-bot") or l.endswith("bot]")
     )
 
 
