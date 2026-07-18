@@ -235,7 +235,7 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
         skill/run-twitter-cycle.sh) and mark it terminal here too, same as a
         human "discard all pending" would. Without this, a card can sit in
         the review queue as an approvable draft long after the backend has
-        moved on; approving it later silently no-ops (post_drafts returns
+        moved on; approving it later silently no-ops (approve_drafts returns
         posted:0, no browser ever launches, no post-*.log — see the
         2026-07-09 "approved 3 cards, nothing posted" investigation).
 
@@ -246,7 +246,7 @@ def _sync_with_backend(cands: list) -> tuple[int, int]:
 
     APPROVED cards are exempt from the prune: an approval is a settled human
     decision awaiting its serialized post, and stamping terminal on it makes
-    post_drafts refuse it as already-decided (posted:0). That exact race ate
+    approve_drafts refuse it as already-decided (posted:0). That exact race ate
     2 of 3 approvals on 2026-07-10 (approved 04:30:02Z, merge stamped
     backend_status_expired 04:32:33Z, poster refused both). The freshness
     gate exists to stop stale UNDECIDED drafts from burning review attention;
