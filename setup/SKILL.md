@@ -71,7 +71,7 @@ Do not report setup complete until all of these are true:
 ## Choose the path
 
 - If the social-autoposter MCP tools are connected (`project_config`, `runtime`,
-  `queue_setup`, `post_drafts`, `get_stats`, `dashboard`), use the MCP path.
+  `queue_setup`, `approve_drafts`, `get_stats`, `dashboard`), use the MCP path.
   Do not hand-edit `config.json`.
 - If only the CLI/skill is installed, use the CLI fallback.
 
