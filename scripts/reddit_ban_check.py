@@ -39,13 +39,18 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # about.json JS: fetch each sub's logged-in metadata, return the ban flags.
+# Every fetch in this module carries AbortSignal.timeout: page.evaluate has NO
+# Playwright-side timeout, so a single hung fetch (wedged browser, dead
+# network) blocks the caller forever — this stalled the feedback digest for
+# 90 minutes on 2026-07-18. The JS must always resolve on its own.
 _ABOUT_JS = r"""
 async (subs) => {
   const out = {};
   for (const s of subs) {
     try {
       const r = await fetch(`https://old.reddit.com/r/${s}/about.json`,
-                            {headers:{'Accept':'application/json'}, credentials:'include'});
+                            {headers:{'Accept':'application/json'}, credentials:'include',
+                             signal: AbortSignal.timeout(8000)});
       if (!r.ok) { out[s] = {http: r.status}; continue; }
       const d = (await r.json()).data || {};
       out[s] = { banned: d.user_is_banned === true,
@@ -127,7 +132,8 @@ def banned_state(subs) -> dict:
             # reports user_is_banned=false for everything, a false negative.
             me = page.evaluate(
                 "async () => { try { const r = await fetch("
-                "'https://old.reddit.com/api/me.json', {credentials:'include'}); "
+                "'https://old.reddit.com/api/me.json', {credentials:'include', "
+                "signal: AbortSignal.timeout(8000)}); "
                 "const d = await r.json(); return (d.data && d.data.name) || null; } "
                 "catch(e){ return null; } }"
             )
@@ -231,7 +237,8 @@ async (urls) => {
   for (const u of urls) {
     try {
       const r = await fetch(u + '/.json?raw_json=1&limit=100',
-                            {headers:{'Accept':'application/json'}, credentials:'include'});
+                            {headers:{'Accept':'application/json'}, credentials:'include',
+                             signal: AbortSignal.timeout(10000)});
       if (!r.ok) { out[u] = {http: r.status}; continue; }
       const d = await r.json();
       const s = d[0].data.children[0].data;
