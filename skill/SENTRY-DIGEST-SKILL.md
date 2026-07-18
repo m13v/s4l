@@ -169,7 +169,7 @@ For each issue you're investigating:
    `/social-autoposter/` (skip stdlib and third-party package frames). Read
    that file with the Read tool at the relevant line. If the title/message
    itself names a script (e.g. "twitter post pipeline issues", "Error:
-   post_drafts: X/Y posted"), grep for that script under
+   approve_drafts: X/Y posted"), grep for that script under
    `~/social-autoposter/scripts` and `~/social-autoposter/skill` directly
    (scoped, per the safety rule above) even if there's no Python stack trace
    frame (some of these are structured error reports from bash wrappers, not
