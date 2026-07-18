@@ -135,15 +135,24 @@ export function checkVersionChange(): { changed: boolean; isFirstBoot: boolean; 
   }
   const isFirstBoot = from === null;
   const changed = !isFirstBoot && from !== to;
-  try {
-    fs.mkdirSync(snapshotStateDir(), { recursive: true });
-    fs.writeFileSync(
-      lastVersionPath(),
-      JSON.stringify({ version: to, seen_at: new Date().toISOString() }),
-      "utf-8"
-    );
-  } catch {
-    /* best-effort; a failed write just means the next boot re-detects from "from: null" */
+  // Write ONLY when the version actually changed (or first boot / unreadable
+  // file). The old rewrite-every-boot kept the file's timestamp meaning "when
+  // the server last booted", which reads like an install time and misled a
+  // 2026-07-18 investigation into concluding an update hadn't applied. With
+  // the guard, running_since is exactly what it says: when THIS version first
+  // booted here. Same-version boots leave the file untouched, so detection
+  // semantics are unchanged (the file already holds the current version).
+  if (changed || isFirstBoot) {
+    try {
+      fs.mkdirSync(snapshotStateDir(), { recursive: true });
+      fs.writeFileSync(
+        lastVersionPath(),
+        JSON.stringify({ version: to, running_since: new Date().toISOString() }),
+        "utf-8"
+      );
+    } catch {
+      /* best-effort; a failed write just means the next boot re-detects from "from: null" */
+    }
   }
   if (changed) {
     console.error(`[social-autoposter-mcp] self-update detected: ${from} -> ${to}`);
