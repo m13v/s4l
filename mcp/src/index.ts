@@ -3792,6 +3792,57 @@ tool(
   }
 );
 
+// ---- scan_now: fire one scanner cycle immediately --------------------------
+// The scanner (the twitter scan+draft cycle) is what drives the whole pipeline;
+// it runs on the launchd kicker's fixed StartInterval. This nudges launchd to
+// fire it RIGHT NOW via `launchctl kickstart` — the EXACT same mechanism the
+// first-run onboarding kick uses (ensureQueueKickerInstalled): the job runs
+// THROUGH launchd with its full baked env + the run-*-singleton.sh lock, so it
+// is NOT a bare `bash run-twitter-cycle.sh` (which would leave an empty-plan
+// artifact). launchd keeps a single instance, so if a cycle is already running
+// this is a harmless no-op; while paused the kicker is unloaded, so we report
+// that rather than kick nothing.
+//
+// This is deliberately NOT the removed run_draft_cycle / draft_cycle tool: it
+// spawns no warm in-chat Claude draft session, it only asks launchd to run the
+// already-scheduled cycle one interval early. Do NOT re-introduce a draft_cycle.
+tool(
+  "scan_now",
+  {
+    title: "Run the scanner now",
+    description:
+      "Fire ONE scanner cycle immediately instead of waiting for the next scheduled run. The scanner " +
+      "(the twitter scan+draft cycle) is what discovers threads and kicks off drafting, so this is the " +
+      "'run now' control behind the menu bar + dashboard button. It nudges the existing launchd job to " +
+      "run one interval early; it does NOT change the schedule. If a cycle is already running it's a " +
+      "no-op, and if S4L is paused it reports that (nothing runs while paused). Use when the user asks " +
+      "to scan now, run the scanner, run now, or check for new threads immediately.",
+    inputSchema: {},
+  },
+  async () => {
+    if (isPaused()) {
+      return jsonContent({
+        ok: false,
+        paused: true,
+        detail: "S4L is paused — resume it first, then the scanner can run.",
+      });
+    }
+    const uid = process.getuid ? process.getuid() : 0;
+    const kick = await run(
+      "launchctl",
+      ["kickstart", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`],
+      { timeoutMs: 15_000 }
+    );
+    const ok = kick.code === 0;
+    return jsonContent({
+      ok,
+      detail: ok
+        ? "Scanner cycle kicked off — new drafts land in a few minutes."
+        : `Could not start the scanner (launchctl rc=${kick.code}).`,
+    });
+  }
+);
+
 // ---- posting_volume: per-install posting-volume mode (virality bar) --------
 // Server-side throttle (2026-07-13): installations.posting_mode maps to a
 // virality-bar percentile on the API (high~0.90, medium~0.97, low~0.995) and
