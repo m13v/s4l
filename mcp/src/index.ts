@@ -2837,6 +2837,7 @@ tool(
       const r = await redditConnect(args.reddit_source, args.reddit_manual_login);
       let verified = false;
       let configNote: string | undefined;
+      let redditKicker: { ok: boolean; detail: string } | undefined;
       if (r.connected) {
         completeOnboardingMilestone("reddit_connected", { state: r.state });
         // Persist the discovered username through the server's config-write
@@ -2860,13 +2861,19 @@ tool(
           });
         }
         // Reddit is live: install the discovery kicker (idempotent; gated on
-        // runtime + project readiness inside, and it never touches a
-        // hand-built plist pointing outside the managed package).
-        void ensureRedditKickerInstalled()
-          .then((res) =>
-            console.error(`[reddit-kicker] post-connect install: ${res.ok ? "ok" : "skip"} (${res.detail})`)
-          )
-          .catch((e) => console.error("[reddit-kicker] post-connect install failed:", e?.message || e));
+        // runtime + draftable-lane readiness inside, and it never touches a
+        // hand-built plist pointing outside the managed package). Await it and
+        // surface the result on the response so a skip (e.g. no ready project AND
+        // no active persona) is VISIBLE instead of failing silently to stderr.
+        try {
+          redditKicker = await ensureRedditKickerInstalled();
+          console.error(
+            `[reddit-kicker] post-connect install: ${redditKicker.ok ? "ok" : "skip"} (${redditKicker.detail})`
+          );
+        } catch (e: any) {
+          redditKicker = { ok: false, detail: e?.message || String(e) };
+          console.error("[reddit-kicker] post-connect install failed:", e?.message || e);
+        }
       } else {
         blockOnboardingMilestone(
           "reddit_connected",
@@ -4640,24 +4647,38 @@ function kickerEnv(): Record<string, string> {
   };
 }
 
+// Shared draftability gate for BOTH autopilot kickers (X queue + Reddit search).
+// A launchd discovery/draft kicker only makes sense to schedule when SOMETHING is
+// draftable, and the definition of "draftable" is identical across platforms — so
+// it lives here as the single source of truth. Two paths qualify:
+//   (a) a managed product project is ready (promotion lane), OR
+//   (b) personal_brand mode is on AND the persona is ready (self-promo lane).
+// Path (b) is easy to miss: the persona is deliberately excluded from the
+// managed-products scope (see ensurePersonaProject), so a personal-brand-only
+// install has an empty managedProjects() and a product-only check is always
+// false. That gap silently sank the X kicker (fixed 2026-06-30) and then the
+// Reddit kicker (fixed 2026-07-16, which reused the product-only check instead of
+// this persona-aware one). Keeping both kickers on this ONE helper means the
+// personal-brand path can never regress on one platform but not the other.
+function draftableLaneStatus(): { draftable: boolean; detail: string } {
+  const productReady = listManagedProjectStatus().some((p) => p.ready);
+  if (productReady) return { draftable: true, detail: "ready project" };
+  const personaActive = currentFlags().personal_brand && personaReady();
+  if (personaActive) {
+    return { draftable: true, detail: "active persona (personal_brand)" };
+  }
+  return { draftable: false, detail: "no ready project or active persona yet" };
+}
+
 async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
     if (!runtimeReady()) return { ok: false, detail: "runtime not ready" };
-    // Gate: install the kicker when SOMETHING is draftable. Two paths qualify:
-    //   (a) a managed product project is ready (promotion lane), OR
-    //   (b) personal_brand mode is on AND the persona is ready (self-promo lane).
-    // Path (b) was the 2026-06-30 gap: a personal-brand-only setup has no managed
-    // project, so the old `anyReady` check was always false and the kicker never
-    // installed (no drafts, no first-run kick). The persona is excluded from
-    // managed scope by design, so check it explicitly.
-    const productReady = listManagedProjectStatus().some((p) => p.ready);
-    const personaActive = currentFlags().personal_brand && personaReady();
-    if (!productReady && !personaActive) {
-      return {
-        ok: false,
-        detail: "no ready project or active persona yet",
-      };
+    // Gate: install the kicker only when SOMETHING is draftable (product lane OR
+    // active persona). See draftableLaneStatus — shared with the Reddit kicker.
+    const lane = draftableLaneStatus();
+    if (!lane.draftable) {
+      return { ok: false, detail: lane.detail };
     }
     // Additional gate: X must be connected and verified before autopilot starts.
     // This prevents wasted cycles against a logged-out x.com if X connection didn't
@@ -4782,8 +4803,13 @@ async function ensureRedditKickerInstalled(): Promise<{ ok: boolean; detail: str
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
     if (!runtimeReady()) return { ok: false, detail: "runtime not ready" };
-    const productReady = listManagedProjectStatus().some((p) => p.ready);
-    if (!productReady) return { ok: false, detail: "no ready project yet" };
+    // Gate: install the kicker only when SOMETHING is draftable. Mirror the X
+    // queue kicker EXACTLY via the shared draftableLaneStatus — a personal-brand-
+    // only install has no managed product, so the old product-only check here made
+    // this kicker permanently uninstallable (no reddit drafts) even with a ready
+    // persona (2026-07-16 bug). Both kickers now share the one persona-aware gate.
+    const lane = draftableLaneStatus();
+    if (!lane.draftable) return { ok: false, detail: lane.detail };
     // Reddit session gate. status is read-only (never launches Chrome): a live
     // me.json validation when the harness is up, the on-disk profile cookie
     // check (connected_idle) when it isn't.
