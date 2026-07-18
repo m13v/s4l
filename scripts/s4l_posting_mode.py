@@ -76,8 +76,10 @@ def main() -> int:
     try:
         if cmd == "get":
             try:
+                # http_api raises SystemExit (not Exception) on terminal
+                # failure, so both must be caught here and below.
                 r = api_get("/api/v1/installations/posting-mode")
-            except Exception as e:
+            except (Exception, SystemExit) as e:
                 # Offline / server unreachable: answer from the last-known
                 # cache so UIs keep showing the user's chosen mode instead of
                 # silently falling back to "Steady". No "error" key: consumers
@@ -109,7 +111,7 @@ def main() -> int:
             return 0
         print(json.dumps({"error": f"unknown command {cmd!r}"}))
         return 2
-    except Exception as e:  # network / API failure: JSON error, non-zero exit
+    except (Exception, SystemExit) as e:  # network / API failure: JSON error, non-zero exit
         print(json.dumps({"error": str(e)}))
         return 1
 
