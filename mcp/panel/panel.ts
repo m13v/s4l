@@ -448,25 +448,29 @@ async function pollScanStatus() {
   try {
     const s = await call("scan_status");
     if (!s || typeof s !== "object") return;
+    // Re-anchor the countdown BEFORE applyState so the render it triggers already
+    // shows the fresh value (not the previous anchor).
+    nextScanAtMs =
+      typeof s.next_run_secs === "number" ? Date.now() + s.next_run_secs * 1000 : null;
     applyState({
       activity_state: s.activity_state,
       activity_label: s.activity_label,
       next_run_secs: typeof s.next_run_secs === "number" ? s.next_run_secs : null,
       ...(typeof s.paused === "boolean" ? { paused: s.paused } : {}),
     });
-    nextScanAtMs =
-      typeof s.next_run_secs === "number" ? Date.now() + s.next_run_secs * 1000 : null;
   } catch {
     /* best-effort: a failed poll just leaves the last countdown ticking */
   }
 }
 
-// 1s ticker: repaint only the countdown line (cheap) so it counts down smoothly
-// between the 5s polls. 5s poll: refresh the live status + re-anchor. Both skip
-// while the tab is hidden or setup isn't complete (nothing to show).
+// 1s ticker: repaint only the countdown line so it counts down smoothly between
+// the 5s polls. Pure client-side (no round-trip), so it runs regardless of tab
+// visibility — the internal setup gate is the only thing that suppresses it.
 setInterval(() => {
-  if (!document.hidden && state && isSetupComplete(state)) renderScanner();
+  if (state && isSetupComplete(state)) renderScanner();
 }, 1000);
+// 5s poll: refresh the live status + re-anchor the countdown. Skipped while the
+// tab is hidden to avoid spawning the scan_status python for an unseen panel.
 setInterval(() => {
   if (!document.hidden) void pollScanStatus();
 }, 5000);
