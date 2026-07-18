@@ -428,17 +428,28 @@ except Exception:
 
 # Scheduler-wedge escalation (2026-07-17): tick-freshness 'stalled' stays a quiet
 # diagnostic while drafts drain, but escalates to the ⚠ once the wedge is proven
-# BOTH persistent (no successful worker run for SCHED_WEDGE_ESCALATION_SECONDS)
-# AND active (at least SCHED_WEDGE_MIN_SKIPS recordedSkips in the last hour —
-# proof Claude Desktop is awake and refusing to fire, so a closed lid or a
-# sleeping box can never trip it: sleep records no skips). A scheduler that
-# hasn't fired in an hour despite ~60 attempts is one queue job away from
-# user-visible harm even if past jobs squeaked through. Self-resets: the first
-# successful run drops last_run_age below the bar within one tick_stats refresh
-# (≤60s). Both thresholds deliberately far above the 2026-07-09 flapping regime
-# (83% skips with runs still landing every few minutes stays quiet forever).
-SCHED_WEDGE_ESCALATION_SECONDS = 3600
-SCHED_WEDGE_MIN_SKIPS = 30
+# real by THREE independent signals, none of which needs a job to already be
+# stuck (the wedge must be caught even on an idle queue, before any job is
+# harmed):
+#   1. PERSISTENT: no successful worker run for SCHED_WEDGE_ESCALATION_SECONDS.
+#      The per-minute task fires regardless of whether jobs exist, so a healthy
+#      scheduler never lets this age past ~1-2 min — demand-independent.
+#   2. ACTIVE: at least SCHED_WEDGE_MIN_SKIPS recordedSkips in the last hour —
+#      proof Claude Desktop is awake and refusing to fire. A closed lid or a
+#      sleeping box records no skips, so sleep can never trip it.
+#   3. NOT A LEGIT LONG RUN: no fresh claimed job in the queue's running/ dir.
+#      A real 20-40 min draft run holds the overlap guard closed and racks up
+#      per_task_limit skips exactly like the wedge does — but it leaves its
+#      claimed job file in running/. Exempting that case is what lets the
+#      window sit at 30 min instead of 1h without false positives. (A STALE
+#      running/ file past RUNNING_STALL_SECONDS is its own ⚠ via
+#      _autopilot_stalled, which takes priority anyway.)
+# Self-resets: the first successful run drops last_run_age below the bar within
+# one tick_stats refresh (≤60s). The 2026-07-09 flapping regime (83% skips with
+# runs still landing every few minutes) stays quiet forever: signal 1 never
+# accumulates.
+SCHED_WEDGE_ESCALATION_SECONDS = 1800
+SCHED_WEDGE_MIN_SKIPS = 20
 
 # A poll can read a transient "not stuck" moment (e.g. the activity file
 # between one dying worker attempt and the next claim on the same aged job)
@@ -2703,20 +2714,40 @@ class S4LMenuBar(rumps.App):
         else:
             self._tick_stats = None
         # Scheduler-wedge escalation (2026-07-17): 'stalled' is quiet while the
-        # wedge is young or intermittent, but once the host has BOTH refused to
-        # fire for SCHED_WEDGE_ESCALATION_SECONDS and actively recorded skips in
-        # the last hour (awake, not asleep — see the constants' comment), the
-        # degradation is real and persistent -> ⚠ with its own reason and a
-        # one-click Claude Desktop restart (the known cure for the warm-session
-        # overlap-guard wedge; the registration itself is fine, so re-arm is the
-        # wrong fix). Every more specific reason keeps priority; self-clears as
-        # soon as a run lands (tick_stats refresh ≤60s behind).
+        # wedge is young or intermittent, but once all three wedge signals hold
+        # (persistent + awake + no legit run in flight — see the SCHED_WEDGE_*
+        # constants' comment), the degradation is real -> ⚠ with its own reason
+        # and a one-click, modal-confirmed Claude Desktop restart (the known
+        # cure for the warm-session overlap-guard wedge; the registration
+        # itself is fine, so re-arm is the wrong fix). Deliberately does NOT
+        # wait for a job to be stuck: an idle queue with a wedged scheduler
+        # must alarm too. Every more specific reason keeps priority;
+        # self-clears as soon as a run lands (tick_stats refresh ≤60s behind).
         if setup_complete and schedule_state == "stalled" and not attention:
             _ws = self._tick_stats or {}
             _wage = _ws.get("last_run_age_s")
             _wskips = _ws.get("skips_in_window") or 0
+            # Signal 3: a FRESH claimed job in running/ means a real (long)
+            # draft run legitimately holds the overlap guard closed — not a
+            # wedge. Stale running/ files past the running-stall bar are the
+            # queue layer's ⚠, which already took priority above.
+            _live_drain = False
+            try:
+                _wq = os.path.join(st.state_dir(), "claude-queue", "running")
+                for _jf in glob.glob(os.path.join(_wq, "*.json")):
+                    if _jf.endswith(".tmp"):
+                        continue
+                    try:
+                        if (time.time() - os.path.getmtime(_jf)) < AUTOPILOT_RUNNING_STALL_SECONDS:
+                            _live_drain = True
+                            break
+                    except OSError:
+                        continue
+            except Exception:
+                pass
             if (
-                _wage is not None
+                not _live_drain
+                and _wage is not None
                 and _wage >= SCHED_WEDGE_ESCALATION_SECONDS
                 and _wskips >= SCHED_WEDGE_MIN_SKIPS
             ):
