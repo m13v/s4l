@@ -28,6 +28,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch
+from virality import calculate_reddit_virality_score, fetch_virality_bar
 from author_history_block import render as _render_author_history
 from project_topics import topics_for_project
 from active_experiments import collect as _collect_exps
@@ -261,6 +262,11 @@ def _db_upsert_discovered_candidate(candidate, batch_id, project_name):
             "draft_engagement_style": candidate.get("engagement_style"),
             "score_t0": int(score_raw) if score_raw is not None else None,
             "comments_t0": int(comments_raw) if comments_raw is not None else None,
+            # Shared-scorer composite (scripts/virality.py); feeds the install's
+            # rolling percentile pool behind the reddit virality-threshold
+            # endpoint. Server-side ON CONFLICT takes the NEWEST non-null value
+            # so a re-sighted thread's bar standing tracks current momentum.
+            "virality_score": candidate.get("virality_score"),
         }
         api_post("/api/v1/reddit-candidates", body)
     except Exception as e:
@@ -429,15 +435,26 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
     None if no eligible row remains.
     """
     limit = max(1, int(limit or 1))
+    body = {
+        "batch_id": batch_id,
+        "max_attempts": MAX_ATTEMPTS,
+        "draft_ttl_minutes": DRAFT_TTL_MIN,
+        "limit": limit,
+    }
+    # Rolling virality bar (2026-07-18): pass the active bar so the server
+    # filters below-bar rows INSIDE the claim query (no wasted salvage slots,
+    # no last_attempt_at stamp on rows the drafter would never see). Mirrors
+    # the X prefilter's semantics: filtered rows stay 'pending' untouched;
+    # NULL-virality legacy rows pass. Bar OFF (None) = unfiltered, as before.
+    if os.environ.get("S4L_REDDIT_VIRALITY_BAR", "1") != "0":
+        _bar = fetch_virality_bar("reddit")
+        if _bar is not None:
+            body["min_virality"] = _bar
+            print(f"[post_reddit] salvage virality bar ACTIVE: min_virality={_bar:.4f}")
     try:
         resp = api_post(
             "/api/v1/reddit-candidates/pick-salvage",
-            {
-                "batch_id": batch_id,
-                "max_attempts": MAX_ATTEMPTS,
-                "draft_ttl_minutes": DRAFT_TTL_MIN,
-                "limit": limit,
-            },
+            body,
         )
         data = (resp or {}).get("data") or {}
         if not data.get("decisions"):
@@ -2192,6 +2209,10 @@ def _discover_iteration(args, config, reddit_username, already_picked):
                 "selftext": t.get("selftext") or "",  # captured for analytics + future relevance gates
                 "score": int(t.get("score") or 0),
                 "num_comments": int(t.get("num_comments") or 0),
+                # cmd_search stamps age_hours on every dumped thread; feeds the
+                # shared virality scorer below. 0.0 fallback only for very old
+                # dump files written before 2026-07-18.
+                "age_hours": float(t.get("age_hours") or 0.0),
                 "search_topic": query,
             })
     # Best-effort cleanup; the OS will eventually reap /tmp anyway.
@@ -2236,6 +2257,14 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         vel = int(c.get("score") or 0) + 4 * int(c.get("num_comments") or 0)
         c["topical_overlap"] = round(ov, 3)
         c["velocity"] = vel
+        # Composite virality predictor (2026-07-18, shared scripts/virality.py):
+        # age-normalized velocity x discussion bonus x 7-day-half-life decay.
+        # Persisted on EVERY harvested row (capped or not) so the install's
+        # rolling percentile pool reflects the full discovery distribution,
+        # exactly like twitter_candidates. Ranking below stays overlap-first
+        # (Reddit's relevance-sort leak makes on-topic-ness the scarcer
+        # signal); virality gates via the bar prefilter, not the sort.
+        c["virality_score"], _ = calculate_reddit_virality_score(c)
     # Primary sort: overlap desc (on-topic first). Tiebreak: velocity desc.
     ranked = sorted(candidates, key=lambda c: (c["topical_overlap"], c["velocity"]), reverse=True)
     selected = ranked[:DISCOVER_CAP] if DISCOVER_CAP > 0 else ranked
@@ -2254,7 +2283,33 @@ def _discover_iteration(args, config, reddit_username, already_picked):
           f"overlap_zero={n_zero} low={n_low} mid={n_mid} high={n_high}")
     for c in selected:
         print(f"[discover_harvest]   ov={c['topical_overlap']:.2f} vel={c['velocity']:>5} "
+              f"vir={c['virality_score']:>8.2f} "
               f"q={(c.get('search_topic') or '')[:40]!r} :: {(c.get('thread_title') or '')[:70]!r}")
+
+    # --- ROLLING VIRALITY BAR prefilter (2026-07-18, aligns with the X
+    # cycle's 2026-07-17 candidate-level prefilter). Fetch the install's
+    # rolling percentile bar and drop below-bar rows from `selected` BEFORE
+    # the draft phase ever sees them. Filtered rows are NOT expired or
+    # rejected: the queue-persist block below upserts ALL harvested candidates
+    # (with virality_score) regardless of this filter, so filtered rows stay
+    # 'pending' and re-enter via salvage if a re-discovery bumps their
+    # score above the bar within the 24h freshness window. Fail-open by
+    # construction: bar OFF (cold start / thin pool / fetch failure /
+    # S4L_REDDIT_VIRALITY_BAR=0 kill switch / dry-run) means no filtering.
+    if not args.dry_run and os.environ.get("S4L_REDDIT_VIRALITY_BAR", "1") != "0":
+        _bar = fetch_virality_bar("reddit")
+    else:
+        _bar = None
+    if _bar is not None and selected:
+        _pre_n = len(selected)
+        selected = [c for c in selected
+                    if float(c.get("virality_score") or 0.0) >= _bar]
+        print(f"[virality_prefilter] kept {len(selected)} of {_pre_n} candidate(s) "
+              f"at/above bar={_bar:.4f}; below-bar rows stay pending and are "
+              f"never sent to the drafter")
+    elif _bar is None:
+        print("[virality_prefilter] bar OFF this cycle (cold-start/thin pool, "
+              "fetch failed, or disabled); drafting ungated")
 
     # Persist freshly-discovered candidates to reddit_candidates so a
     # transient post failure on a later phase can be retried by the next
