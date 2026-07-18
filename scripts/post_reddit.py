@@ -442,8 +442,21 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
         data = (resp or {}).get("data") or {}
         if not data.get("decisions"):
             return None
+        # Lane for salvage rows is derived from CONFIG (persona:true on the
+        # row's project), not from this cycle's env: a persona row that
+        # failed transiently must re-draft under the persona directive even
+        # when the retry cycle's coin flip landed promotion, and vice versa.
+        _sv_proj = (data.get("project_name") or "").lower()
+        try:
+            _sv_lane = "personal_brand" if any(
+                p.get("persona") is True and (p.get("name") or "").lower() == _sv_proj
+                for p in (load_config().get("projects") or [])
+            ) else "promotion"
+        except Exception:
+            _sv_lane = "promotion"
         return {
             "project_name": data.get("project_name") or "general",
+            "lane": _sv_lane,
             # batch_id must ride the plan file into --phase draft: the
             # snapshot filename, the prompt's top_performers --invoked-by,
             # and the proposed_excludes 2-distinct-batch activation gate all
@@ -2274,17 +2287,18 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # top_performers --invoked-by, proposed_excludes activation gate). Same
     # reason as the salvage plan's batch_id above.
     #
-    # lane (2026-07-17): stamped ONCE here, at the assignment point (discover
-    # runs inside the cycle process where s4l_mode.py's per-cycle coin flip
-    # exported S4L_ACTIVE_LANE). Downstream readers (_draft_iteration →
-    # render_reddit_prompt) take the lane from the PLAN, never from env, so
-    # salvage plans from earlier cycles and the env-less MCP approval poster
-    # can't inherit this cycle's lane by accident. Same stamp-at-source
-    # convention as active_experiments (see CLAUDE.md).
+    # lane (2026-07-17): stamped ONCE here at plan-write time and read from
+    # the PLAN by every downstream phase (_draft_iteration →
+    # render_reddit_prompt), never from env — salvage plans from earlier
+    # cycles and the env-less MCP approval poster must not inherit this
+    # cycle's lane. Same stamp-at-source convention as active_experiments
+    # (see CLAUDE.md). Derived from CONFIG (persona:true), not from
+    # S4L_ACTIVE_LANE, so an env-less manual `--project <persona>` run also
+    # drafts under the persona directive; the personal_brand lane can only
+    # ever force-inject the persona project, so the two always agree.
     return {"project_name": project_name, "decisions": selected,
             "batch_id": queue_batch,
-            "lane": ("personal_brand"
-                     if os.environ.get("S4L_ACTIVE_LANE") == "personal_brand"
+            "lane": ("personal_brand" if project.get("persona") is True
                      else "promotion"),
             "cost": 0.0, "session_id": None,
             "phase": "discover"}
