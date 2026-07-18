@@ -613,21 +613,6 @@ OMIT THESE (clear no-bridge cases only):
 ## THREAD CONTENT (pre-fetched)
 Each candidate above carries a THREAD CONTENT block (OP + top comments), already fetched for you. Never fetch, navigate, or open any reddit.com URL and never try to reload a thread; apply the SELECTION GATE using the inlined content only. WebSearch and WebFetch ARE available for EXTERNAL fact-checking: use them ONLY when a thread hinges on a current fact, a name, a release, or a claim you are not sure about, so your comment is specific and correct instead of vague. Most comments need no search at all. If a candidate is somehow missing its THREAD CONTENT block, OMIT it.
 
-## CRITICAL CONTENT RULES (apply only to threads that pass the gate)
-These platform rules are ABSOLUTE and override anything more permissive in the DRAFT DIRECTIVE below (including any allowance to mention the project).
-- Go BIMODAL on length: 1 punchy sentence (<100 chars) OR 4-5 sentences of real substance. Avoid 2-3 sentence middle-ground.
-- GROUNDING RULE — pick ONE lane per comment:
-  LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this", "scenario:") then you may invent specifics freely.
-  LANE 2 - NO FABRICATION: every specific (numbers, durations, places, tools) must appear verbatim in the content_angle above. Otherwise drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is...").
-- VOICE RELATIONSHIP: see the dedicated section below; it governs whether you speak AS the maker or as an outside observer.
-- NEVER mention product names (@PRODUCT_NAMES@).
-- NEVER include URLs or links in your comment text.
-- Prefer replying to OP (top-level reply). ONE comment per thread.
-- Statements beat questions. Be authoritative, not inquisitive.
-
-## Content rules
-@CONTENT_RULES@
-
 ## DRAFT A: assigned style
 @STYLES_BLOCK_A@
 
@@ -637,15 +622,13 @@ These platform rules are ABSOLUTE and override anything more permissive in the D
 ## DRAFT DIRECTIVE
 @DRAFT_DIRECTIVE@ (applies to both drafts; each still obeys its OWN style's length limit, not a shared one.)
 
-@VOICE_RELATIONSHIP@
-
 ## PERSIST EACH DRAFT (keeps this session alive; do it per thread, not at the end)
 Right after drafting BOTH texts for a thread, persist Draft A (never Draft B) with ONE quick Bash call, then move to the next thread:
      python3 @REPO_DIR@/scripts/log_draft.py --platform reddit --thread-url 'THREAD_URL' --text 'DRAFT_A_TEXT' --style DRAFT_A_STYLE
 Work ONE thread at a time: gate it, draft both texts, persist, next. Failure here is non-fatal, log a warning and continue. Only after EVERY thread is handled do you assemble and return the single result JSON.
 
 ## OUTPUT FORMAT
-Return ONE JSON object with two arrays (a JSON schema is enforced on this session). Both draft_a_text and draft_b_text are REQUIRED for every posts[] entry — write both, under their respective assigned styles above, applying the CRITICAL CONTENT RULES and Content rules to each independently:
+Return ONE JSON object with two arrays (a JSON schema is enforced on this session). Both draft_a_text and draft_b_text are REQUIRED for every posts[] entry — write both, under their respective assigned styles above, applying the DRAFT DIRECTIVE to each independently:
 
 {"posts": [...], "rejects": [...]}
 
@@ -697,8 +680,6 @@ def render_reddit_prompt(ing):
     # whitelisted projects_json; the RD template carries every block the
     # persona directive references (@CORPUS_BLOCK@ = ACCOUNT VOICE CORPUS).
     lane = ing.get("lane") or ""
-
-    from engagement_styles import get_content_rules, get_voice_relationship_rule
 
     top_ctx = ""
     if not skip_top_report(arm):
