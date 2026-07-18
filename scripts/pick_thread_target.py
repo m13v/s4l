@@ -111,6 +111,14 @@ def _ban_entry_to_slug(entry):
     return ""
 
 
+# Reason prefix marking a TIME-LIMITED quarantine entry (written by
+# platform_strike_events.py when a moderator removed one of our original
+# threads). Kept as a literal to avoid importing the heavy post_reddit
+# module; must stay in sync with post_reddit.QUARANTINE_REASON_PREFIX.
+QUARANTINE_REASON_PREFIX = "thread_removed_by_moderation"
+DEFAULT_QUARANTINE_DAYS = 30
+
+
 def load_thread_blocked_subs(config):
     """Load subreddits where we cannot create new threads.
 
@@ -120,13 +128,41 @@ def load_thread_blocked_subs(config):
 
     Handles both ban-list shapes: bare string (pre-2026-05-11) and audit
     dict {"sub": ..., "added_at": ..., "reason": ..., "project": ...}.
+
+    Quarantine expiry (2026-07-19): entries whose reason starts with
+    QUARANTINE_REASON_PREFIX are removal-strike quarantines, not permanent
+    verdicts. They expire after threads.quarantine_days (default 30): once
+    added_at is older than that, the sub becomes eligible again. The retry is
+    calibrated, not blind: the drafting prompt injects the sub's past
+    moderation verdicts (sub_moderation_history.py) so the rules-check step
+    knows exactly why the sub removed us last time. A repeat strike re-arms
+    the clock via mark_thread_blocked's quarantine refresh. Entries with any
+    other reason (or no added_at to age from) stay blocked forever.
     """
     bans = config.get("subreddit_bans") or {}
+    q_days = ((config.get("threads") or {}).get("quarantine_days")
+              if isinstance(config.get("threads"), dict) else None)
+    try:
+        q_days = float(q_days)
+    except (TypeError, ValueError):
+        q_days = DEFAULT_QUARANTINE_DAYS
+    now = datetime.now(timezone.utc)
+
+    def _expired_quarantine(entry) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        if not str(entry.get("reason") or "").startswith(QUARANTINE_REASON_PREFIX):
+            return False
+        added = _parse_dt(entry.get("added_at"))
+        if added is None:
+            return False
+        return (now - added).total_seconds() > q_days * 86400
+
     out = set()
     if isinstance(bans, dict):
         for entry in bans.get("thread_blocked") or []:
             slug = _ban_entry_to_slug(entry)
-            if slug:
+            if slug and not _expired_quarantine(entry):
                 out.add(slug)
     elif isinstance(bans, list):
         # Legacy flat-list form, treat as thread_blocked.
