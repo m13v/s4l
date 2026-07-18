@@ -580,7 +580,7 @@ class S4LMenuBar(rumps.App):
         self._review_unattended_notified = False
         self._review_unattended_captured = False
         # This session's card decisions, for store reconciliation: the MCP
-        # server's post_drafts rewrites the whole review store from a copy read
+        # server's approve_drafts rewrites the whole review store from a copy read
         # before a minutes-long posting run, so a decision stamped mid-drain can
         # be clobbered; the tick re-stamps anything missing (_reconcile_store).
         self._session_decisions = []
@@ -3014,7 +3014,7 @@ class S4LMenuBar(rumps.App):
     def _posting_activity_label_locked(self):
         """Progress for the current menu-bar approval burst.
 
-        The server receives one post_drafts call per approved card, so its native
+        The server receives one approve_drafts call per approved card, so its native
         view is always 1/1. The menu bar owns the burst queue and can show the
         useful progress: current approved post / total approved so far.
         """
@@ -3491,7 +3491,7 @@ class S4LMenuBar(rumps.App):
 
             def _persist_reject():
                 try:
-                    st.post_drafts(batch, reject=[n], timeout=30)
+                    st.approve_drafts(batch, reject=[n], timeout=30)
                 except Exception:
                     pass
 
@@ -3611,7 +3611,7 @@ class S4LMenuBar(rumps.App):
 
         def _persist_discard():
             try:
-                st.post_drafts(batch, reject=ns, timeout=60)
+                st.approve_drafts(batch, reject=ns, timeout=60)
             except Exception:
                 pass
             try:
@@ -3746,7 +3746,7 @@ class S4LMenuBar(rumps.App):
     def _post_worker_loop(self):
         # Serialized poster: one approved card at a time so two posts never drive
         # the shared harness Chrome simultaneously. The menu bar passes a burst
-        # progress label into post_drafts, so the spinner shows e.g. "posting 17/95"
+        # progress label into approve_drafts, so the spinner shows e.g. "posting 17/95"
         # even though each server call is still one approved draft.
         while True:
             batch, decision = self._post_q.get()  # blocks until a card is approved
@@ -3763,7 +3763,7 @@ class S4LMenuBar(rumps.App):
                 # through edits=[...] even with no hand-typed change, so the
                 # candidate's style/assigned_style/assigned_mode switch to
                 # match whichever draft is actually posting (mcp/src/index.ts
-                # post_drafts applies both from the same entry). Without
+                # approve_drafts applies both from the same entry). Without
                 # this, a card where the human accepted the recommended
                 # draft as-is (edited=False) would still need its variant
                 # tag carried through for consistency with a later switch.
@@ -3772,19 +3772,19 @@ class S4LMenuBar(rumps.App):
                     edit = {"n": n, "text": decision.get("text") or ""}
                     if draft_variant:
                         edit["variant"] = draft_variant
-                    res = st.post_drafts(
+                    res = st.approve_drafts(
                         batch,
                         edits=[edit],
                         clear_link=cl,
                         activity_label=activity_label,
                     )
                 else:
-                    res = st.post_drafts(batch, post=[n], clear_link=cl, activity_label=activity_label)
+                    res = st.approve_drafts(batch, post=[n], clear_link=cl, activity_label=activity_label)
                 if res is None:
                     # Loopback unreachable (Claude closed, mid-restart, or an
                     # account switch tore down the old MCP server before a new
                     # one registered). Unlike a real posting failure, nothing
-                    # was ever attempted here — post_drafts never reached a
+                    # was ever attempted here — approve_drafts never reached a
                     # server — so there's no double-post risk in retrying.
                     # Deliberately do NOT call store_mark_post_failed: it would
                     # exclude this card from store_pending_posts(), which is
