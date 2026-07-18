@@ -2911,12 +2911,12 @@ class S4LMenuBar(rumps.App):
         self._channel = snap.get("channel") or "stable"
         self._latest_tag = snap.get("latest_tag")
 
-        # Live pipeline status + next-scanner-run countdown — ONE shared module
+        # Live drafting-pipeline status + next-run countdown — ONE shared module
         # (scripts/live_status.py) the dashboard widget reads via snapshot.py too,
         # so the tray and the widget can't drift. Cheap (two small file reads),
         # computed fresh here rather than off the 4s-cached snap so the countdown
         # stays honest. Best-effort: any failure leaves an empty dict and the menu
-        # simply omits the scanner status/countdown lines.
+        # simply omits the drafting status/countdown lines.
         try:
             import live_status as _live_status
 
@@ -2975,7 +2975,7 @@ class S4LMenuBar(rumps.App):
             # View mode: rebuilds when the review layout changes (checkmark
             # in the "View Mode" submenu + whether the cadence item shows).
             st.read_review_layout(),
-            # Scanner status + countdown (State C): rebuild when the live
+            # Drafting status + countdown (State C): rebuild when the live
             # pipeline verb changes (idle <-> scanning/drafting/posting) and
             # when the next-run countdown crosses a 15s bucket — bucketed so an
             # open menu isn't torn down every second for a -1s tick.
