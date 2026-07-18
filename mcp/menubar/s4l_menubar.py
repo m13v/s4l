@@ -2899,6 +2899,19 @@ class S4LMenuBar(rumps.App):
         self._channel = snap.get("channel") or "stable"
         self._latest_tag = snap.get("latest_tag")
 
+        # Live pipeline status + next-scanner-run countdown — ONE shared module
+        # (scripts/live_status.py) the dashboard widget reads via snapshot.py too,
+        # so the tray and the widget can't drift. Cheap (two small file reads),
+        # computed fresh here rather than off the 4s-cached snap so the countdown
+        # stays honest. Best-effort: any failure leaves an empty dict and the menu
+        # simply omits the scanner status/countdown lines.
+        try:
+            import live_status as _live_status
+
+            self._live = _live_status.compute()
+        except Exception:
+            self._live = {}
+
         # Only rebuild the menu when something user-visible changed, so an open
         # menu isn't torn down under the user's cursor every poll.
         done = (
@@ -2950,6 +2963,14 @@ class S4LMenuBar(rumps.App):
             # View mode: rebuilds when the review layout changes (checkmark
             # in the "View Mode" submenu + whether the cadence item shows).
             st.read_review_layout(),
+            # Scanner status + countdown (State C): rebuild when the live
+            # pipeline verb changes (idle <-> scanning/drafting/posting) and
+            # when the next-run countdown crosses a 15s bucket — bucketed so an
+            # open menu isn't torn down every second for a -1s tick.
+            self._live.get("activity_state", "idle"),
+            (self._live.get("next_run_secs") // 15)
+            if isinstance(self._live.get("next_run_secs"), int)
+            else None,
         )
         if sig != self._sig:
             self._sig = sig
@@ -4066,6 +4087,33 @@ class S4LMenuBar(rumps.App):
             items += self._state_b(ob, blocker)
         else:
             items += self._state_c(snap, pending_count)
+            # Scanner controls (post-setup, every State-C menu regardless of
+            # pending drafts): a live status/countdown line + a one-click "Run
+            # scan now". The scanner is the cycle that drives the whole
+            # pipeline; these mirror the same controls on the dashboard widget,
+            # both reading scripts/live_status.py so the surfaces can't drift.
+            live = getattr(self, "_live", {}) or {}
+            act_state = live.get("activity_state", "idle")
+            items.append(rumps.separator)
+            if act_state in ("scanning", "drafting", "posting"):
+                _verb = {"scanning": "Scanning", "drafting": "Drafting", "posting": "Posting"}[act_state]
+                items.append(self._label(f"⟳ {_verb} now…"))
+            else:
+                _secs = live.get("next_run_secs")
+                if isinstance(_secs, int):
+                    items.append(self._label(f"Next scan in {self._fmt_countdown(_secs)}"))
+                else:
+                    items.append(self._label("Next scan within a minute"))
+            # Run now is disabled (shown as a plain label) while paused — the
+            # kicker is unloaded, so nothing would run — or while a scan is
+            # already in flight, where launchd would just no-op the single
+            # instance.
+            if os.path.exists(PAUSE_FLAG):
+                items.append(self._label("Run scan now (paused)"))
+            elif act_state == "scanning":
+                items.append(self._label("Run scan now (already scanning)"))
+            else:
+                items.append(rumps.MenuItem("Run scan now", callback=self._scan_now))
 
         # Engagement lanes — ALWAYS visible (every state), not just post-setup, so
         # the user can see + flip either lane any time. Two INDEPENDENT checkmarks
@@ -4204,6 +4252,44 @@ class S4LMenuBar(rumps.App):
         item = rumps.MenuItem(text)
         item.set_callback(None)
         return item
+
+    @staticmethod
+    def _fmt_countdown(secs):
+        """Compact 'Ns' / 'm:ss' for the next-scan countdown line."""
+        try:
+            s = max(0, int(secs))
+        except Exception:
+            return "under a minute"
+        if s < 60:
+            return f"{s}s"
+        return f"{s // 60}:{s % 60:02d}"
+
+    def _scan_now(self, _=None):
+        """Fire ONE scanner cycle immediately by kickstarting the launchd kicker
+        (com.m13v.social-twitter-cycle). Same mechanism the MCP's scan_now tool
+        and the first-run onboarding kick use — the job runs THROUGH launchd with
+        its full baked env + singleton lock, so it is NOT a bare hand-run of the
+        cycle. Done directly here (not via the loopback tool) so it works even
+        when Claude Desktop / the MCP server is closed. Best-effort + off the UI
+        thread so a slow launchctl never freezes the tray."""
+        def work():
+            try:
+                r = subprocess.run(
+                    ["launchctl", "kickstart", f"gui/{os.getuid()}/{TWITTER_CYCLE_LABEL}"],
+                    capture_output=True,
+                    timeout=15,
+                )
+                if r.returncode == 0:
+                    self._notify("S4L", "Scanning now — new drafts land in a few minutes.")
+                else:
+                    self._notify("S4L", "Couldn’t start the scanner. Try again in a moment.")
+            except Exception:
+                self._notify("S4L", "Couldn’t start the scanner. Try again in a moment.")
+            # Repaint promptly so the status line flips to "Scanning now…" without
+            # waiting for the next natural rebuild.
+            self._sig = None
+
+        threading.Thread(target=work, daemon=True).start()
 
     # State A — runtime not installed yet.
     def _state_a(self):
