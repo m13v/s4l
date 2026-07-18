@@ -35,6 +35,7 @@ except Exception:
     _fgl = None
 from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E402
 from project_topics import topics_for_project  # noqa: E402
+from virality import age_decay as _shared_age_decay, TWITTER_HALF_LIFE_HOURS  # noqa: E402
 
 
 # Freshness window (in hours) for the expire-stale gate that flips stale
@@ -160,7 +161,9 @@ def calculate_virality_score(tweet):
 
     # 6. Age decay: half-life of 6 hours (softened from 3h)
     # 3h = 71%, 6h = 50%, 12h = 25%, 18h = 12.5%
-    age_decay = math.exp(-0.1155 * age_hours)  # ln(2)/6
+    # Shared with the Reddit scorer (scripts/virality.py, 2026-07-18); only
+    # the half-life differs (6h here vs 7 days there).
+    age_decay = _shared_age_decay(age_hours, TWITTER_HALF_LIFE_HOURS)
 
     # 7. Retweet ratio bonus
     rt_bonus = 1.0 + min(rt_ratio * 2, 1.0)  # up to 2x for high RT ratio
