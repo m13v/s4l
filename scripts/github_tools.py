@@ -91,9 +91,10 @@ def _save_repo_gone_cache(cache):
 
 
 def _fetch_repo_state(owner, repo, _mem={}, _disk={"loaded": False, "data": {}}):
-    """Fetch and cache (gone, has_issues, has_discussions) for owner/repo.
-    Two-tier cache (in-process + 24h on-disk JSON). Returns a dict
-    {gone: bool, has_issues: bool, has_discussions: bool}."""
+    """Fetch and cache (gone, has_issues, has_discussions, stars) for
+    owner/repo. Two-tier cache (in-process + 24h on-disk JSON). Returns a dict
+    {gone: bool, has_issues: bool, has_discussions: bool, stars: int|None}.
+    stars is None when the repo payload was unavailable (404, network)."""
     key = f"{owner}/{repo}".lower()
     if key in _mem:
         return _mem[key]
@@ -103,11 +104,12 @@ def _fetch_repo_state(owner, repo, _mem={}, _disk={"loaded": False, "data": {}})
     entry = _disk["data"].get(key)
     now = int(time.time())
     if (entry and (now - int(entry.get("checked_at", 0))) < _REPO_GONE_TTL_SEC
-            and "has_issues" in entry):
+            and "has_issues" in entry and "stars" in entry):
         state = {
             "gone": bool(entry.get("gone")),
             "has_issues": bool(entry.get("has_issues", True)),
             "has_discussions": bool(entry.get("has_discussions", True)),
+            "stars": entry.get("stars"),
         }
         _mem[key] = state
         return state
@@ -117,7 +119,8 @@ def _fetch_repo_state(owner, repo, _mem={}, _disk={"loaded": False, "data": {}})
             capture_output=True, text=True, timeout=20,
         )
     except Exception:
-        state = {"gone": False, "has_issues": True, "has_discussions": True}
+        state = {"gone": False, "has_issues": True, "has_discussions": True,
+                 "stars": None}
         _mem[key] = state
         return state
     if proc.returncode == 0:
@@ -125,20 +128,27 @@ def _fetch_repo_state(owner, repo, _mem={}, _disk={"loaded": False, "data": {}})
             data = json.loads(proc.stdout or "{}")
         except Exception:
             data = {}
+        try:
+            stars = int(data.get("stargazers_count"))
+        except (TypeError, ValueError):
+            stars = None
         state = {
             "gone": False,
             "has_issues": bool(data.get("has_issues", True)),
             "has_discussions": bool(data.get("has_discussions", True)),
+            "stars": stars,
         }
     else:
         err = ((proc.stderr or "") + (proc.stdout or "")).lower()
         gone = ("not found" in err or "http 404" in err)
-        state = {"gone": gone, "has_issues": True, "has_discussions": True}
+        state = {"gone": gone, "has_issues": True, "has_discussions": True,
+                 "stars": None}
     _mem[key] = state
     _disk["data"][key] = {
         "gone": state["gone"],
         "has_issues": state["has_issues"],
         "has_discussions": state["has_discussions"],
+        "stars": state["stars"],
         "checked_at": now,
     }
     _save_repo_gone_cache(_disk["data"])
