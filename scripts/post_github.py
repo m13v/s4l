@@ -1261,8 +1261,8 @@ def main():
             relevance_dropped.append({
                 "url": d.get("thread_url", ""),
                 "reason": (
-                    f"low_relevance (relevance={rel}, "
-                    f"rationale={(d.get('relevance_rationale') or '').strip()[:120]})"
+                    f"low_relevance: relevance={rel}, "
+                    f"rationale={(d.get('relevance_rationale') or '').strip()[:120]}"
                 ),
             })
         else:
