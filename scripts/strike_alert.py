@@ -700,6 +700,10 @@ def _next_steps(platform):
             "   pattern. Watch the 'moderated here in last 90 days' count: a\n"
             "   rising count on a not-yet-banned sub is an early bad-fit signal.\n"
         )
+    try:
+        from github_tools import DYNAMIC_BLOCK_THRESHOLD as _thr
+    except Exception:
+        _thr = "N"
     return (
         "--- Next steps ---\n"
         "1. Inspect the thread to see if the comment was deleted, hidden,\n"
@@ -708,7 +712,7 @@ def _next_steps(platform):
         "   config.json -> exclusions.github_repos. Owner-level entries\n"
         "   match all repos under that owner.\n"
         "3. The auto-blocklist (github_tools._dynamic_owner_blocklist)\n"
-        "   already covers any owner with >=2 strikes in 90 days.\n"
+        f"   already covers any owner with >={_thr} real strikes in 90 days.\n"
     )
 
 
