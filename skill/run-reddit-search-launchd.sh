@@ -40,6 +40,7 @@ ERR="$LOG_DIR/launchd-reddit-search-stderr.log"
 # See scripts/preflight.sh for full design.
 SA_PREFLIGHT_SCRIPT="run-reddit-search"
 source "$REPO_DIR/scripts/preflight.sh"
+preflight_skip_if_paused
 preflight_skip_if_claude_blocked
 preflight_skip_if_jetsam_pressure
 
