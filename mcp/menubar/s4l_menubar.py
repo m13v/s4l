@@ -291,10 +291,10 @@ STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
 # pauseFlagPath() in mcp/src/index.ts.
 PAUSE_FLAG = os.path.join(st.state_dir(), "paused.flag")
 
-# The launchd kicker label for the scanner (the twitter scan+draft cycle). "Run
-# scan now" kickstarts it directly — Claude-independent, so it works even when
-# the MCP server / Desktop is closed. Keep in sync with TWITTER_AUTOPILOT_LABEL
-# in mcp/src/index.ts.
+# The launchd kicker label for the drafting pipeline (the twitter cycle: scan,
+# then draft). "Run drafting now" kickstarts it directly — Claude-independent, so
+# it works even when the MCP server / Desktop is closed. Keep in sync with
+# TWITTER_AUTOPILOT_LABEL in mcp/src/index.ts.
 TWITTER_CYCLE_LABEL = "com.m13v.social-twitter-cycle"
 
 # Autopilot scheduled tasks. Queue workers must RUN in a dedicated folder
@@ -4099,33 +4099,36 @@ class S4LMenuBar(rumps.App):
             items += self._state_b(ob, blocker)
         else:
             items += self._state_c(snap, pending_count)
-            # Scanner controls (post-setup, every State-C menu regardless of
-            # pending drafts): a live status/countdown line + a one-click "Run
-            # scan now". The scanner is the cycle that drives the whole
-            # pipeline; these mirror the same controls on the dashboard widget,
-            # both reading scripts/live_status.py so the surfaces can't drift.
+            # Drafting-pipeline controls (post-setup, every State-C menu
+            # regardless of pending drafts): a live status/countdown line + a
+            # one-click "Run drafting now". The pipeline scans first, then hands
+            # off to the drafter; these mirror the same controls on the dashboard
+            # widget, both reading scripts/live_status.py so the surfaces can't
+            # drift. The live phase readout (Scanning/Drafting/Posting) is the
+            # honest current stage of that pipeline.
             live = getattr(self, "_live", {}) or {}
             act_state = live.get("activity_state", "idle")
+            running = act_state in ("scanning", "drafting", "posting")
             items.append(rumps.separator)
-            if act_state in ("scanning", "drafting", "posting"):
+            if running:
                 _verb = {"scanning": "Scanning", "drafting": "Drafting", "posting": "Posting"}[act_state]
                 items.append(self._label(f"⟳ {_verb} now…"))
             else:
                 _secs = live.get("next_run_secs")
                 if isinstance(_secs, int):
-                    items.append(self._label(f"Next scan in {self._fmt_countdown(_secs)}"))
+                    items.append(self._label(f"Next drafting run in {self._fmt_countdown(_secs)}"))
                 else:
-                    items.append(self._label("Next scan within a minute"))
+                    items.append(self._label("Next drafting run within a minute"))
             # Run now is disabled (shown as a plain label) while paused — the
-            # kicker is unloaded, so nothing would run — or while a scan is
+            # kicker is unloaded, so nothing would run — or while a run is
             # already in flight, where launchd would just no-op the single
             # instance.
             if os.path.exists(PAUSE_FLAG):
-                items.append(self._label("Run scan now (paused)"))
-            elif act_state == "scanning":
-                items.append(self._label("Run scan now (already scanning)"))
+                items.append(self._label("Run drafting now (paused)"))
+            elif running:
+                items.append(self._label("Run drafting now (already running)"))
             else:
-                items.append(rumps.MenuItem("Run scan now", callback=self._scan_now))
+                items.append(rumps.MenuItem("Run drafting now", callback=self._run_drafting))
 
         # Engagement lanes — ALWAYS visible (every state), not just post-setup, so
         # the user can see + flip either lane any time. Two INDEPENDENT checkmarks
@@ -4276,14 +4279,15 @@ class S4LMenuBar(rumps.App):
             return f"{s}s"
         return f"{s // 60}:{s % 60:02d}"
 
-    def _scan_now(self, _=None):
-        """Fire ONE scanner cycle immediately by kickstarting the launchd kicker
-        (com.m13v.social-twitter-cycle). Same mechanism the MCP's scan_now tool
-        and the first-run onboarding kick use — the job runs THROUGH launchd with
-        its full baked env + singleton lock, so it is NOT a bare hand-run of the
-        cycle. Done directly here (not via the loopback tool) so it works even
-        when Claude Desktop / the MCP server is closed. Best-effort + off the UI
-        thread so a slow launchctl never freezes the tray."""
+    def _run_drafting(self, _=None):
+        """Run the drafting pipeline ONE time immediately by kickstarting the
+        launchd kicker (com.m13v.social-twitter-cycle). Same mechanism the MCP's
+        run_drafting tool and the first-run onboarding kick use — the job runs
+        THROUGH launchd with its full baked env + singleton lock, so it is NOT a
+        bare hand-run of the cycle. Done directly here (not via the loopback tool)
+        so it works even when Claude Desktop / the MCP server is closed.
+        Best-effort + off the UI thread so a slow launchctl never freezes the
+        tray."""
         def work():
             try:
                 r = subprocess.run(
@@ -4292,11 +4296,11 @@ class S4LMenuBar(rumps.App):
                     timeout=15,
                 )
                 if r.returncode == 0:
-                    self._notify("S4L", "Scanning now — new drafts land in a few minutes.")
+                    self._notify("S4L", "Drafting started — new drafts land in a few minutes.")
                 else:
-                    self._notify("S4L", "Couldn’t start the scanner. Try again in a moment.")
+                    self._notify("S4L", "Couldn’t start drafting. Try again in a moment.")
             except Exception:
-                self._notify("S4L", "Couldn’t start the scanner. Try again in a moment.")
+                self._notify("S4L", "Couldn’t start drafting. Try again in a moment.")
             # Repaint promptly so the status line flips to "Scanning now…" without
             # waiting for the next natural rebuild.
             self._sig = None
