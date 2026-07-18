@@ -1204,7 +1204,7 @@ def _prefetch_thread_digests(candidates, reddit_username=None):
 
 def build_draft_prompt(project, config, candidates, top_report, recent_comments,
                        style_assignment_a=None, style_assignment_b=None, digests=None,
-                       batch_id=None, recent_self=""):
+                       batch_id=None, recent_self="", lane=""):
     """DRAFT phase: assemble reddit ingredients, render via draft_prompt_core.
 
     The prompt TEXT lives in scripts/draft_prompt_core.py, the single source
@@ -1275,6 +1275,11 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
         "style_a_name": (style_assignment_a or {}).get("style") or "style_name",
         "style_b_name": (style_assignment_b or {}).get("style") or "style_name",
         "recent_self_block": recent_self or "",
+        # personal_brand renders the persona directive + persona-whitelisted
+        # project JSON in draft_prompt_core; comes from the plan stamp (see
+        # _discover_iteration), NEVER from env — salvage plans predate this
+        # cycle's lane and must keep the promotion directive.
+        "lane": lane or "",
     }
     return _dpc.render_reddit_prompt(ing)
 
@@ -1992,15 +1997,24 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     builds the query bank and runs reddit_tools.cmd_search directly; no Claude
     session). Uses `decisions` key for downstream-phase compatibility.
     """
-    if args.project:
+    # Force-inject (2026-07-17): --project (manual MCP runs) or S4L_FORCE_PROJECT
+    # (the personal_brand lane's env, set by s4l_mode.py via the wrapper's eval)
+    # bypasses pick_project entirely. This is the ONLY way a persona:true entry
+    # can be selected — pick_project structurally excludes personas. Mirrors
+    # run-twitter-cycle.sh's S4L_FORCE_PROJECT handling.
+    force_project = args.project or (os.environ.get("S4L_FORCE_PROJECT") or "").strip()
+    if force_project:
         project = None
         for p in config.get("projects", []):
-            if p["name"].lower() == args.project.lower():
+            if p["name"].lower() == force_project.lower():
                 project = p
                 break
         if not project:
-            print(f"[post_reddit] ERROR: project '{args.project}' not found")
+            print(f"[post_reddit] ERROR: project '{force_project}' not found")
             return None
+        if not args.project:
+            print(f"[post_reddit] force-inject: S4L_FORCE_PROJECT={force_project} "
+                  f"(lane={os.environ.get('S4L_ACTIVE_LANE') or 'promotion'})")
     else:
         project = pick_project("reddit", exclude=already_picked)
         if not project:
@@ -2259,8 +2273,19 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # batch_id rides the plan file into --phase draft (snapshot filename,
     # top_performers --invoked-by, proposed_excludes activation gate). Same
     # reason as the salvage plan's batch_id above.
+    #
+    # lane (2026-07-17): stamped ONCE here, at the assignment point (discover
+    # runs inside the cycle process where s4l_mode.py's per-cycle coin flip
+    # exported S4L_ACTIVE_LANE). Downstream readers (_draft_iteration →
+    # render_reddit_prompt) take the lane from the PLAN, never from env, so
+    # salvage plans from earlier cycles and the env-less MCP approval poster
+    # can't inherit this cycle's lane by accident. Same stamp-at-source
+    # convention as active_experiments (see CLAUDE.md).
     return {"project_name": project_name, "decisions": selected,
             "batch_id": queue_batch,
+            "lane": ("personal_brand"
+                     if os.environ.get("S4L_ACTIVE_LANE") == "personal_brand"
+                     else "promotion"),
             "cost": 0.0, "session_id": None,
             "phase": "discover"}
 
@@ -2434,7 +2459,8 @@ def _draft_iteration(plan, config, reddit_username):
                                 style_assignment_a=style_assignment_a,
                                 style_assignment_b=style_assignment_b, digests=digests,
                                 batch_id=plan.get("batch_id"),
-                                recent_self=_recent_self)
+                                recent_self=_recent_self,
+                                lane=plan.get("lane") or "")
     # Durable full-prompt record per batch (same prep-prompts dir the X
     # cycle writes; reddit-draft-prompt-<batch>.md, newest 50 kept), so
     # prompt-block presence is verifiable after any release.
@@ -2654,6 +2680,23 @@ def _post_iteration(plan, reddit_username):
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     active_campaigns = load_active_reddit_campaigns()
+    # Persona posts never carry a product campaign suffix (2026-07-17): the
+    # reddit analog of the X lane's TWITTER_TAIL_LINK_RATE=0. Resolved from
+    # config (persona:true on the plan's project), NOT from lane env — the
+    # MCP approval poster runs env-less, and config is the durable truth.
+    if active_campaigns:
+        _plan_proj = (plan.get("project_name") or "").lower()
+        try:
+            _is_persona = any(
+                p.get("persona") is True and (p.get("name") or "").lower() == _plan_proj
+                for p in (load_config().get("projects") or [])
+            )
+        except Exception:
+            _is_persona = False
+        if _is_persona:
+            print(f"[post_reddit] persona project {_plan_proj!r}: campaign "
+                  f"suffixes disabled for this plan")
+            active_campaigns = []
     if active_campaigns:
         for c in active_campaigns:
             print(f"[post_reddit] active campaign id={c['id']} "
