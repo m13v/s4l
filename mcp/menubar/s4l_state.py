@@ -90,20 +90,40 @@ def state_dir() -> str:
 # to the MCP: this needs to work from BOTH the menu bar (s4l_menubar.py) and
 # the Claude-independent dashboard_server.py, which share this process but
 # are a different process from the MCP server, so there's no way to delegate
-# to mcp/src/index.ts's pauseS4L/resumeS4L here. Mirrors those functions
-# (same 4 labels, same flag path) for the common pause->resume case. What it
-# deliberately does NOT do: mcp/src/index.ts's resumeS4L also re-runs the
-# readiness-gated install logic (persona/project/X-verified checks, content-
-# aware plist rewrite) via ensure*Installed() — that only matters for a box
-# that was never fully set up before Pause, an edge case the next Claude
-# boot / project_config call naturally heals once unpaused. This resume just
-# reloads the exact plists Pause unloaded (Pause never deletes anything).
+# to mcp/src/index.ts's pauseS4L/resumeS4L here. The label SET is not
+# duplicated though: index.ts's PAUSE_TARGETS registry is the single source of
+# truth, mirrored to <state>/pause-targets.json at every MCP boot and
+# pause/resume; pause_target_labels() reads that manifest, so a pipeline daemon
+# added to the registry reaches this button without touching this file.
+# PAUSE_TARGET_LABELS below is only the fallback for a box whose MCP has never
+# written the manifest. What this resume deliberately does NOT do:
+# mcp/src/index.ts's resumeS4L also re-runs the readiness-gated install logic
+# (persona/project/X-verified checks, content-aware plist rewrite) via
+# ensure*Installed() — that only matters for a box that was never fully set up
+# before Pause, an edge case the next Claude boot / project_config call
+# naturally heals once unpaused. This resume just reloads the exact plists
+# Pause unloaded (Pause never deletes anything).
 PAUSE_TARGET_LABELS = (
     AUTOPILOT_LABEL,
+    "com.m13v.social-reddit-search",
     "com.m13v.social-claude-reaper",
     "com.m13v.social-autopilot-stall-watch",
     "com.m13v.social-memory-snapshot",
 )
+
+
+def pause_target_labels() -> tuple:
+    try:
+        data = json.loads((Path(state_dir()) / "pause-targets.json").read_text())
+        labels = tuple(
+            l for l in data.get("labels", [])
+            if isinstance(l, str) and l.startswith("com.m13v.")
+        )
+        if labels:
+            return labels
+    except Exception:
+        pass
+    return PAUSE_TARGET_LABELS
 
 
 def pause_flag_path() -> str:
@@ -125,7 +145,7 @@ def pause_s4l() -> dict:
         return {"ok": False, "paused": is_paused(), "detail": f"could not write pause flag: {e}"}
     uid = os.getuid()
     results = []
-    for label in PAUSE_TARGET_LABELS:
+    for label in pause_target_labels():
         try:
             subprocess.run(
                 ["launchctl", "bootout", f"gui/{uid}/{label}"],
@@ -147,7 +167,7 @@ def resume_s4l() -> dict:
     uid = os.getuid()
     la_dir = str(Path.home() / "Library" / "LaunchAgents")
     results = []
-    for label in PAUSE_TARGET_LABELS:
+    for label in pause_target_labels():
         plist = os.path.join(la_dir, f"{label}.plist")
         if not os.path.exists(plist):
             results.append(f"{label}: no plist, skip")
