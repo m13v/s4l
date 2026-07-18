@@ -89,6 +89,12 @@ interface Snapshot {
   // Claude Desktop, the tray, and X connection untouched. Drives the header
   // Pause switch; undefined = unknown = render as running (no false nag).
   paused?: boolean;
+  // Live scanner status + next-run countdown (scripts/live_status.py, polled via
+  // the scan_status tool). activity_state is the pipeline verb the menu-bar
+  // spinner narrates; next_run_secs is the seconds until the next scanner run.
+  activity_state?: "scanning" | "drafting" | "posting" | "idle";
+  activity_label?: string;
+  next_run_secs?: number | null;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -125,6 +131,9 @@ const onboardingBlocker = $("onboarding-blocker");
 const onboardingCount = $("onboarding-count");
 const onboardingBarFill = $("onboarding-bar-fill");
 const liveCard = $("live-card");
+const scannerCard = $("scanner-card");
+const scannerStatus = $("scanner-status");
+const btnScanNow = $("btn-scan-now") as HTMLButtonElement;
 const statsCard = $("stats-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
@@ -378,7 +387,89 @@ function render() {
   // Project settings is available as soon as the runtime exists: it's how the
   // user inspects (and fixes) what's saved, including a half-finished project.
   settingsCard.hidden = needsRuntime;
+
+  renderScanner();
 }
+
+// ---- scanner status + next-run countdown ----------------------------------
+// The scanner (the twitter cycle) drives the whole pipeline. We show what it's
+// doing right now (scanning/drafting/posting — the same signal the menu-bar
+// spinner narrates) or a live countdown to the next run, plus a Run-now button.
+// The countdown ticks client-side off a locally-anchored deadline so it stays
+// smooth without a per-second server round-trip and is immune to client/server
+// clock skew: each scan_status poll re-anchors nextScanAtMs = now +
+// next_run_secs*1000. A 1s ticker repaints just this line between the 5s polls.
+let nextScanAtMs: number | null = null;
+
+const ACTIVITY_VERB: Record<string, string> = {
+  scanning: "Scanning",
+  drafting: "Drafting",
+  posting: "Posting",
+};
+
+function fmtCountdown(secs: number): string {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function renderScanner() {
+  if (!state) return;
+  const setupComplete = isSetupComplete(state);
+  scannerCard.hidden = !setupComplete;
+  if (!setupComplete) return;
+
+  const act = state.activity_state || "idle";
+  const paused = state.paused === true;
+  const scanning = act === "scanning";
+  const verb = ACTIVITY_VERB[act];
+
+  // Run-now is disabled while paused (the kicker is unloaded, nothing would run)
+  // or while a scan is already in flight (launchd no-ops the single instance).
+  btnScanNow.disabled = paused || scanning;
+
+  if (verb) {
+    scannerStatus.textContent = `⟳ ${verb} now…`;
+  } else if (paused) {
+    scannerStatus.textContent = "Paused — resume S4L to run the scanner.";
+  } else if (nextScanAtMs != null) {
+    const remaining = (nextScanAtMs - Date.now()) / 1000;
+    scannerStatus.textContent =
+      remaining > 0 ? `Next scan in ${fmtCountdown(remaining)}` : "Next scan any moment…";
+  } else {
+    scannerStatus.textContent = "Next scan within a minute";
+  }
+}
+
+// Pure read the widget polls to keep the scanner status + countdown live. Merges
+// the fields into state (re-rendering) and re-anchors the client-side countdown.
+async function pollScanStatus() {
+  if (!state || !isSetupComplete(state)) return;
+  try {
+    const s = await call("scan_status");
+    if (!s || typeof s !== "object") return;
+    applyState({
+      activity_state: s.activity_state,
+      activity_label: s.activity_label,
+      next_run_secs: typeof s.next_run_secs === "number" ? s.next_run_secs : null,
+      ...(typeof s.paused === "boolean" ? { paused: s.paused } : {}),
+    });
+    nextScanAtMs =
+      typeof s.next_run_secs === "number" ? Date.now() + s.next_run_secs * 1000 : null;
+  } catch {
+    /* best-effort: a failed poll just leaves the last countdown ticking */
+  }
+}
+
+// 1s ticker: repaint only the countdown line (cheap) so it counts down smoothly
+// between the 5s polls. 5s poll: refresh the live status + re-anchor. Both skip
+// while the tab is hidden or setup isn't complete (nothing to show).
+setInterval(() => {
+  if (!document.hidden && state && isSetupComplete(state)) renderScanner();
+}, 1000);
+setInterval(() => {
+  if (!document.hidden) void pollScanStatus();
+}, 5000);
 
 function applyState(snap: Partial<Snapshot>) {
   state = { ...(state || {} as Snapshot), ...snap } as Snapshot;
