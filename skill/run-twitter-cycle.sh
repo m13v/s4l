@@ -1741,7 +1741,7 @@ fi
 # scan_candidates tool reads this so a Claude Desktop scheduled-task session can do
 # the drafting ITSELF (on the user's plan, no `claude -p`) and hand the drafts back
 # via submit_drafts. Candidates stay 'pending' (drafted+posted via submit_drafts ->
-# post_drafts, or salvaged by a later cycle). The browser lock was already released
+# approve_drafts, or salvaged by a later cycle). The browser lock was already released
 # at the Phase 1 handoff, so this exits clean via the EXIT trap. NO current caller
 # sets SCAN_ONLY, so the autopilot/draft_cycle paths are byte-for-byte unchanged.
 if [ "${SCAN_ONLY:-0}" = "1" ]; then
