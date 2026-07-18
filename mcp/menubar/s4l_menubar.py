@@ -1379,7 +1379,9 @@ class S4LMenuBar(rumps.App):
                 "S4L posting volume",
                 f"Posting volume: {self._posting_mode_label(stored)}. Applies from the next cycle.",
             )
-        except Exception as e:
+        except (Exception, SystemExit) as e:
+            # http_api raises SystemExit on terminal network failure; it must
+            # not escape a rumps menu callback.
             sys.stderr.write(f"[s4l-menubar] posting-mode write failed: {e}\n")
             sys.stderr.flush()
             self._notify(
