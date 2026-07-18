@@ -80,7 +80,7 @@ def print(*args, **kwargs):  # noqa: A001 -- deliberate builtins.print shadow
         _neuter_stream(sys.stderr)
 
 
-# Graceful SIGTERM: the MCP post_drafts timeout (and anything else that asks
+# Graceful SIGTERM: the MCP approve_drafts timeout (and anything else that asks
 # nicely before SIGKILL) sends SIGTERM. Dying instantly reopens the same
 # posted-but-unrecorded window as the broken pipe, so instead flag the loop to
 # stop at the next candidate boundary: current candidate finishes its
@@ -617,7 +617,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # BEFORE the DRAFT_ONLY gate for every candidate, so both the review-card
     # path and the autonomous-post path already carry a stamped
     # tail_link_variant + finalized reply_text by the time they reach here.
-    # Post time is a bad fit for the queue-backed Claude call: post_drafts is
+    # Post time is a bad fit for the queue-backed Claude call: approve_drafts is
     # a synchronous MCP call the user is actively waiting on after clicking
     # Approve, while the s4l-worker scheduled task claims one job per minute
     # and doesn't overlap a multi-minute drafting turn, so a queue-routed call
@@ -1127,7 +1127,7 @@ def main() -> int:
 
     posted = skipped = failed = 0
     # Per-candidate outcome rows for the summary JSON. The MCP layer
-    # (mcp/src/index.ts post_drafts) prefers summary.candidate_results over
+    # (mcp/src/index.ts approve_drafts) prefers summary.candidate_results over
     # regex-parsing our stdout; this is the authoritative channel that marks
     # review-queue cards posted/terminal so a card is never re-fed to a poster
     # after its reply already landed (2026-07-06 duplicate-retry incident).
@@ -1262,7 +1262,7 @@ def main() -> int:
                 # (assigned_style, assigned_mode) reflecting whichever draft is
                 # actually posting, either the recommended one (stamped at
                 # plan-write time) or the other one (stamped by the MCP
-                # post_drafts edits path when a human switched drafts on the
+                # approve_drafts edits path when a human switched drafts on the
                 # review card). Without this, every card would coerce back to
                 # ONE cycle-wide style even when it posted under the other
                 # style, silently corrupting the engagement_style label the
