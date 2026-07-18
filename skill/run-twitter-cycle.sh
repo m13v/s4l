@@ -1702,26 +1702,15 @@ if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
     VIRALITY_THRESHOLD=""
     log "Virality bar OFF for sandbox mode (would reflect the operator's own pool, not the replayed install's; every model-approved draft stays visible)."
 else
-    VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.99" \
-        S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
-        S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
-        python3 -c "
-import os, sys
-_repo = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
-sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.join(_repo, 'scripts'))
-from http_api import api_get
-try:
-    r = api_get('/api/v1/twitter-candidates/virality-threshold',
-                {'pctile': os.environ['S4L_VPCTILE'], 'hours': 24})
-    d = (r or {}).get('data') or {}
-    thr = d.get('threshold')
-    n = int(d.get('sample_count') or 0)
-    mn = int(os.environ['S4L_VMIN'])
-    if thr is not None and n >= mn:
-        print(f'{float(thr):.4f}')
-except BaseException as e:
-    sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
-" 2>>"$LOG_FILE" || echo "")
+    # Fetch via the SHARED bar helper (scripts/virality.py, 2026-07-18): one
+    # implementation for both the X and Reddit bars. Prints the threshold, or
+    # nothing when the bar is OFF (cold start / thin pool / fetch failure);
+    # always exits 0, so `|| echo ""` only covers a python3 launch failure.
+    VIRALITY_THRESHOLD=$(python3 "$REPO_DIR/scripts/virality.py" bar \
+        --platform twitter \
+        --pctile 0.99 \
+        --min-sample "${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+        --hours 24 2>>"$LOG_FILE" || echo "")
     if [ -n "$VIRALITY_THRESHOLD" ]; then
         log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
     else
