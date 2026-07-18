@@ -304,10 +304,14 @@ def tick_stats(window_s: int = 3600, glob_pattern: str | None = None) -> dict:
     per-minute fires the host SKIPPED inside the last window_s (the registry's
     recordedSkips ledger — under the Desktop warm-session wedge these carry
     reason per_task_limit) plus the age of the newest successful run. Powers the
-    menu bar's non-alarm "scheduler degraded" detail line when compute() returns
-    'stalled'. NEVER a health verdict on its own: a box skipping 80% of ticks
-    can still drain every job (jobs arrive ~every 8 min vs 60 fires/hr), which
-    is exactly why tick staleness stopped driving the attention ⚠ (2026-07-09).
+    menu bar's non-alarm scheduler detail line when compute() returns
+    'stalled', and (2026-07-17) the menubar's scheduler-wedge ⚠ escalation:
+    last_run_age_s past SCHED_WEDGE_ESCALATION_SECONDS with skips_in_window at
+    or above SCHED_WEDGE_MIN_SKIPS proves a persistent, awake wedge. Staleness
+    ALONE is never a verdict: a box skipping 80% of ticks can still drain every
+    job (jobs arrive ~every 8 min vs 60 fires/hr), which is exactly why raw
+    tick staleness stopped driving the attention ⚠ (2026-07-09) — the skip
+    count is what separates "wedged while awake" from "lid closed".
     Same account scoping as compute(); pass glob_pattern only for tests."""
     patterns = [glob_pattern] if glob_pattern is not None else _active_registry_glob_patterns()
     now = time.time()
