@@ -454,7 +454,19 @@ except Exception:
 # one tick_stats refresh (≤60s). The 2026-07-09 flapping regime (83% skips with
 # runs still landing every few minutes) stays quiet forever: signal 1 never
 # accumulates.
-SCHED_WEDGE_ESCALATION_SECONDS = 1800
+#
+# Thresholds are BACKTESTED, not guessed (2026-07-17, 12.2 days of operator-box
+# history: 9,576 worker sessions + 27,192 recordedSkips replayed per-minute).
+# Real no-fire outages split cleanly into two bands: transient ones (36-41 min,
+# self-recovered before a human could act) and true wedges (62 min to 6.4 h).
+# 45 min sits in the empty gap between the bands: the backtest alarms on all
+# four true wedges, zero transient blips, zero alarms across every healthy
+# hour (worst healthy fire-gap observed: 17 min), and both machine-asleep
+# multi-hour gaps stayed quiet on the zero-skips guard. At 30 min the two
+# transient blips produced 5-6 min nuisance alarms. Retune only with a fresh
+# replay (scripts in the 2026-07-17 session; data = worker-transcript mtimes
+# + registry recordedSkips).
+SCHED_WEDGE_ESCALATION_SECONDS = 2700
 SCHED_WEDGE_MIN_SKIPS = 20
 
 # A poll can read a transient "not stuck" moment (e.g. the activity file
