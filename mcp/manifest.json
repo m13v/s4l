@@ -33,7 +33,7 @@
       "description": "Configure or edit a project"
     },
     {
-      "name": "post_drafts",
+      "name": "approve_drafts",
       "description": "Post chosen drafts"
     },
     {
