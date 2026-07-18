@@ -3843,6 +3843,34 @@ tool(
   }
 );
 
+// ---- scan_status: live pipeline status + next-scanner-run countdown --------
+// A cheap, pure READ the dashboard widget polls (~5s) to keep its scanner status
+// pill + countdown live between heavier snapshot refreshes. Returns the SAME
+// fields the menu bar renders (scripts/live_status.py — activity_state,
+// next_run_secs, …), plus `paused`, so the two surfaces can't drift. No side
+// effects: safe to poll and to replay over the loopback /tool/ endpoint.
+tool(
+  "scan_status",
+  {
+    title: "Live scanner status + next-run countdown",
+    description:
+      "Read-only: what the pipeline is doing right now (scanning/drafting/posting/idle) and how many " +
+      "seconds until the next scanner run. Backs the dashboard's live status pill + countdown. Pure " +
+      "read; safe to poll frequently.",
+    inputSchema: {},
+  },
+  async () => {
+    let live: Record<string, any> = {};
+    try {
+      const res = await runPython("scripts/live_status.py", [], { timeoutMs: 10_000 });
+      live = JSON.parse((res.stdout || "").trim().split("\n").slice(-1)[0] || "{}");
+    } catch {
+      live = {};
+    }
+    return jsonContent({ ...live, paused: isPaused() });
+  }
+);
+
 // ---- posting_volume: per-install posting-volume mode (virality bar) --------
 // Server-side throttle (2026-07-13): installations.posting_mode maps to a
 // virality-bar percentile on the API (high~0.90, medium~0.97, low~0.995) and
