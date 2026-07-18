@@ -197,6 +197,24 @@ def record_confirmed_bans(subs, project=None) -> dict:
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2)
             f.write("\n")
+        # Mirror to the backend subreddit_bans table (source of truth as of
+        # 2026-07-19; config.json is the write-through cache). Best-effort:
+        # readers union both sources, so a failed mirror never un-bans.
+        try:
+            import subreddit_bans_client
+            for sub in recorded + upgraded:
+                entry = next((e for e in blocked
+                              if (_ban_entry_sub(e) or "") == sub and isinstance(e, dict)), {})
+                subreddit_bans_client.record(
+                    "comment_blocked", sub,
+                    reason="account_blocked_in_sub",
+                    account=entry.get("account"),
+                    project=entry.get("noticed_by_project") or project,
+                    added_at=entry.get("added_at"),
+                )
+        except Exception as e:
+            print(f"[reddit_ban_check] backend mirror failed (non-fatal): {e}",
+                  file=sys.stderr)
     return {"banned": banned, "recorded": recorded, "upgraded": upgraded,
             "unknown": unknown}
 
