@@ -434,19 +434,43 @@ function installBrowserHarness() {
     // we don't control the upstream repo. If it stops applying, upstream has
     // either merged the fix (detected; fine) or refactored (warn); never fail
     // the install over it.
-    const harnessPatch = path.join(PKG_ROOT, 'scripts', 'patches', 'browser-harness-loopback-cdp-proxy.patch');
-    if (fs.existsSync(harnessPatch)) {
-      const chk = spawnSync('git', ['-C', harnessDir, 'apply', '--check', harnessPatch], { stdio: 'pipe' });
+    // Vendored fixes applied on top of the pin (we don't control upstream).
+    // Each: patch file + a sentinel (file, substring) that means "already
+    // present" (upstream merged it, or we applied it) so a non-applying patch
+    // only warns when the fix is genuinely absent. NEVER fail the install.
+    const vendoredPatches = [
+      {
+        file: 'browser-harness-loopback-cdp-proxy.patch',
+        sentinelFile: path.join('src', 'browser_harness', 'admin.py'),
+        sentinelStr: 'cdp_urlopen',
+        label: 'loopback-proxy',
+        absentWarn: 'CDP probes may 403 behind a system proxy',
+      },
+      {
+        // Suppress OS-focus-stealing Target.activateTarget on offscreen
+        // automation harnesses (twitter/reddit/linkedin) — the shared fix for
+        // the 2026-07 Chrome focus-pops. See helpers.py _is_offscreen_harness.
+        file: 'browser-harness-focus-and-observability.patch',
+        sentinelFile: path.join('src', 'browser_harness', 'helpers.py'),
+        sentinelStr: '_is_offscreen_harness',
+        label: 'focus-suppression + tab-event observability',
+        absentWarn: 'harness Chrome may steal OS focus on every tab switch',
+      },
+    ];
+    for (const p of vendoredPatches) {
+      const patchPath = path.join(PKG_ROOT, 'scripts', 'patches', p.file);
+      if (!fs.existsSync(patchPath)) continue;
+      const chk = spawnSync('git', ['-C', harnessDir, 'apply', '--check', patchPath], { stdio: 'pipe' });
       if (chk.status === 0) {
-        spawnSync('git', ['-C', harnessDir, 'apply', harnessPatch], { stdio: 'inherit' });
-        console.log('    applied loopback-proxy patch to browser-harness');
+        spawnSync('git', ['-C', harnessDir, 'apply', patchPath], { stdio: 'inherit' });
+        console.log(`    applied ${p.label} patch to browser-harness`);
       } else {
-        let fixedUpstream = false;
+        let present = false;
         try {
-          fixedUpstream = fs.readFileSync(path.join(harnessDir, 'src', 'browser_harness', 'admin.py'), 'utf-8').includes('cdp_urlopen');
+          present = fs.readFileSync(path.join(harnessDir, p.sentinelFile), 'utf-8').includes(p.sentinelStr);
         } catch { /* file moved — fall through to the warning */ }
-        if (!fixedUpstream) {
-          console.warn('    WARNING: browser-harness loopback-proxy patch no longer applies and the fix is absent upstream; CDP probes may 403 behind a system proxy.');
+        if (!present) {
+          console.warn(`    WARNING: browser-harness ${p.label} patch no longer applies and the fix is absent upstream; ${p.absentWarn}.`);
         }
       }
     }
