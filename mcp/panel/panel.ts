@@ -89,9 +89,9 @@ interface Snapshot {
   // Claude Desktop, the tray, and X connection untouched. Drives the header
   // Pause switch; undefined = unknown = render as running (no false nag).
   paused?: boolean;
-  // Live scanner status + next-run countdown (scripts/live_status.py, polled via
-  // the scan_status tool). activity_state is the pipeline verb the menu-bar
-  // spinner narrates; next_run_secs is the seconds until the next scanner run.
+  // Live drafting-pipeline status + next-run countdown (scripts/live_status.py,
+  // polled via the drafting_status tool). activity_state is the pipeline verb the
+  // menu-bar spinner narrates; next_run_secs is the seconds until the next run.
   activity_state?: "scanning" | "drafting" | "posting" | "idle";
   activity_label?: string;
   next_run_secs?: number | null;
@@ -131,9 +131,9 @@ const onboardingBlocker = $("onboarding-blocker");
 const onboardingCount = $("onboarding-count");
 const onboardingBarFill = $("onboarding-bar-fill");
 const liveCard = $("live-card");
-const scannerCard = $("scanner-card");
-const scannerStatus = $("scanner-status");
-const btnScanNow = $("btn-scan-now") as HTMLButtonElement;
+const draftingCard = $("drafting-card");
+const draftingStatus = $("drafting-status");
+const btnRunDrafting = $("btn-run-drafting") as HTMLButtonElement;
 const statsCard = $("stats-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
@@ -388,18 +388,19 @@ function render() {
   // user inspects (and fixes) what's saved, including a half-finished project.
   settingsCard.hidden = needsRuntime;
 
-  renderScanner();
+  renderDrafting();
 }
 
-// ---- scanner status + next-run countdown ----------------------------------
-// The scanner (the twitter cycle) drives the whole pipeline. We show what it's
-// doing right now (scanning/drafting/posting — the same signal the menu-bar
-// spinner narrates) or a live countdown to the next run, plus a Run-now button.
-// The countdown ticks client-side off a locally-anchored deadline so it stays
-// smooth without a per-second server round-trip and is immune to client/server
-// clock skew: each scan_status poll re-anchors nextScanAtMs = now +
-// next_run_secs*1000. A 1s ticker repaints just this line between the 5s polls.
-let nextScanAtMs: number | null = null;
+// ---- drafting-pipeline status + next-run countdown ------------------------
+// The drafting pipeline (the twitter cycle) is what the user triggers: it scans
+// for threads first, then hands off to the drafter. We show what it's doing right
+// now (scanning/drafting/posting — the honest current stage, the same signal the
+// menu-bar spinner narrates) or a live countdown to the next run, plus a Run-now
+// button. The countdown ticks client-side off a locally-anchored deadline so it
+// stays smooth without a per-second server round-trip and is immune to
+// client/server clock skew: each drafting_status poll re-anchors nextRunAtMs =
+// now + next_run_secs*1000. A 1s ticker repaints just this line between polls.
+let nextRunAtMs: number | null = null;
 
 const ACTIVITY_VERB: Record<string, string> = {
   scanning: "Scanning",
@@ -413,44 +414,44 @@ function fmtCountdown(secs: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function renderScanner() {
+function renderDrafting() {
   if (!state) return;
   const setupComplete = isSetupComplete(state);
-  scannerCard.hidden = !setupComplete;
+  draftingCard.hidden = !setupComplete;
   if (!setupComplete) return;
 
   const act = state.activity_state || "idle";
   const paused = state.paused === true;
-  const scanning = act === "scanning";
+  const running = act === "scanning" || act === "drafting" || act === "posting";
   const verb = ACTIVITY_VERB[act];
 
   // Run-now is disabled while paused (the kicker is unloaded, nothing would run)
-  // or while a scan is already in flight (launchd no-ops the single instance).
-  btnScanNow.disabled = paused || scanning;
+  // or while a run is already in flight (launchd no-ops the single instance).
+  btnRunDrafting.disabled = paused || running;
 
   if (verb) {
-    scannerStatus.textContent = `⟳ ${verb} now…`;
+    draftingStatus.textContent = `⟳ ${verb} now…`;
   } else if (paused) {
-    scannerStatus.textContent = "Paused — resume S4L to run the scanner.";
-  } else if (nextScanAtMs != null) {
-    const remaining = (nextScanAtMs - Date.now()) / 1000;
-    scannerStatus.textContent =
-      remaining > 0 ? `Next scan in ${fmtCountdown(remaining)}` : "Next scan any moment…";
+    draftingStatus.textContent = "Paused — resume S4L to run drafting.";
+  } else if (nextRunAtMs != null) {
+    const remaining = (nextRunAtMs - Date.now()) / 1000;
+    draftingStatus.textContent =
+      remaining > 0 ? `Next drafting run in ${fmtCountdown(remaining)}` : "Next drafting run any moment…";
   } else {
-    scannerStatus.textContent = "Next scan within a minute";
+    draftingStatus.textContent = "Next drafting run within a minute";
   }
 }
 
-// Pure read the widget polls to keep the scanner status + countdown live. Merges
+// Pure read the widget polls to keep the drafting status + countdown live. Merges
 // the fields into state (re-rendering) and re-anchors the client-side countdown.
-async function pollScanStatus() {
+async function pollDraftingStatus() {
   if (!state || !isSetupComplete(state)) return;
   try {
-    const s = await call("scan_status");
+    const s = await call("drafting_status");
     if (!s || typeof s !== "object") return;
     // Re-anchor the countdown BEFORE applyState so the render it triggers already
     // shows the fresh value (not the previous anchor).
-    nextScanAtMs =
+    nextRunAtMs =
       typeof s.next_run_secs === "number" ? Date.now() + s.next_run_secs * 1000 : null;
     applyState({
       activity_state: s.activity_state,
@@ -467,12 +468,12 @@ async function pollScanStatus() {
 // the 5s polls. Pure client-side (no round-trip), so it runs regardless of tab
 // visibility — the internal setup gate is the only thing that suppresses it.
 setInterval(() => {
-  if (state && isSetupComplete(state)) renderScanner();
+  if (state && isSetupComplete(state)) renderDrafting();
 }, 1000);
 // 5s poll: refresh the live status + re-anchor the countdown. Skipped while the
-// tab is hidden to avoid spawning the scan_status python for an unseen panel.
+// tab is hidden to avoid spawning the drafting_status python for an unseen panel.
 setInterval(() => {
-  if (!document.hidden) void pollScanStatus();
+  if (!document.hidden) void pollDraftingStatus();
 }, 5000);
 
 function applyState(snap: Partial<Snapshot>) {
@@ -522,9 +523,9 @@ app.ontoolresult = (result) => {
     if (data.runtime_ready) {
       // Stats need the runtime; load them once it's confirmed ready.
       void loadStats();
-      // Prime the scanner status/countdown now (the loopback first-paint
+      // Prime the drafting status/countdown now (the loopback first-paint
       // snapshot omits the live fields), then the 5s poll keeps it fresh.
-      void pollScanStatus();
+      void pollDraftingStatus();
     } else if (data.runtime_provisioning) {
       // An install is already underway (another surface / prior open) — resume
       // following it without waiting for a click.
@@ -557,7 +558,7 @@ async function refresh() {
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
     log("");
     void loadStats();
-    void pollScanStatus();
+    void pollDraftingStatus();
   } catch (e: any) {
     log("Refresh failed: " + (e?.message || e));
   }
@@ -697,21 +698,21 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
   }
 }));
 
-// Run scan now: fire ONE scanner cycle immediately via the scan_now tool
-// (launchctl kickstart of the launchd kicker — no model in the loop, unlike
-// Setup). Same control as the menu bar's "Run scan now". After firing, poll
-// scan_status so the status flips to "Scanning now…" without waiting for the
-// next 5s poll.
-btnScanNow.addEventListener("click", () => busy(btnScanNow, "Starting…", async () => {
+// Run drafting now: run the drafting pipeline ONE time immediately via the
+// run_drafting tool (launchctl kickstart of the launchd kicker — no model in the
+// loop, unlike Setup). Same control as the menu bar's "Run drafting now". After
+// firing, poll drafting_status so the status flips to "Scanning now…" without
+// waiting for the next 5s poll.
+btnRunDrafting.addEventListener("click", () => busy(btnRunDrafting, "Starting…", async () => {
   try {
-    const res = await call("scan_now");
-    if (res?.paused) log("S4L is paused — resume it first, then the scanner can run.");
-    else if (res?.ok) log("Scanner started — new drafts land in a few minutes.");
-    else log("Couldn’t start the scanner: " + (res?.detail || "unknown error"));
+    const res = await call("run_drafting");
+    if (res?.paused) log("S4L is paused — resume it first, then drafting can run.");
+    else if (res?.ok) log("Drafting started — new drafts land in a few minutes.");
+    else log("Couldn’t start drafting: " + (res?.detail || "unknown error"));
   } catch (e: any) {
-    log("Couldn’t start the scanner: " + (e?.message || e));
+    log("Couldn’t start drafting: " + (e?.message || e));
   }
-  await pollScanStatus();
+  await pollDraftingStatus();
 }));
 
 // Set up draft schedule for THIS account. Like Setup, this needs the model in the
