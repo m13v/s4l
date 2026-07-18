@@ -1872,13 +1872,15 @@ def get_content_rules(platform):
     ]
 
     platform_rules = {
-        "reddit": [
-            "Go BIMODAL: either 1 punchy sentence (<100 chars, highest avg upvotes) or 4-5 sentences of real substance. AVOID the 2-3 sentence dead zone.",
-            "Lead with personal experience or observation ('I tried X' / 'I noticed X' / 'the part that broke for me was X') rather than instructional advice ('you should X'). Whether you can speak AS the project's maker is governed by the VOICE RELATIONSHIP rule.",
-            "No markdown in Reddit (no ##, **, numbered lists). Casual tone, lowercase OK, fragments OK.",
-            "NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l). NEVER include URLs or links.",
-            "Statements beat questions. Be authoritative, not inquisitive. No 'anyone else experience this?'",
-        ],
+        # Reddit-specific rules deprecated 2026-07-18 (user decision): the
+        # 2026-04-13 "data-driven" claims behind them (bimodal length,
+        # statements>questions, first-person openings) no longer reproduce on
+        # current posts data, and they blocked X/Reddit draft-prompt parity.
+        # The reddit DRAFT prompt no longer includes content rules at all
+        # (draft_prompt_core dropped @CONTENT_RULES@); only the engage rail
+        # still renders this, now common-rules-only. The stale hardcoded
+        # product-name list that lived here is gone with them.
+        "reddit": [],
         "twitter": [
             "Keep it short: 1-2 sentences max. Fragments and lowercase OK.",
             "Direct product mentions OK when relevant (unlike Reddit).",
