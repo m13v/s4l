@@ -125,18 +125,18 @@
         <div class="lane-note" id="mode-sub"></div>
       </section>
 
-      <!-- Scanner: the cycle that drives the whole pipeline. A live status /
-           countdown line + a one-click Run-now, mirroring the menu-bar dropdown.
-           Both read scripts/live_status.py so the surfaces can't drift. Shown
-           post-setup only. -->
-      <section class="section" id="scanner-card" hidden>
+      <!-- Drafting pipeline: the cycle the user triggers — it scans for threads
+           first, then hands off to the drafter. A live status / countdown line +
+           a one-click Run-now, mirroring the menu-bar dropdown. Both read
+           scripts/live_status.py so the surfaces can't drift. Shown post-setup. -->
+      <section class="section" id="drafting-card" hidden>
         <div class="section-row">
-          <span class="section-label">Scanner</span>
+          <span class="section-label">Drafting</span>
           <div class="section-actions">
-            <button id="btn-scan-now" class="ghost">Run scan now</button>
+            <button id="btn-run-drafting" class="ghost">Run drafting now</button>
           </div>
         </div>
-        <div class="live-status" id="scanner-status"></div>
+        <div class="live-status" id="drafting-status"></div>
       </section>
 
       <section class="section" id="live-card" hidden>
