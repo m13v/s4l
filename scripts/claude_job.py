@@ -608,14 +608,26 @@ def _atomic_write_text(path: str, text: str) -> None:
 
 
 def _sweep_stale() -> int:
-    """Remove pending/running job files older than STALE_TTL_S. Returns count."""
+    """GC job files orphaned by dead producers. Returns count removed.
+
+    Two different TTLs on purpose:
+      - pending/: a job unclaimed past the producer's whole wait window
+        (DEFAULT_TIMEOUT_S + margin) has no live producer left to consume its
+        result — drafting it later only burns a worker turn on a stale prompt.
+        This is the leak signature of a producer that was SIGKILLed by its
+        external wrapper before its own timeout-cleanup ran (2026-07-18: three
+        orphaned reddit-draft jobs piled up while paused).
+      - running/: a claimed job may legitimately still be drafting, so it gets
+        the longer STALE_TTL_S before we conclude the worker died too.
+    """
     removed = 0
     now = time.time()
-    roots = [running_dir()]
+    pending_ttl = DEFAULT_TIMEOUT_S + 120
+    roots = [(running_dir(), STALE_TTL_S)]
     pend = os.path.join(queue_root(), "pending")
     if os.path.isdir(pend):
-        roots += [os.path.join(pend, d) for d in os.listdir(pend)]
-    for d in roots:
+        roots += [(os.path.join(pend, d), pending_ttl) for d in os.listdir(pend)]
+    for d, ttl in roots:
         if not os.path.isdir(d):
             continue
         for name in os.listdir(d):
@@ -625,7 +637,7 @@ def _sweep_stale() -> int:
             try:
                 with open(fp) as f:
                     created = json.load(f).get("created_at", 0)
-                if now - float(created) > STALE_TTL_S:
+                if now - float(created) > ttl:
                     os.remove(fp)
                     removed += 1
             except Exception:
@@ -719,6 +731,13 @@ def cmd_provider(ns) -> int:
                 % (_before_len - len(prompt))
             )
 
+    # S4L paused: refuse to enqueue at all. Workers won't claim while paused, so
+    # an enqueued job would just sit in pending/ while this producer burns its
+    # whole wait window "drafting" and then dies to its external timeout.
+    if _is_paused():
+        _plog(f"S4L paused; refusing to enqueue {qtype} job")
+        return 1
+
     job_id = uuid.uuid4().hex
     created = time.time()
     # Cycle batch id (run-twitter-cycle.sh exports BATCH_ID) so every provider.log
@@ -749,11 +768,31 @@ def cmd_provider(ns) -> int:
     _act_write(qtype)
 
     res_path = os.path.join(result_dir(), f"{job_id}.json")
-    deadline = created + ns.timeout
+    # Give up before ns.timeout, not at it: external wrappers (post_reddit's
+    # subprocess timeout, gtimeout in shell lanes) start their clocks at
+    # process start — before stdin read + enqueue — so an internal deadline of
+    # exactly created + timeout LOSES that race and the producer gets SIGKILLed
+    # before the cleanup below ever runs (2026-07-18 deathwatch "unexpected
+    # death" at enqueue+1800s, leaking pending files and a stuck "drafting"
+    # label). The 60s margin guarantees the graceful path wins.
+    deadline = created + max(60, ns.timeout - 60)
     last_hb = created  # last menu-bar heartbeat (see below)
     claimed_at = None  # set the moment a worker moves the job pending/ -> running/
     while time.time() < deadline:
         now = time.time()
+        # Pause landed mid-wait: abandon immediately with the same cleanup the
+        # timeout path does, instead of blocking the full wait window against a
+        # queue no worker will drain while paused.
+        if _is_paused():
+            _plog(f"job {job_id} abandoned: S4L paused mid-wait; cleaning up")
+            for p in (pending_path, running_path):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            _act_clear()
+            _disarm_deathwatch(job_id)
+            return 1
         # A worker claims a job by atomically renaming pending/ -> running/, so the
         # pending file vanishing is our signal that drafting actually STARTED (vs.
         # the job still sitting unclaimed). Latch the claim time once so the label
@@ -980,6 +1019,14 @@ def _is_paused() -> bool:
 
 def cmd_next(ns) -> int:
     _apply_state_dir_override(ns)
+    # GC jobs orphaned by dead/killed producers BEFORE claiming (and before the
+    # pause check, so orphans left behind by a pause don't sit until the next
+    # enqueue-side sweep — while paused nothing enqueues, so this is the only
+    # sweeper running). Without this, a resume would hand workers stale jobs
+    # whose producer died long ago.
+    swept = _sweep_stale()
+    if swept:
+        _plog(f"swept {swept} stale queue job file(s) before claim pass")
     # S4L paused: report no work instead of claiming a job, so an
     # already-queued draft can't drain/post while paused even though the
     # scheduled task worker still fires on its own cadence.
