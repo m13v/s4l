@@ -148,7 +148,7 @@ def _tail_link_rate() -> float:
     # that calls this script). Force rate=1.0 there so a hand-approved draft
     # never drops the link the user already saw baked into the card text —
     # ported from the old post-time override in mcp/src/index.ts
-    # (`TWITTER_TAIL_LINK_RATE: "1.0"` on the post_drafts path), which no
+    # (`TWITTER_TAIL_LINK_RATE: "1.0"` on the approve_drafts path), which no
     # longer fires now that the decision happens here, before the card is
     # ever shown. The autonomous DRAFT_ONLY=0 lane keeps running the real A/B
     # experiment at the configured rate.
@@ -169,7 +169,7 @@ def apply_tail_link(candidate: dict, link_url: str) -> None:
     gate (both the review-card path and the autonomous-post path pass through
     twitter_gen_links.py first) and already budgets long waits (SEO page-gen
     alone can take 10-40 min). twitter_post_plan.py's post-time call was a bad
-    fit for the queue-backed pipeline: post_drafts is a synchronous MCP call
+    fit for the queue-backed pipeline: approve_drafts is a synchronous MCP call
     the user is actively waiting on after clicking Approve, while the
     s4l-worker scheduled task claims one job per minute and doesn't overlap a
     multi-minute drafting turn — so a queue-routed call there could stall an
@@ -313,7 +313,7 @@ def resolve_link(candidate: dict, projects: dict, page_gen_rate: float) -> tuple
     # `website`/`url` a persona project happens to carry (some installs got the
     # user's own X profile written there) must NEVER become a tail link. Enforce
     # it here at the single source so no downstream surface (review card, manual
-    # post_drafts) has to strip a link that should never have been generated.
+    # approve_drafts) has to strip a link that should never have been generated.
     if proj.get("persona"):
         return ("", "persona_no_link")
     plain_url = proj.get("website") or proj.get("url") or ""
