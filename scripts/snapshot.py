@@ -792,6 +792,18 @@ def compute() -> dict:
     latest, latest_tag = _latest_published(channel)
     update_available = bool(latest) and _is_newer(latest, installed)
 
+    # Live pipeline status + next-scanner-run countdown. ONE shared computation
+    # (scripts/live_status.py) the menu bar imports directly too, so the tray
+    # icon's "scanning/drafting/posting" spinner and the dashboard widget's
+    # status pill + countdown can never drift. Best-effort: a failure here just
+    # omits the overlay, never fails the snapshot.
+    try:
+        import live_status as _live_status  # scripts/ is on sys.path
+
+        live = _live_status.compute()
+    except Exception:
+        live = {}
+
     live_status = {
         "runtime_ready": "complete" if rt_ready else "pending",
         "x_connected": "complete" if x["connected"] else "pending",
@@ -830,6 +842,13 @@ def compute() -> dict:
         "flags": _flags(),
         "personal_brand_share": _personal_brand_share(),
         "onboarding": _onboarding_live(live_status),
+        # Live pipeline status + next-scanner-run countdown (see live_status.py).
+        "activity_state": live.get("activity_state", "idle"),
+        "activity_label": live.get("activity_label", ""),
+        "activity_since": live.get("activity_since"),
+        "next_run_epoch": live.get("next_run_epoch"),
+        "next_run_secs": live.get("next_run_secs"),
+        "kicker_interval_secs": live.get("kicker_interval_secs"),
     }
 
 
