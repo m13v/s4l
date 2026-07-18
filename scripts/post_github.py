@@ -157,6 +157,10 @@ SKILL_FILE = os.path.join(REPO_DIR, "SKILL.md")
 GITHUB_TOOLS = os.path.join(SCRIPTS, "github_tools.py")
 RUN_CLAUDE = os.path.join(SCRIPTS, "run_claude.sh")
 
+# Repo-state lookup (stars, gone, has_issues) with github_tools' shared
+# two-tier cache; feeds the tiny-repo audience floor in phase 1.
+from github_tools import _fetch_repo_state as _repo_state
+
 # Interpreter every child subprocess must run under. A bare PYTHON resolved
 # to the user's system python, which lacks the pipeline deps that live only in
 # the owned uv runtime — the same fresh-box failure class that broke the Twitter
@@ -186,6 +190,36 @@ MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 # below this floor before posting. 2 = "project's tools/audience could plausibly
 # help here." 0/1 = off-domain. Tunable.
 MIN_RELEVANCE = 2
+
+# Zero-audience gate (2026-07-17). Root cause of the vestlang #554 spam
+# minimization (post #46421): the issue was the repo owner's self-authored work
+# ticket with zero other commenters, so our comment's only audience was the
+# owner, who hid it as spam within the hour. Require at least one non-bot
+# commenter besides the issue author before we engage, and skip tiny-audience
+# repos (fewer than STAR_FLOOR stars) unless a real multi-person discussion
+# (2+ outside participants) is underway.
+MIN_OUTSIDE_PARTICIPANTS = 1
+STAR_FLOOR = 5
+
+# Bot detection for `gh issue view` comment authors. GraphQL strips the
+# "[bot]" suffix REST shows (github-actions[bot] arrives as plain
+# "github-actions"), so we combine a known-login set with suffix heuristics.
+# A missed bot only weakens the participant/momentum signal marginally.
+KNOWN_BOT_LOGINS = {
+    "github-actions", "dependabot", "dependabot-preview", "renovate",
+    "renovate-bot", "codecov", "codecov-commenter", "vercel", "netlify",
+    "stale", "snyk-bot", "greenkeeper", "coderabbitai", "copilot",
+    "sonarcloud", "cypress", "changeset-bot", "allcontributors",
+    "google-cla", "cla-assistant", "codesandbox-ci", "circleci",
+}
+
+
+def _is_bot_login(login):
+    l = (login or "").lower()
+    return bool(l) and (
+        l in KNOWN_BOT_LOGINS or l.endswith("[bot]") or l.endswith("-bot")
+        or l.endswith("bot]")
+    )
 
 
 def log(msg):
@@ -320,13 +354,21 @@ def gh_search(query, limit=SEARCH_PER_TOPIC):
 
 def gh_view_counts(repo, number):
     """Return dict{comment_count, reaction_count, title, body, author, url,
-    maintainer_last_speaker, last_commenter, last_comment_assoc} or None if the
-    issue is no longer open / unfetchable.
+    maintainer_last_speaker, last_commenter, last_comment_assoc,
+    outside_participants, author_is_owner} or None if the issue is no longer
+    open / unfetchable.
 
     `gh issue view --json comments` returns each comment with `authorAssociation`
     (OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR/NONE/...) and `createdAt`. We use the
     most recent comment to detect "maintainer just spoke" so phase 1 can drop
-    those candidates without an extra API call."""
+    those candidates without an extra API call.
+
+    Bot comments (github-actions, dependabot, etc.) are excluded from
+    comment_count (so CI chatter can't inflate delta_score momentum), from the
+    maintainer-last-speaker check (a bot posting after a maintainer shouldn't
+    shadow the maintainer's word), and from outside_participants (the count of
+    distinct non-bot commenters other than the issue author, which feeds the
+    zero-audience gate)."""
     try:
         out = subprocess.check_output(
             ["gh", "issue", "view", str(number), "-R", repo,
@@ -345,18 +387,30 @@ def gh_view_counts(repo, number):
             (g.get("users") or {}).get("totalCount", 0) or g.get("totalCount", 0) or 0
         )
 
-    # Maintainer-just-spoke gate. Sort comments by createdAt desc, look at the
-    # most recent one (regardless of timing). If the issue's last word came from
-    # someone with push access, the thread is being driven and we shouldn't pile
-    # on. The OP's authorAssociation is checked separately (issue.author isn't
-    # included in `comments`, only in the top-level `author` field).
+    issue_author = ((data.get("author") or {}).get("login", "") or "").lower()
+    repo_owner = (repo.split("/", 1)[0] or "").lower()
+    human_comments = [
+        c for c in comments
+        if not _is_bot_login(((c.get("author") or {}).get("login", "")))
+    ]
+    outside_participants = {
+        ((c.get("author") or {}).get("login", "") or "").lower()
+        for c in human_comments
+    } - {issue_author, ""}
+
+    # Maintainer-just-spoke gate. Sort non-bot comments by createdAt desc, look
+    # at the most recent one (regardless of timing). If the issue's last human
+    # word came from someone with push access, the thread is being driven and we
+    # shouldn't pile on. The OP's authorAssociation is checked separately
+    # (issue.author isn't included in `comments`, only in the top-level `author`
+    # field).
     maintainer_last_speaker = False
     last_commenter = ""
     last_comment_assoc = ""
-    if comments:
+    if human_comments:
         try:
             sorted_c = sorted(
-                comments,
+                human_comments,
                 key=lambda c: c.get("createdAt", "") or "",
                 reverse=True,
             )
@@ -369,7 +423,7 @@ def gh_view_counts(repo, number):
             pass
 
     return {
-        "comment_count": len(comments),
+        "comment_count": len(human_comments),
         "reaction_count": reaction_count,
         "title": data.get("title", ""),
         "body": (data.get("body") or ""),
@@ -378,6 +432,8 @@ def gh_view_counts(repo, number):
         "maintainer_last_speaker": maintainer_last_speaker,
         "last_commenter": last_commenter,
         "last_comment_assoc": last_comment_assoc,
+        "outside_participants": len(outside_participants),
+        "author_is_owner": bool(issue_author) and issue_author == repo_owner,
     }
 
 
@@ -872,6 +928,8 @@ def main():
 
     candidates = []
     skipped_maintainer = 0
+    skipped_no_audience = 0
+    skipped_small_repo = 0
     for item in raw[:CLAUDE_CANDIDATE_LIMIT * 3]:
         repo, number = parse_repo_number(item.get("url"))
         if not repo:
@@ -890,6 +948,34 @@ def main():
                 f"{counts.get('last_comment_assoc')})"
             )
             continue
+        # Zero-audience gate. Nobody but the issue author (and bots) has ever
+        # touched this thread, so a comment's only reader is the author's
+        # notification inbox. Worst case is the author being the repo owner
+        # writing their own work ticket (vestlang #554, post #46421): the one
+        # person notified is the one person who can hide us as spam.
+        if counts.get("outside_participants", 0) < MIN_OUTSIDE_PARTICIPANTS:
+            skipped_no_audience += 1
+            log(
+                f"  skip {repo}#{number}: no outside participants "
+                f"(author={counts.get('author')}, "
+                f"owner_authored={counts.get('author_is_owner')})"
+            )
+            continue
+        # Tiny-repo audience floor. A repo with almost no stars has no
+        # bystander audience reading its issues; require a real multi-person
+        # discussion before engaging there. stars=None (fetch failed) passes:
+        # fail open, the participant gate above already ran.
+        _owner, _name = repo.split("/", 1)
+        _stars = _repo_state(_owner, _name).get("stars")
+        if (_stars is not None and _stars < STAR_FLOOR
+                and counts.get("outside_participants", 0) < 2):
+            skipped_small_repo += 1
+            log(
+                f"  skip {repo}#{number}: {_stars} stars < {STAR_FLOOR} "
+                f"and thin discussion "
+                f"({counts.get('outside_participants')} outside participants)"
+            )
+            continue
         candidates.append({
             "repo": repo,
             "number": number,
@@ -899,11 +985,15 @@ def main():
             "author": counts["author"],
             "comment_count_t0": counts["comment_count"],
             "reaction_count_t0": counts["reaction_count"],
+            "outside_participants": counts.get("outside_participants", 0),
+            "author_is_owner": bool(counts.get("author_is_owner")),
             "search_topic": item.get("search_topic"),
         })
     log(
         f"Phase 1: {len(candidates)} candidates with T0 snapshot "
-        f"(skipped {skipped_maintainer} for maintainer-just-spoke)"
+        f"(skipped {skipped_maintainer} maintainer-just-spoke, "
+        f"{skipped_no_audience} no-outside-participants, "
+        f"{skipped_small_repo} tiny-repo)"
     )
     if not candidates:
         log("No live open issues to re-poll. Exiting.")
