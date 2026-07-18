@@ -264,6 +264,72 @@ def _our_github_handle(_memo={}):
     return _memo["h"]
 
 
+# ---------- github_candidates history (2026-07-18) ---------------------------
+# Per-candidate history mirroring the twitter/reddit candidates principle:
+# every discovered issue becomes a github_candidates row via /api/v1 (never
+# direct SQL), and every decision flips status with skip_stage + skip_reason.
+# Stages: gate_maintainer | gate_no_audience | gate_tiny_repo |
+# gate_maintainer_t1 | momentum_cut | claude | post_failed; posted rows get
+# status='posted' + post_id. All calls are best-effort: a candidates-API
+# outage must never block or slow the posting rail.
+
+def _cand_upsert(row):
+    try:
+        from http_api import api_post
+        api_post("/api/v1/github-candidates", {
+            "thread_url": row.get("url"),
+            "repo": row.get("repo"),
+            "issue_number": row.get("number"),
+            "thread_title": (row.get("title") or "")[:500],
+            "thread_author": row.get("author"),
+            "author_is_owner": bool(row.get("author_is_owner")),
+            "outside_participants": row.get("outside_participants"),
+            "repo_stars": row.get("repo_stars"),
+            "comment_count_t0": row.get("comment_count_t0"),
+            "reaction_count_t0": row.get("reaction_count_t0"),
+            "matched_project": row.get("matched_project"),
+            "search_topic": row.get("search_topic"),
+            "batch_id": os.environ.get("SA_CYCLE_ID"),
+        })
+    except Exception as e:
+        log(f"  WARNING: candidate upsert failed for {row.get('url')}: {e}")
+
+
+def _cand_mark_skipped(url, stage, reason=""):
+    try:
+        from http_api import api_patch
+        api_patch("/api/v1/github-candidates/by-thread-url", {
+            "thread_url": url, "action": "mark_skipped",
+            "skip_stage": stage, "skip_reason": str(reason or "")[:1000],
+        }, ok_on_404=True)
+    except Exception as e:
+        log(f"  WARNING: candidate mark_skipped failed for {url}: {e}")
+
+
+def _cand_set_t1(url, comment_count_t1, reaction_count_t1, delta):
+    try:
+        from http_api import api_patch
+        api_patch("/api/v1/github-candidates/by-thread-url", {
+            "thread_url": url, "action": "set_t1",
+            "comment_count_t1": comment_count_t1,
+            "reaction_count_t1": reaction_count_t1,
+            "delta_score": delta,
+        }, ok_on_404=True)
+    except Exception as e:
+        log(f"  WARNING: candidate set_t1 failed for {url}: {e}")
+
+
+def _cand_mark_posted(url, post_id=None):
+    try:
+        from http_api import api_patch
+        body = {"thread_url": url, "action": "mark_posted"}
+        if isinstance(post_id, int):
+            body["post_id"] = post_id
+        api_patch("/api/v1/github-candidates/by-thread-url", body, ok_on_404=True)
+    except Exception as e:
+        log(f"  WARNING: candidate mark_posted failed for {url}: {e}")
+
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [post_github] {msg}", flush=True)
 
@@ -1008,6 +1074,26 @@ def main():
         counts = gh_view_counts(repo, number)
         if not counts:
             continue
+        _owner, _name = repo.split("/", 1)
+        _stars = _repo_state(_owner, _name).get("stars")
+        # Record the sighting BEFORE the gates so gate skips become queryable
+        # history (github_candidates), not just log lines. Gate branches then
+        # flip the row to skipped with their stage.
+        _cand_url = counts["url"] or item.get("url")
+        _cand_upsert({
+            "url": _cand_url,
+            "repo": repo,
+            "number": number,
+            "title": counts["title"],
+            "author": counts["author"],
+            "author_is_owner": counts.get("author_is_owner"),
+            "outside_participants": counts.get("outside_participants"),
+            "repo_stars": _stars,
+            "comment_count_t0": counts["comment_count"],
+            "reaction_count_t0": counts["reaction_count"],
+            "matched_project": project_name,
+            "search_topic": item.get("search_topic"),
+        })
         # Maintainer-just-spoke gate. If the most recent comment is from someone
         # with push access (OWNER/MEMBER/COLLABORATOR), they are driving the
         # thread, so piling on reads as noise and risks LOW_QUALITY hide.
@@ -1018,6 +1104,10 @@ def main():
                 f"(last={counts.get('last_commenter')}/"
                 f"{counts.get('last_comment_assoc')})"
             )
+            _cand_mark_skipped(
+                _cand_url, "gate_maintainer",
+                f"last={counts.get('last_commenter')}/"
+                f"{counts.get('last_comment_assoc')}")
             continue
         # Zero-audience gate. Nobody but the issue author (and bots) has ever
         # touched this thread, so a comment's only reader is the author's
@@ -1031,13 +1121,15 @@ def main():
                 f"(author={counts.get('author')}, "
                 f"owner_authored={counts.get('author_is_owner')})"
             )
+            _cand_mark_skipped(
+                _cand_url, "gate_no_audience",
+                f"author={counts.get('author')}, "
+                f"owner_authored={counts.get('author_is_owner')}")
             continue
         # Tiny-repo audience floor. A repo with almost no stars has no
         # bystander audience reading its issues; require a real multi-person
         # discussion before engaging there. stars=None (fetch failed) passes:
         # fail open, the participant gate above already ran.
-        _owner, _name = repo.split("/", 1)
-        _stars = _repo_state(_owner, _name).get("stars")
         if (_stars is not None and _stars < STAR_FLOOR
                 and counts.get("outside_participants", 0) < 2):
             skipped_small_repo += 1
@@ -1046,6 +1138,10 @@ def main():
                 f"and thin discussion "
                 f"({counts.get('outside_participants')} outside participants)"
             )
+            _cand_mark_skipped(
+                _cand_url, "gate_tiny_repo",
+                f"{_stars} stars < {STAR_FLOOR}, "
+                f"{counts.get('outside_participants')} outside participants")
             continue
         candidates.append({
             "repo": repo,
