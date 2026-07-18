@@ -210,6 +210,15 @@ trap '_sa_emit_run_summary_oneshot; _sa_release_lease_oneshot; _sa_release_locks
 BATCH_ID="rdcycle-$(date +%Y%m%d-%H%M%S)"
 log "Cycle batch_id=$BATCH_ID"
 
+# --- Lane env (2026-07-17, mirrors run-draft-and-publish.sh) ----------------
+# personal_brand lane force-injects the persona project into the discover
+# phase (S4L_FORCE_PROJECT + S4L_ACTIVE_LANE=personal_brand); promotion-only
+# exports S4L_CYCLE_LANE=promotion and nothing else (normal weighted pick).
+# Both lanes on = weighted per-cycle coin flip inside s4l_mode.py, same as X.
+# Discover STAMPS the lane onto the plan JSON (post_reddit.py), so the draft
+# phase and the env-less MCP approval poster read the plan, never this env.
+eval "$(python3 "$REPO_DIR/scripts/s4l_mode.py" env 2>/dev/null || true)"
+
 # --- Draft-only mode (2026-07-14, mirrors run-draft-and-publish.sh) ---------
 # The ONE mode flag (scripts/s4l_mode.py draft-only, stdout 1/0) now governs
 # Reddit exactly like the X cycle: when ON, both lanes stop after the draft
