@@ -125,6 +125,20 @@
         <div class="lane-note" id="mode-sub"></div>
       </section>
 
+      <!-- Scanner: the cycle that drives the whole pipeline. A live status /
+           countdown line + a one-click Run-now, mirroring the menu-bar dropdown.
+           Both read scripts/live_status.py so the surfaces can't drift. Shown
+           post-setup only. -->
+      <section class="section" id="scanner-card" hidden>
+        <div class="section-row">
+          <span class="section-label">Scanner</span>
+          <div class="section-actions">
+            <button id="btn-scan-now" class="ghost">Run scan now</button>
+          </div>
+        </div>
+        <div class="live-status" id="scanner-status"></div>
+      </section>
+
       <section class="section" id="live-card" hidden>
         <div class="section-row">
           <span class="section-label">Live browser</span>
