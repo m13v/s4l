@@ -426,6 +426,20 @@ except Exception:
     AUTOPILOT_RUNNING_STALL_SECONDS = 1200
     DRAFT_STUCK_SECONDS = 1200
 
+# Scheduler-wedge escalation (2026-07-17): tick-freshness 'stalled' stays a quiet
+# diagnostic while drafts drain, but escalates to the ⚠ once the wedge is proven
+# BOTH persistent (no successful worker run for SCHED_WEDGE_ESCALATION_SECONDS)
+# AND active (at least SCHED_WEDGE_MIN_SKIPS recordedSkips in the last hour —
+# proof Claude Desktop is awake and refusing to fire, so a closed lid or a
+# sleeping box can never trip it: sleep records no skips). A scheduler that
+# hasn't fired in an hour despite ~60 attempts is one queue job away from
+# user-visible harm even if past jobs squeaked through. Self-resets: the first
+# successful run drops last_run_age below the bar within one tick_stats refresh
+# (≤60s). Both thresholds deliberately far above the 2026-07-09 flapping regime
+# (83% skips with runs still landing every few minutes stays quiet forever).
+SCHED_WEDGE_ESCALATION_SECONDS = 3600
+SCHED_WEDGE_MIN_SKIPS = 30
+
 # A poll can read a transient "not stuck" moment (e.g. the activity file
 # between one dying worker attempt and the next claim on the same aged job)
 # even though the underlying episode never really cleared. Without this, each
@@ -2532,13 +2546,18 @@ class S4LMenuBar(rumps.App):
         #     a draft job sat unclaimed, wedged mid-run, or the producer's drain
         #     latch tripped -> ⚠, because THAT is user-visible harm.
         # Tick freshness ('stalled': task present + enabled but lastRunAt stale,
-        # the Desktop warm-session wedge) is DIAGNOSTIC ONLY, never the ⚠: under
-        # the wedge the per-minute tick can skip 70-90% of fires while the queue
-        # still drains every job (jobs arrive ~every 8 min vs 60 fires/hr), so
-        # lastRunAt staleness flip-flopped the icon against a healthy pipeline
-        # (observed on the operator box 2026-07-09: 83% ticks skipped, ~14
-        # posts/hr flowing, icon oscillating). _build_menu renders 'stalled' as
-        # a plain "scheduler degraded" detail line with tick_stats() numbers.
+        # the Desktop warm-session wedge) is diagnostic at onset, never an
+        # instant ⚠: under the wedge the per-minute tick can skip 70-90% of
+        # fires while the queue still drains every job (jobs arrive ~every 8
+        # min vs 60 fires/hr), so lastRunAt staleness flip-flopped the icon
+        # against a healthy pipeline (observed on the operator box 2026-07-09:
+        # 83% ticks skipped, ~14 posts/hr flowing, icon oscillating).
+        # _build_menu renders young/intermittent 'stalled' as a plain detail
+        # line with tick_stats() numbers. It DOES escalate to the ⚠ once the
+        # wedge is proven persistent AND active (2026-07-17, see the
+        # SCHED_WEDGE_* constants + the escalation block below) — that regime
+        # (zero successful fires for an hour while awake) is disjoint from the
+        # flapping one, so the 07-09 fix is preserved.
         # The drain latch IS safe to alarm on now: claude_job._mark_drain_success
         # zeroes it on every successful consume, so it self-clears (the old
         # stayed-stale-after-recovery latch this comment used to warn about
@@ -2636,6 +2655,36 @@ class S4LMenuBar(rumps.App):
                     self._tick_stats = None
         else:
             self._tick_stats = None
+        # Scheduler-wedge escalation (2026-07-17): 'stalled' is quiet while the
+        # wedge is young or intermittent, but once the host has BOTH refused to
+        # fire for SCHED_WEDGE_ESCALATION_SECONDS and actively recorded skips in
+        # the last hour (awake, not asleep — see the constants' comment), the
+        # degradation is real and persistent -> ⚠ with its own reason and a
+        # one-click Claude Desktop restart (the known cure for the warm-session
+        # overlap-guard wedge; the registration itself is fine, so re-arm is the
+        # wrong fix). Every more specific reason keeps priority; self-clears as
+        # soon as a run lands (tick_stats refresh ≤60s behind).
+        if setup_complete and schedule_state == "stalled" and not attention:
+            _ws = self._tick_stats or {}
+            _wage = _ws.get("last_run_age_s")
+            _wskips = _ws.get("skips_in_window") or 0
+            if (
+                _wage is not None
+                and _wage >= SCHED_WEDGE_ESCALATION_SECONDS
+                and _wskips >= SCHED_WEDGE_MIN_SKIPS
+            ):
+                attention = True
+                self._stall_reason_info = (
+                    "scheduler_wedged",
+                    f"no run in {int(_wage) // 60}m, "
+                    f"{_wskips} of ~60 ticks skipped last hour",
+                )
+            elif self._stall_reason_info[0] == "scheduler_wedged":
+                # Recovered (a run landed) — clear immediately instead of
+                # waiting for the 30s rate-limit rescan to overwrite it.
+                self._stall_reason_info = ("", "")
+        elif self._stall_reason_info[0] == "scheduler_wedged":
+            self._stall_reason_info = ("", "")
         # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
         self._stalled = attention
 
@@ -3856,6 +3905,20 @@ class S4LMenuBar(rumps.App):
                 # die before draining. Re-arm can't fix that; Diagnose can.
                 items.append(self._label("⚠ Draft jobs stuck, runs start but don't finish"))
                 items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
+            elif self._stall_reason_info[0] == "scheduler_wedged":
+                # Persistent Desktop scheduler wedge: the task is registered +
+                # enabled but the host has refused every per-minute fire for an
+                # hour+ (warm-session overlap guard, recordedSkips
+                # per_task_limit). The registration is fine, so re-arm is the
+                # wrong fix; the one mechanical cure is a full Claude Desktop
+                # restart, which clears the warm-session pileup. Label is
+                # honest about the disruption before the click (house rule).
+                items.append(self._label("⚠ Claude has stopped running draft tasks"))
+                items.append(self._label("   " + (self._stall_reason_info[1] or "scheduler wedged")))
+                items.append(rumps.MenuItem(
+                    "Fix by restarting Claude Desktop",
+                    callback=self._restart_claude_for_wedge,
+                ))
             elif schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
