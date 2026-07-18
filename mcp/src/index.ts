@@ -3792,31 +3792,32 @@ tool(
   }
 );
 
-// ---- scan_now: fire one scanner cycle immediately --------------------------
-// The scanner (the twitter scan+draft cycle) is what drives the whole pipeline;
-// it runs on the launchd kicker's fixed StartInterval. This nudges launchd to
-// fire it RIGHT NOW via `launchctl kickstart` — the EXACT same mechanism the
-// first-run onboarding kick uses (ensureQueueKickerInstalled): the job runs
-// THROUGH launchd with its full baked env + the run-*-singleton.sh lock, so it
-// is NOT a bare `bash run-twitter-cycle.sh` (which would leave an empty-plan
-// artifact). launchd keeps a single instance, so if a cycle is already running
-// this is a harmless no-op; while paused the kicker is unloaded, so we report
-// that rather than kick nothing.
+// ---- run_drafting: run the drafting pipeline immediately -------------------
+// The drafting pipeline (the twitter cycle) is what the user triggers: it SCANS
+// for threads first, then hands off to the drafter, so from the user's view this
+// is "run drafting now". It runs on the launchd kicker's fixed StartInterval;
+// this nudges launchd to fire it RIGHT NOW via `launchctl kickstart` — the EXACT
+// same mechanism the first-run onboarding kick uses (ensureQueueKickerInstalled):
+// the job runs THROUGH launchd with its full baked env + the run-*-singleton.sh
+// lock, so it is NOT a bare `bash run-twitter-cycle.sh` (which would leave an
+// empty-plan artifact). launchd keeps a single instance, so if a run is already
+// underway this is a harmless no-op; while paused the kicker is unloaded, so we
+// report that rather than kick nothing.
 //
 // This is deliberately NOT the removed run_draft_cycle / draft_cycle tool: it
 // spawns no warm in-chat Claude draft session, it only asks launchd to run the
 // already-scheduled cycle one interval early. Do NOT re-introduce a draft_cycle.
 tool(
-  "scan_now",
+  "run_drafting",
   {
-    title: "Run the scanner now",
+    title: "Run the drafting pipeline now",
     description:
-      "Fire ONE scanner cycle immediately instead of waiting for the next scheduled run. The scanner " +
-      "(the twitter scan+draft cycle) is what discovers threads and kicks off drafting, so this is the " +
-      "'run now' control behind the menu bar + dashboard button. It nudges the existing launchd job to " +
-      "run one interval early; it does NOT change the schedule. If a cycle is already running it's a " +
-      "no-op, and if S4L is paused it reports that (nothing runs while paused). Use when the user asks " +
-      "to scan now, run the scanner, run now, or check for new threads immediately.",
+      "Run the drafting pipeline ONE time immediately instead of waiting for the next scheduled run. " +
+      "The pipeline scans for threads and then drafts replies, so this is the 'run now' control behind " +
+      "the menu bar + dashboard button. It nudges the existing launchd job to run one interval early; " +
+      "it does NOT change the schedule. If a run is already underway it's a no-op, and if S4L is paused " +
+      "it reports that (nothing runs while paused). Use when the user asks to run drafting, draft now, " +
+      "run the pipeline, run now, or check for new threads immediately.",
     inputSchema: {},
   },
   async () => {
@@ -3824,7 +3825,7 @@ tool(
       return jsonContent({
         ok: false,
         paused: true,
-        detail: "S4L is paused — resume it first, then the scanner can run.",
+        detail: "S4L is paused — resume it first, then drafting can run.",
       });
     }
     const uid = process.getuid ? process.getuid() : 0;
@@ -3837,26 +3838,26 @@ tool(
     return jsonContent({
       ok,
       detail: ok
-        ? "Scanner cycle kicked off — new drafts land in a few minutes."
-        : `Could not start the scanner (launchctl rc=${kick.code}).`,
+        ? "Drafting started — new drafts land in a few minutes."
+        : `Could not start drafting (launchctl rc=${kick.code}).`,
     });
   }
 );
 
-// ---- scan_status: live pipeline status + next-scanner-run countdown --------
-// A cheap, pure READ the dashboard widget polls (~5s) to keep its scanner status
+// ---- drafting_status: live pipeline status + next-run countdown ------------
+// A cheap, pure READ the dashboard widget polls (~5s) to keep its drafting status
 // pill + countdown live between heavier snapshot refreshes. Returns the SAME
 // fields the menu bar renders (scripts/live_status.py — activity_state,
 // next_run_secs, …), plus `paused`, so the two surfaces can't drift. No side
 // effects: safe to poll and to replay over the loopback /tool/ endpoint.
 tool(
-  "scan_status",
+  "drafting_status",
   {
-    title: "Live scanner status + next-run countdown",
+    title: "Live drafting-pipeline status + next-run countdown",
     description:
-      "Read-only: what the pipeline is doing right now (scanning/drafting/posting/idle) and how many " +
-      "seconds until the next scanner run. Backs the dashboard's live status pill + countdown. Pure " +
-      "read; safe to poll frequently.",
+      "Read-only: what the drafting pipeline is doing right now (scanning/drafting/posting/idle) and " +
+      "how many seconds until the next scheduled run. Backs the dashboard's live status pill + " +
+      "countdown. Pure read; safe to poll frequently.",
     inputSchema: {},
   },
   async () => {
