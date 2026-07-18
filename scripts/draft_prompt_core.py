@@ -688,10 +688,14 @@ def render_reddit_prompt(ing):
     recent_self_block, arm (optional), lane (optional, promotion assumed).
     """
     arm = ing.get("arm") or os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or ""
-    # Reddit drafting is promotion-lane work by definition today (one product
-    # project per draft call); the persona directive would reference blocks
-    # this prompt does not carry. Force the promotion directive regardless of
-    # any stray S4L_ACTIVE_LANE in the environment.
+    # Lane comes ONLY from the ingredients (post_reddit.py stamps it onto the
+    # discover plan at the cycle's assignment point and threads it through
+    # build_draft_prompt). Deliberately NOT read from S4L_ACTIVE_LANE here:
+    # salvage plans drafted in a later cycle must keep their own (promotion)
+    # directive even when THIS cycle's coin flip landed personal_brand.
+    # lane='personal_brand' renders the persona directive + the persona-
+    # whitelisted projects_json; the RD template carries every block the
+    # persona directive references (@CORPUS_BLOCK@ = ACCOUNT VOICE CORPUS).
     lane = ing.get("lane") or ""
 
     from engagement_styles import get_content_rules, get_voice_relationship_rule
