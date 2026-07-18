@@ -222,6 +222,19 @@ def _is_bot_login(login):
     )
 
 
+def _our_github_handle(_memo={}):
+    """Our own posting handle, lowercased ('' if unresolvable). Excluded from
+    outside_participants so a thread we already commented in doesn't count us
+    as its audience."""
+    if "h" not in _memo:
+        try:
+            from account_resolver import resolve as _resolve
+            _memo["h"] = (_resolve("github") or "").lower()
+        except Exception:
+            _memo["h"] = ""
+    return _memo["h"]
+
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [post_github] {msg}", flush=True)
 
@@ -396,7 +409,7 @@ def gh_view_counts(repo, number):
     outside_participants = {
         ((c.get("author") or {}).get("login", "") or "").lower()
         for c in human_comments
-    } - {issue_author, ""}
+    } - {issue_author, _our_github_handle(), ""}
 
     # Maintainer-just-spoke gate. Sort non-bot comments by createdAt desc, look
     # at the most recent one (regardless of timing). If the issue's last human
@@ -493,6 +506,12 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
                 f"last_commenter: {c['last_commenter']} "
                 f"({c.get('last_comment_assoc') or 'NONE'})\n"
             )
+        audience_line = (
+            f"outside_participants: {c.get('outside_participants', '?')}"
+        )
+        if c.get("author_is_owner"):
+            audience_line += " | author_is_owner: true"
+        audience_line += "\n"
         history_block = ""
         try:
             _hb = _render_author_history(
@@ -508,6 +527,7 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
             f"rx {c['reaction_count_t0']}->{c['reaction_count_t1']}) ---\n"
             f"{seed_line}"
             f"{last_speaker_line}"
+            f"{audience_line}"
             f"title: {c['title']}\n"
             f"author: {c['author']}\n"
             f"url: {c['url']}\n"
@@ -646,6 +666,19 @@ takes that ignored what the maintainer just said. Skip when:
     grouped with them by the maintainer.
   - You'd cite a precedent you can't actually link to (Apple ?ppid, Stripe X,
     Shopify Y, etc.). Hand-wavy precedent name-drops read as fake-expert.
+  - The point you'd make is already stated in the issue body or an existing
+    comment. Re-deriving the author's own caveats in your voice reads as an
+    LLM paraphrasing them back at themselves; that exact pattern got our
+    vestlang comment hidden as spam within the hour. If you can't add
+    something the thread doesn't already contain, skip.
+  - `author_is_owner: true` and the issue reads like the owner's internal
+    work ticket (committed scope, acceptance criteria, "design decision to
+    settle", self-addressed spec). The owner's notification inbox is the
+    only audience, and they didn't ask for outside input.
+  - `outside_participants` is 1 and your comment doesn't offer that one
+    other person something genuinely new. Thin threads reach you already
+    filtered (zero-participant threads are dropped upstream), but 1 is
+    still thin; treat it as a high bar, not a green light.
 
 ## YOUR JOB
 
@@ -1027,6 +1060,10 @@ def main():
             continue
         c["comment_count_t1"] = counts["comment_count"]
         c["reaction_count_t1"] = counts["reaction_count"]
+        # Participants only grow, so no re-skip needed; refresh so the prompt
+        # shows the T1 value.
+        c["outside_participants"] = counts.get(
+            "outside_participants", c.get("outside_participants", 0))
         c["delta_score"] = delta_score(
             c["comment_count_t0"], c["reaction_count_t0"],
             c["comment_count_t1"], c["reaction_count_t1"],
