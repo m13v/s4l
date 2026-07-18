@@ -6,8 +6,13 @@ migrations/2026-07-15-review-platform-events.sql in the website repo):
 
   platform_removed  A post of ours flipped to status='removed'/'deleted'
                     (moderator removal, automod filter, or platform spam
-                    filter). One event per post. Less severe: the lesson
-                    is the CONTENT pattern, not the venue.
+                    filter). One event per post. For COMMENTS the lesson is
+                    the CONTENT pattern. For our own ORIGINAL THREADS the
+                    removal is also a venue verdict: the sub is auto-added
+                    to subreddit_bans.thread_blocked (2026-07-18), and the
+                    live thread's moderation context (removed_by, flair,
+                    mod team notes) is fetched and folded into the event
+                    note so the digest learns the mods' stated reason.
   platform_banned   Our account is blocked from a community (config.json
                     subreddit_bans.comment_blocked, reason
                     'account_blocked_in_sub'). One event per (sub, account).
@@ -64,6 +69,7 @@ POST_BATCH = 100  # review-events POST MAX_BATCH
 FETCH_LIMIT = 500  # posts GET hard cap; newest-first covers all fresh flips
 MAX_NOTE = 1900  # route clips reject_note at 2000; stay under
 MAX_DRAFT = 9500
+MOD_NOTE_FETCH_CAP = 25  # live-thread context fetches per sweep (runtime bound)
 
 
 def log(msg: str) -> None:
@@ -214,7 +220,66 @@ def collect_events(window_days: int, dry_run: bool = False) -> tuple[list[dict],
         v = _venue(p)
         if v:
             venue_counts[v] = venue_counts.get(v, 0) + 1
-    removed_events = [_removed_event(p, venue_counts.get(_venue(p) or "", 0))
+
+    # Moderation context (2026-07-18): fetch the live thread's removal
+    # artifacts (removed_by_category, mod-rewritten flair, mod team notes) for
+    # reddit strikes so the digest learns the mods' STATED reason, not just the
+    # fact of removal. Read-only browser attach, degrades to {} without a
+    # browser. Capped to bound sweep runtime; the window is small in steady
+    # state, and an uncontextualized event is still a valid event.
+    contexts: dict[int, dict] = {}
+    if os.environ.get("S4L_STRIKE_MOD_NOTES", "1") not in ("0", "false", "no"):
+        ctx_posts = [p for p in fresh
+                     if (p.get("platform") or "reddit") == "reddit"
+                     and (p.get("our_url") or "")][:MOD_NOTE_FETCH_CAP]
+        if ctx_posts:
+            try:
+                import reddit_ban_check
+                raw_ctx = reddit_ban_check.removal_context(
+                    [p["our_url"] for p in ctx_posts])
+                for p in ctx_posts:
+                    c = raw_ctx.get(p["our_url"])
+                    if c:
+                        contexts[p["id"]] = c
+                log(f"mod_notes fetched={len(contexts)}/{len(ctx_posts)}")
+            except Exception as e:
+                log(f"mod_notes_error (non-fatal): {e}")
+
+    # Auto-quarantine (2026-07-18): a moderator removing one of our ORIGINAL
+    # THREADS is a venue verdict, and at the observed base rates (strict subs
+    # remove 40-100% of our submissions and then ban the account) one strike is
+    # enough: add the sub to subreddit_bans.thread_blocked so
+    # pick_thread_target.py never selects it again. Before this, removals never
+    # fed venue selection and we kept submitting to r/javascript until the
+    # account got banned. Comments are untouched (0.15% removal rate) and
+    # comment_blocked is managed separately by the ban check above.
+    if not dry_run:
+        for p in fresh:
+            if (p.get("platform") or "reddit") != "reddit":
+                continue
+            if not p.get("thread_url") or p.get("thread_url") != p.get("our_url"):
+                continue
+            m = re.search(r"reddit\.com/r/([^/]+)/", p.get("our_url") or "")
+            if not m:
+                continue
+            sub = m.group(1)
+            ctx = contexts.get(p["id"]) or {}
+            mod_note = "; ".join((ctx.get("mod_notes") or [])[:1])
+            reason = (
+                f"thread_removed_by_moderation: our original thread"
+                f" {p.get('our_url')} flipped to status='{p.get('status')}'"
+                f" (confirmed on {p.get('deletion_detect_count')} scans)."
+                f"{' Mod note: ' + mod_note if mod_note else ''}"
+            )
+            try:
+                from post_reddit import mark_thread_blocked
+                mark_thread_blocked(sub, reason, p.get("project_name"),
+                                    force=True)
+            except Exception as e:
+                log(f"thread_quarantine_error r/{sub} (non-fatal): {e}")
+
+    removed_events = [_removed_event(p, venue_counts.get(_venue(p) or "", 0),
+                                     contexts.get(p["id"]))
                       for p in fresh]
 
     # Deterministic community-ban detection (2026-07-17): before reading the
