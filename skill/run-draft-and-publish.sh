@@ -28,6 +28,13 @@ EOF_ENV
 REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${S4L_PYTHON:-python3}"
 
+# Shared pause guard (scripts/preflight.sh): every pipeline kicker honors the
+# same paused.flag, so Pause stops the X lane the same way it stops Reddit —
+# even if launchd re-fires this wrapper while the flag is up.
+SA_PREFLIGHT_SCRIPT="run-draft-and-publish"
+source "$REPO_DIR/scripts/preflight.sh"
+preflight_skip_if_paused
+
 # Salvage twitter-prep drafts orphaned when a producer cycle died after its worker
 # wrote the result but before consuming it (a consumed result is deleted, so a
 # surviving one in claude-queue/result/ = never consumed). Best-effort, dedup-safe
