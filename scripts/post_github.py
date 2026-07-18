@@ -85,20 +85,43 @@ def _emit_run_summary_oneshot():
         return
     _RUN_STATE["emitted"] = True
     elapsed = int(time.time() - _RUN_STATE["run_start"])
+    signaled = _RUN_STATE.get("signaled")
+    if signaled:
+        # A signal ended the run; surface it the same way run-github.sh's
+        # trap used to (failed>=1 + sigterm reason) so the dashboard still
+        # sees signal-killed cycles, now with accurate counters attached.
+        _RUN_STATE["failed"] = max(int(_RUN_STATE["failed"]), 1)
+    # Print the same "=== SUMMARY: elapsed=" marker main()'s happy path emits.
+    # run-github.sh's EXIT trap greps the cycle log for this marker to decide
+    # whether Python already wrote its own run_monitor row; before 2026-07-18
+    # every early exit (no candidates, cap=0, Claude failure) lacked the
+    # marker, so the trap double-logged each of those cycles as a spurious
+    # "failed=1 sigterm:1" row + a "possible silent failure" warning. With
+    # the marker printed here, the bash trap only fires when Python died
+    # without running atexit at all (SIGKILL, interpreter crash).
     try:
-        subprocess.run(
-            [
-                PYTHON, os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
-                "--script", "post_github",
-                "--posted", str(_RUN_STATE["posted"]),
-                "--skipped", str(_RUN_STATE["skipped"]),
-                "--failed", str(_RUN_STATE["failed"]),
-                "--cost", f"{_RUN_STATE['cost']:.4f}",
-                "--elapsed", str(elapsed),
-            ],
-            timeout=15,
-            check=False,
+        suffix = f"(signal {signaled})" if signaled else "(safety-net)"
+        print(
+            f"=== SUMMARY: elapsed={elapsed}s "
+            f"posted={_RUN_STATE['posted']} failed={_RUN_STATE['failed']} "
+            f"=== {suffix}",
+            flush=True,
         )
+    except Exception:
+        pass
+    cmd = [
+        PYTHON, os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
+        "--script", "post_github",
+        "--posted", str(_RUN_STATE["posted"]),
+        "--skipped", str(_RUN_STATE["skipped"]),
+        "--failed", str(_RUN_STATE["failed"]),
+        "--cost", f"{_RUN_STATE['cost']:.4f}",
+        "--elapsed", str(elapsed),
+    ]
+    if signaled:
+        cmd.extend(["--failure-reasons", "sigterm:1"])
+    try:
+        subprocess.run(cmd, timeout=15, check=False)
     except Exception:
         # Trap context: never raise from the safety net. Better to lose this
         # one summary line than to crash a shutdown sequence that might be
@@ -107,7 +130,9 @@ def _emit_run_summary_oneshot():
 
 
 def _signal_to_exit(signum, _frame):
-    # Convert the signal into a normal-looking exit so atexit fires.
+    # Record which signal ended us so the atexit summary can tag the run,
+    # then convert the signal into a normal-looking exit so atexit fires.
+    _RUN_STATE["signaled"] = signum
     sys.exit(128 + signum)
 
 
@@ -721,8 +746,17 @@ Return ONLY a single JSON object. No prose, no markdown fencing, no Bash calls:
     }}
   ],
   "skipped": [
-    {{ "url": "<issue url>", "reason": "<short reason; use 'low_relevance' when relevance < {min_relevance}>" }}
+    {{ "url": "<issue url>", "reason": "<code>: <one-line why>" }}
   ]
+
+For skip reasons, start with one snake_case code so the dashboard can
+aggregate, then a colon and a one-line specific why. Codes: low_relevance
+(relevance < {min_relevance}), restates_thread (your point is already in the
+issue/comments), owner_spec_ticket (owner's self-addressed work ticket),
+maintainer_direction (maintainer set direction), thin_audience (1 outside
+participant, nothing new to add), manufactured_expertise (would need fake
+experience), pitch_pileup (other commenters pitching tools), off_domain
+(would have to pivot topics), other (anything else).
 }}
 
 If, and ONLY if, none of the listed styles fits, you may invent one. Set
@@ -1179,6 +1213,11 @@ def main():
     if not ok:
         log(f"Claude FAILED: {output[:300]}")
         _RUN_STATE["failed"] = 1
+        # Marker line for run-github.sh's EXIT trap (see
+        # _emit_run_summary_oneshot): without it this branch was double-logged
+        # by the trap as a spurious sigterm:1 row.
+        log(f"=== SUMMARY: elapsed={int(time.time() - run_start)}s "
+            f"posted=0 failed=1 === (claude-failure)")
         subprocess.run([
             PYTHON, os.path.join(SCRIPTS, "log_run.py"),
             "--script", "post_github",
@@ -1195,6 +1234,18 @@ def main():
     posts = decisions.get("posts", []) or []
     skipped = decisions.get("skipped", []) or []
     log(f"Claude picked {len(posts)}, skipped {len(skipped)}")
+    # Full-funnel visibility (2026-07-18): phase-1 gate skips already log one
+    # line each; do the same for Claude's judgment-level skips so the cycle
+    # log answers "why didn't we post" end to end. Mirrors the twitter
+    # principle (twitter_candidates.skip_reason) at log level; GitHub has no
+    # candidates table, so the cycle log is the system of record here.
+    for _s in skipped:
+        if isinstance(_s, dict):
+            log(
+                f"  claude-skip "
+                f"{_s.get('url') or _s.get('thread_url') or '?'}: "
+                f"{str(_s.get('reason') or '(no reason given)')[:220]}"
+            )
 
     # Relevance gate. Anything Claude scored below MIN_RELEVANCE goes to the
     # skipped bucket, NOT posted, regardless of how confident the comment_text
@@ -1447,7 +1498,23 @@ def main():
     _RUN_STATE["failed"] = failed
     _RUN_STATE["skipped"] = len(skipped)
     _RUN_STATE["cost"] = usage["cost_usd"]
-    subprocess.run([
+    # Aggregate Claude's skip codes into the same `skip_reasons=code:count`
+    # segment run-twitter-cycle.sh ships, so the dashboard's yellow
+    # "skipped: <reason>" pills work for github runs too. The code is the
+    # snake_case token before the first ':' in each skip reason (see the
+    # prompt's skip-code list); free-form text degrades to a slug.
+    _skip_counts = {}
+    for _s in skipped:
+        _r = (_s.get("reason") if isinstance(_s, dict) else str(_s)) or "unspecified"
+        _code = re.sub(r"[^a-z0-9_]+", "_",
+                       str(_r).split(":", 1)[0].strip().lower()).strip("_")[:40]
+        _code = _code or "unspecified"
+        _skip_counts[_code] = _skip_counts.get(_code, 0) + 1
+    _skip_arg = ",".join(
+        f"{k}:{v}" for k, v in
+        sorted(_skip_counts.items(), key=lambda kv: -kv[1])[:8]
+    )
+    _cmd = [
         PYTHON, os.path.join(SCRIPTS, "log_run.py"),
         "--script", "post_github",
         "--posted", str(posted),
@@ -1455,7 +1522,10 @@ def main():
         "--failed", str(failed),
         "--cost", f"{usage['cost_usd']:.4f}",
         "--elapsed", f"{int(total_elapsed)}",
-    ])
+    ]
+    if _skip_arg:
+        _cmd.extend(["--skip-reasons", _skip_arg])
+    subprocess.run(_cmd)
     _RUN_STATE["emitted"] = True
 
 
