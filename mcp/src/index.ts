@@ -2898,11 +2898,20 @@ tool(
         summary: summarizeRedditAuth(r),
         note: r.note,
         attempts: r.attempts,
+        // The launchd discovery kicker's install result (or skip reason), so the
+        // agent can SEE whether reddit drafting is actually scheduled rather than
+        // assuming "connected" means "producing drafts".
+        discovery_job: redditKicker,
         onboarding: onboardingSnapshot(),
         next_step: r.connected
-          ? "Reddit is connected. The reddit discovery job installs itself once a project is " +
-            "configured; drafts flow into the same review cards as X and nothing posts without " +
-            "approval." +
+          ? (redditKicker?.ok
+              ? "Reddit is connected and the discovery job is scheduled (runs every ~15 min); " +
+                "drafts flow into the same review cards as X and nothing posts without approval."
+              : "Reddit is connected, but the discovery job is NOT scheduled yet (" +
+                (redditKicker?.detail || "unknown") + "). It installs automatically once a product " +
+                "project is ready OR personal_brand mode is on with a ready persona; until then no " +
+                "reddit drafts will appear. Drafts, once flowing, land in the same review cards as X " +
+                "and nothing posts without approval.") +
             (r.warning ? " Relay the `warning` field to the user so expectations are set." : "")
           : r.state === "needs_login"
             ? "The user must finish signing in to reddit.com in the Chrome window that opened. Tell " +
@@ -6507,8 +6516,11 @@ async function main() {
     console.error("[queue-worker] launchd kicker: skip (paused)");
   }
   // Reddit discovery kicker (optional platform): installs only when reddit is
-  // connected AND a project is ready; a box that never connected reddit is a
-  // cheap no-op skip. Paused-gated like the X kicker (it produces drafts).
+  // connected AND a draftable lane exists (product ready OR active persona, via
+  // the shared draftableLaneStatus). A box that never connected reddit is a cheap
+  // no-op skip. This boot-time call also SELF-HEALS installs broken by the old
+  // product-only gate: once the gate passes, the plist lands on the next boot
+  // (worker sessions boot ~1/min). Paused-gated like the X kicker (produces drafts).
   if (!isPaused()) {
     void ensureRedditKickerInstalled()
       .then((r) => console.error(`[reddit-kicker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
