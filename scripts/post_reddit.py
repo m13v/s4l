@@ -1290,7 +1290,7 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
         "recent_self_block": recent_self or "",
         # personal_brand renders the persona directive + persona-whitelisted
         # project JSON in draft_prompt_core; comes from the plan stamp (see
-        # _discover_iteration), NEVER from env — salvage plans predate this
+        # _discover_iteration), NEVER from env; salvage plans predate this
         # cycle's lane and must keep the promotion directive.
         "lane": lane or "",
     }
@@ -2013,7 +2013,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # Force-inject (2026-07-17): --project (manual MCP runs) or S4L_FORCE_PROJECT
     # (the personal_brand lane's env, set by s4l_mode.py via the wrapper's eval)
     # bypasses pick_project entirely. This is the ONLY way a persona:true entry
-    # can be selected — pick_project structurally excludes personas. Mirrors
+    # can be selected; pick_project structurally excludes personas. Mirrors
     # run-twitter-cycle.sh's S4L_FORCE_PROJECT handling.
     force_project = args.project or (os.environ.get("S4L_FORCE_PROJECT") or "").strip()
     if force_project:
@@ -2289,7 +2289,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     #
     # lane (2026-07-17): stamped ONCE here at plan-write time and read from
     # the PLAN by every downstream phase (_draft_iteration →
-    # render_reddit_prompt), never from env — salvage plans from earlier
+    # render_reddit_prompt), never from env; salvage plans from earlier
     # cycles and the env-less MCP approval poster must not inherit this
     # cycle's lane. Same stamp-at-source convention as active_experiments
     # (see CLAUDE.md). Derived from CONFIG (persona:true), not from
@@ -2696,7 +2696,7 @@ def _post_iteration(plan, reddit_username):
     active_campaigns = load_active_reddit_campaigns()
     # Persona posts never carry a product campaign suffix (2026-07-17): the
     # reddit analog of the X lane's TWITTER_TAIL_LINK_RATE=0. Resolved from
-    # config (persona:true on the plan's project), NOT from lane env — the
+    # config (persona:true on the plan's project), NOT from lane env; the
     # MCP approval poster runs env-less, and config is the durable truth.
     if active_campaigns:
         _plan_proj = (plan.get("project_name") or "").lower()
