@@ -5171,15 +5171,15 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
 
 // ---- pause/resume: stop drafting/posting without touching Claude Desktop ---
 // Unlike Quit (which kills + relaunches Claude Desktop and deletes the draft
-// schedule), Pause only unloads the launchd jobs that actually DO work — the
-// kicker that scans/drafts/posts (TWITTER_AUTOPILOT_LABEL) plus its reaper,
-// stall-watch, and memory-snapshot support daemons — while leaving Claude
-// Desktop, the tray, and the Claude-native s4l-worker scheduled task alone.
-// The scheduled task still fires on its own cadence; claude_job.py's `next`
-// checks the same flag file and reports "no work" instantly instead of
+// schedule), Pause only unloads the launchd jobs that actually DO work — every
+// pipeline kicker (X cycle, Reddit discovery) plus the reaper, stall-watch, and
+// memory-snapshot support daemons — while leaving Claude Desktop, the tray, and
+// the Claude-native s4l-worker scheduled task alone. The scheduled task still
+// fires on its own cadence; claude_job.py's `next` checks the same flag file
+// (at entry AND on every poll iteration) and reports "no work" instead of
 // draining the queue, so nothing drafts or posts while paused even if a
 // worker session wakes up mid-pause. A flag file (nothing is deleted) is what
-// makes Resume a plain reinstall of the same 4 daemons — see resumeS4L.
+// makes Resume a plain reinstall of the same daemons — see resumeS4L.
 function pauseFlagPath(): string {
   return path.join(s4lStateDir(), "paused.flag");
 }
@@ -5192,15 +5192,47 @@ function isPaused(): boolean {
   }
 }
 
-const PAUSE_TARGETS: Array<{ label: string; plist: string }> = [
-  { label: TWITTER_AUTOPILOT_LABEL, plist: TWITTER_AUTOPILOT_PLIST },
-  { label: REAPER_LABEL, plist: REAPER_PLIST },
-  { label: STALL_WATCH_LABEL, plist: STALL_WATCH_PLIST },
-  { label: MEMORY_SNAPSHOT_LABEL, plist: MEMORY_SNAPSHOT_PLIST },
+// THE single registry of pausable pipeline daemons. Pause unloads exactly this
+// set, Resume reinstalls exactly this set (each ensure re-applies its own
+// install gates: draftable lane, reddit connected, etc.), boot skips exactly
+// this set while paused, and the label list is mirrored to
+// <state>/pause-targets.json so the menubar's Python pause button
+// (mcp/menubar/s4l_state.py) acts on the same set without a second hardcoded
+// list. Add a new pipeline daemon HERE and every pause surface picks it up.
+// Feedback-digest is deliberately absent: it only distills past review
+// decisions, not drafting/posting, so it keeps running while paused.
+const PAUSE_TARGETS: Array<{
+  tag: string;
+  label: string;
+  plist: string;
+  ensure: () => Promise<{ ok: boolean; detail: string }>;
+}> = [
+  { tag: "queue-worker", label: TWITTER_AUTOPILOT_LABEL, plist: TWITTER_AUTOPILOT_PLIST, ensure: ensureQueueKickerInstalled },
+  { tag: "reddit-kicker", label: REDDIT_SEARCH_LABEL, plist: REDDIT_SEARCH_PLIST, ensure: ensureRedditKickerInstalled },
+  { tag: "claude-reaper", label: REAPER_LABEL, plist: REAPER_PLIST, ensure: ensureClaudeReaperInstalled },
+  { tag: "stall-watch", label: STALL_WATCH_LABEL, plist: STALL_WATCH_PLIST, ensure: ensureStallWatchInstalled },
+  { tag: "memory-snapshot", label: MEMORY_SNAPSHOT_LABEL, plist: MEMORY_SNAPSHOT_PLIST, ensure: ensureMemorySnapshotInstalled },
 ];
+
+// Mirror the pausable label set into the state dir for the menubar's Python
+// pause/resume (which can't import this module). Written at boot and on every
+// pause/resume so the two surfaces can't drift.
+function writePauseTargetsManifest(): void {
+  try {
+    fs.mkdirSync(s4lStateDir(), { recursive: true });
+    fs.writeFileSync(
+      path.join(s4lStateDir(), "pause-targets.json"),
+      JSON.stringify({ labels: PAUSE_TARGETS.map((t) => t.label) }) + "\n",
+      "utf-8"
+    );
+  } catch {
+    /* best-effort */
+  }
+}
 
 async function pauseS4L(): Promise<{ ok: boolean; detail: string }> {
   if (isPaused()) return { ok: true, detail: "already paused" };
+  writePauseTargetsManifest();
   try {
     fs.mkdirSync(path.dirname(pauseFlagPath()), { recursive: true });
     fs.writeFileSync(pauseFlagPath(), `paused at ${new Date().toISOString()}\n`, "utf-8");
@@ -5226,17 +5258,17 @@ async function resumeS4L(): Promise<{ ok: boolean; detail: string }> {
   } catch {
     /* best-effort */
   }
-  const kicker = await ensureQueueKickerInstalled();
-  const reaper = await ensureClaudeReaperInstalled();
-  const stall = await ensureStallWatchInstalled();
-  const mem = await ensureMemorySnapshotInstalled();
-  const detail = [
-    `kicker: ${kicker.ok ? "ok" : "skip"} (${kicker.detail})`,
-    `reaper: ${reaper.ok ? "ok" : "skip"} (${reaper.detail})`,
-    `stall-watch: ${stall.ok ? "ok" : "skip"} (${stall.detail})`,
-    `memory-snapshot: ${mem.ok ? "ok" : "skip"} (${mem.detail})`,
-  ].join("; ");
-  return { ok: true, detail };
+  writePauseTargetsManifest();
+  const results: string[] = [];
+  for (const t of PAUSE_TARGETS) {
+    try {
+      const r = await t.ensure();
+      results.push(`${t.tag}: ${r.ok ? "ok" : "skip"} (${r.detail})`);
+    } catch (e: any) {
+      results.push(`${t.tag}: ${e?.message || e}`);
+    }
+  }
+  return { ok: true, detail: results.join("; ") };
 }
 
 // Install/refresh the on-screen overlay watcher launchd job. Promotes the
@@ -6301,7 +6333,7 @@ appTool(
       (snap.update_available && snap.latest_version ? ` (update to ${snap.latest_version})` : "") +
       ` — projects ${snap.projects_ready}/${snap.projects_total} ready, ` +
       `X ${snap.x_connected ? "connected" : "not connected"}, ` +
-      `autopilot ${snap.autopilot_on ? "on" : "off"}.`;
+      `autopilot ${snap.paused ? "PAUSED" : snap.autopilot_on ? "on" : "off"}.`;
     const base = {
       content: [{ type: "text" as const, text: human }],
       structuredContent: { snapshot: JSON.stringify(snap) },
@@ -6583,68 +6615,34 @@ async function main() {
   } catch (e: any) {
     console.error(`[queue-worker] could not create worker folder: ${e?.message || e}`);
   }
-  // The 4 pipeline daemons (kicker, reaper, stall-watch, memory-snapshot) are
-  // skipped at boot while paused.flag is present, so a Claude Desktop restart
+  // Pausable pipeline daemons — one loop over the SAME registry pause/resume
+  // use (PAUSE_TARGETS: X kicker, reddit kicker, reaper, stall-watch,
+  // memory-snapshot), so boot can never install a daemon Pause doesn't cover.
+  // Each is skipped while paused.flag is present, so a Claude Desktop restart
   // during a Pause doesn't silently un-pause the pipeline — see pauseS4L/
-  // resumeS4L. Feedback-digest is NOT gated: it only distills past review
-  // decisions, not drafting/posting, so it's harmless to keep running.
-  if (!isPaused()) {
-    void ensureQueueKickerInstalled()
-      .then((r) => console.error(`[queue-worker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-      .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
-  } else {
-    console.error("[queue-worker] launchd kicker: skip (paused)");
-  }
-  // Reddit discovery kicker (optional platform): installs only when reddit is
-  // connected AND a draftable lane exists (product ready OR active persona, via
-  // the shared draftableLaneStatus). A box that never connected reddit is a cheap
-  // no-op skip. This boot-time call also SELF-HEALS installs broken by the old
-  // product-only gate: once the gate passes, the plist lands on the next boot
-  // (worker sessions boot ~1/min). Paused-gated like the X kicker (produces drafts).
-  if (!isPaused()) {
-    void ensureRedditKickerInstalled()
-      .then((r) => console.error(`[reddit-kicker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-      .catch((e) => console.error("[reddit-kicker] kicker install failed:", e?.message || e));
-  } else {
-    console.error("[reddit-kicker] launchd kicker: skip (paused)");
-  }
-  // Self-healing reaper for the agent-mode session leak the queue autopilot
-  // produces (finished `claude` worker sessions Desktop never tears down). A
-  // standalone guardrail; install unconditionally so it caps memory even on a
-  // box whose project isn't ready yet. Best-effort; must never block boot.
-  if (!isPaused()) {
-    void ensureClaudeReaperInstalled()
-      .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-      .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
-  } else {
-    console.error("[claude-reaper] launchd reaper: skip (paused)");
+  // resumeS4L. Each ensure keeps its own install gates (draftable lane, reddit
+  // connected, etc.); a box that never connected reddit is a cheap no-op skip.
+  // The boot-time call also SELF-HEALS installs broken by older gates: once a
+  // gate passes, the plist lands on the next boot. All best-effort; never block
+  // boot.
+  writePauseTargetsManifest();
+  for (const t of PAUSE_TARGETS) {
+    if (isPaused()) {
+      console.error(`[${t.tag}] launchd ${t.label}: skip (paused)`);
+      continue;
+    }
+    void t.ensure()
+      .then((r) => console.error(`[${t.tag}] launchd: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+      .catch((e) => console.error(`[${t.tag}] launchd install failed:`, e?.message || e));
   }
   // Feedback digest: hourly distillation of the user's card approve/reject
   // decisions into learned_preferences (see scripts/feedback_digest.py).
-  // Best-effort; a box with no review events runs a no-op.
+  // Best-effort; a box with no review events runs a no-op. NOT pause-gated (and
+  // not in PAUSE_TARGETS): it only distills past review decisions, not
+  // drafting/posting, so it's harmless to keep running.
   void ensureFeedbackDigestInstalled()
     .then((r) => console.error(`[feedback-digest] launchd digest: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[feedback-digest] digest install failed:", e?.message || e));
-  // Autopilot stall watchdog: fleet-side Sentry alert when the draft routines stop
-  // draining (most often an account switch orphaning them). The menu bar shows the
-  // user the Re-arm action; this is the part we see. Best-effort; never blocks boot.
-  if (!isPaused()) {
-    void ensureStallWatchInstalled()
-      .then((r) => console.error(`[stall-watch] launchd watchdog: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-      .catch((e) => console.error("[stall-watch] watchdog install failed:", e?.message || e));
-  } else {
-    console.error("[stall-watch] launchd watchdog: skip (paused)");
-  }
-  // Periodic host-resource sampler (memory/process snapshot -> local JSONL). Gives
-  // us per-box resource history to diagnose RAM blowups (e.g. the agent-mode
-  // session leak). Best-effort; never blocks boot. Disable with S4L_MEMORY_SNAPSHOT=0.
-  if (!isPaused()) {
-    void ensureMemorySnapshotInstalled()
-      .then((r) => console.error(`[memory-snapshot] launchd sampler: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-      .catch((e) => console.error("[memory-snapshot] sampler install failed:", e?.message || e));
-  } else {
-    console.error("[memory-snapshot] launchd sampler: skip (paused)");
-  }
   // On-screen overlay watcher supervisor. The harness status overlay only renders
   // while the watcher process is alive, and that watcher had no supervisor — when
   // it died nothing respawned it and the overlay silently vanished. Install it as
