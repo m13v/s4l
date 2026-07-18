@@ -106,7 +106,8 @@ def _venue(post: dict) -> str | None:
     return None
 
 
-def _removed_event(post: dict, venue_count: int = 0) -> dict:
+def _removed_event(post: dict, venue_count: int = 0,
+                   ctx: dict | None = None) -> dict:
     venue = _venue(post)
     is_own_thread = bool(post.get("thread_url")) and post.get("thread_url") == post.get("our_url")
     kind = "top-level post" if is_own_thread else "comment/reply"
@@ -120,6 +121,23 @@ def _removed_event(post: dict, venue_count: int = 0) -> dict:
     if venue and venue_count > 1:
         cluster = (f" This is 1 of {venue_count} of our posts removed in"
                    f" {venue} in the recent window (a venue-level pattern).")
+    # ctx = moderation context fetched from the live thread (reddit_ban_check.
+    # removal_context): who removed it, any mod-rewritten flair, and the mod
+    # team's stated reason. This is the single highest-signal line the digest
+    # can learn from ("Posts must directly relate to JavaScript" is a venue
+    # verdict, not a style nit), so it goes into the note verbatim.
+    mod_ctx = ""
+    if ctx:
+        bits = []
+        if ctx.get("removed_by"):
+            bits.append(f"removed_by={ctx['removed_by']}")
+        flair = ctx.get("flair") or ""
+        if flair.lower().startswith("removed"):
+            bits.append(f"flair={flair!r}")
+        for n in (ctx.get("mod_notes") or [])[:2]:
+            bits.append(f"mod note: {n!r}")
+        if bits:
+            mod_ctx = " Moderation context: " + "; ".join(bits) + "."
     note = (
         f"Platform moderation strike: our {post.get('platform')} {kind}"
         f"{' in ' + venue if venue else ''} is now status='{post.get('status')}'"
@@ -128,7 +146,7 @@ def _removed_event(post: dict, venue_count: int = 0) -> dict:
         f" account {post.get('our_account')}."
         f" Machine-derived signal, not a human card decision: a moderator or"
         f" platform filter judged this content unwelcome in that venue."
-        f"{cluster}"
+        f"{cluster}{mod_ctx}"
     )
     return {
         "event_uuid": str(uuid.uuid5(EVENT_NS, f"platform_removed:post:{post['id']}")),
