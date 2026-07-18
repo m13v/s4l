@@ -4099,36 +4099,38 @@ class S4LMenuBar(rumps.App):
             items += self._state_b(ob, blocker)
         else:
             items += self._state_c(snap, pending_count)
-            # Drafting-pipeline controls (post-setup, every State-C menu
-            # regardless of pending drafts): a live status/countdown line + a
-            # one-click "Run drafting now". The pipeline scans first, then hands
-            # off to the drafter; these mirror the same controls on the dashboard
-            # widget, both reading scripts/live_status.py so the surfaces can't
-            # drift. The live phase readout (Scanning/Drafting/Posting) is the
-            # honest current stage of that pipeline.
+            # Drafting-pipeline control (post-setup, every State-C menu regardless
+            # of pending drafts): ONE line — the action is the phrase, the live
+            # state is in brackets. The pipeline scans first, then hands off to the
+            # drafter; this mirrors the dashboard widget, both reading
+            # scripts/live_status.py so the surfaces can't drift.
+            #   idle    -> "Run drafting now (next run in 42s)"  [clickable]
+            #   running -> "Run drafting now (drafting…)"        [greyed]
+            #   paused  -> "Run drafting now (paused)"           [greyed]
+            # Clickable only when idle & not paused: while a run is in flight
+            # launchd would just no-op the single instance, and while paused the
+            # kicker is unloaded so nothing would run.
             live = getattr(self, "_live", {}) or {}
             act_state = live.get("activity_state", "idle")
             running = act_state in ("scanning", "drafting", "posting")
-            items.append(rumps.separator)
-            if running:
-                _verb = {"scanning": "Scanning", "drafting": "Drafting", "posting": "Posting"}[act_state]
-                items.append(self._label(f"⟳ {_verb} now…"))
+            paused = os.path.exists(PAUSE_FLAG)
+            if paused:
+                _bracket = "paused"
+            elif running:
+                _bracket = f"{act_state}…"
             else:
                 _secs = live.get("next_run_secs")
-                if isinstance(_secs, int):
-                    items.append(self._label(f"Next drafting run in {self._fmt_countdown(_secs)}"))
-                else:
-                    items.append(self._label("Next drafting run within a minute"))
-            # Run now is disabled (shown as a plain label) while paused — the
-            # kicker is unloaded, so nothing would run — or while a run is
-            # already in flight, where launchd would just no-op the single
-            # instance.
-            if os.path.exists(PAUSE_FLAG):
-                items.append(self._label("Run drafting now (paused)"))
-            elif running:
-                items.append(self._label("Run drafting now (already running)"))
+                _bracket = (
+                    f"next run in {self._fmt_countdown(_secs)}"
+                    if isinstance(_secs, int)
+                    else "next run within a minute"
+                )
+            _text = f"Run drafting now ({_bracket})"
+            items.append(rumps.separator)
+            if paused or running:
+                items.append(self._label(_text))  # greyed: can't run right now
             else:
-                items.append(rumps.MenuItem("Run drafting now", callback=self._run_drafting))
+                items.append(rumps.MenuItem(_text, callback=self._run_drafting))
 
         # Engagement lanes — ALWAYS visible (every state), not just post-setup, so
         # the user can see + flip either lane any time. Two INDEPENDENT checkmarks
@@ -4190,9 +4192,10 @@ class S4LMenuBar(rumps.App):
             items.append(cadence_menu)
 
         # Posting volume: server-side per-install throttle (virality bar).
-        # read_posting_mode() is cached and non-blocking; unknown/unset shows
-        # as Steady (the server resolves unset the same way), corrected on the
-        # rebuild after the first refresh lands.
+        # read_posting_mode() is cached and non-blocking; the cache is seeded
+        # from the on-disk last-known copy at boot, so a restart keeps showing
+        # the user's chosen mode. Genuinely unset shows as Steady (the server
+        # resolves unset the same way), corrected after the first refresh.
         pv_mode = st.read_posting_mode() or "medium"
         pv_menu = rumps.MenuItem(
             f"Posting volume: {self._posting_mode_label(pv_mode).split(' (')[0].lower()}"
