@@ -6,7 +6,7 @@
 //                     via the host create_scheduled_task. The autopilot then drafts
 //                     on its own (launchd kicker + queue worker); there is no manual
 //                     "draft now" tool.
-//   post_drafts     - post the drafts the user chose by number from a batch.
+//   approve_drafts     - post the drafts the user chose by number from a batch.
 //   get_stats    - read-only post + engagement stats.
 //
 // THIN wrapper. The pipeline brain (scan, score, drafting prompts, posting)
@@ -101,7 +101,7 @@ const PRODUCT_LINK_URI = "ui://social-autoposter/product-link.html";
 
 // Stable id for the accumulating draft review queue. Each draft cycle appends its
 // drafts here (dedup by tweet URL) so the menu-bar cards PILE UP across a
-// continuous autopilot instead of each run overwriting the last; post_drafts posts
+// continuous autopilot instead of each run overwriting the last; approve_drafts posts
 // the approved subset and marks them posted (filtered out of the cards thereafter).
 const REVIEW_QUEUE_ID = "review-queue";
 
@@ -539,12 +539,12 @@ const server = new McpServer(
       "(configure the product project) -> `queue_setup` + " +
       "`create_scheduled_task` (set up the draft autopilot once) -> the autopilot then runs on its own " +
       "(scans, drafts via the queue + worker, and merges into the approval cards; nothing posts) -> the " +
-      "user approves in the menu bar -> `post_drafts` (post the approved ones) -> `get_stats` (see " +
+      "user approves in the menu bar -> `approve_drafts` (post the approved ones) -> `get_stats` (see " +
       "performance). Run `project_config` first; the other tools refuse until a " +
       "project is fully configured. To change anything about a project later, call `project_config` " +
       "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
-      "(`post_drafts`, `get_stats`, `project_config`), end your turn by " +
+      "(`approve_drafts`, `get_stats`, `project_config`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.\n\n" +
       "REPORT FIELD DIAGNOSES. Whenever an S4L setup, healing, or troubleshooting flow FAILS, or " +
@@ -578,7 +578,7 @@ const baseRegisterTool = server.registerTool.bind(server);
 // show a spinner + label while they run (either invocation path). draft_cycle is
 // NOT here — it writes finer scanning/drafting phases itself (see produceDrafts).
 const TOOL_ACTIVITY: Record<string, string> = {
-  post_drafts: "posting",
+  approve_drafts: "posting",
   get_stats: "stats…",
 };
 function toolActivityLabel(name: string, args: any): string | null {
@@ -942,7 +942,7 @@ async function produceDrafts(
 
 // Render every draft in a batch as a numbered, human-readable table. This IS the
 // review surface now: the model relays this table to the user and asks which
-// numbers to post / edit, then posts the chosen ones via the `post_drafts` tool.
+// numbers to post / edit, then posts the chosen ones via the `approve_drafts` tool.
 //
 // We used to gather approvals through MCP elicitation (a checkbox form), but the
 // desktop "Code tab" host doesn't advertise the `elicitation` capability (only
@@ -951,7 +951,7 @@ async function produceDrafts(
 function renderDraftsTable(plan: Plan): string {
   const candidates = plan.candidates || [];
   return candidates
-    // Number by FULL-array index (matches post_drafts + the menu bar), then drop
+    // Number by FULL-array index (matches approve_drafts + the menu bar), then drop
     // already-finished entries so the cards only show what's still pending.
     .map((c, i) => ({ c, n: i + 1 }))
     // awaiting_review is the ONLY state the review surfaces present (same rule
@@ -967,7 +967,7 @@ function renderDraftsTable(plan: Plan): string {
       const reply = c.reply_text ?? "(empty)";
       // The literal tail URL is NOT known yet: at post time a short link is minted
       // from this target (e.g. fazm.ai/cc -> s4l.ai/r/<code>). Approved drafts
-      // always carry the link (post_drafts forces TWITTER_TAIL_LINK_RATE=1.0), so
+      // always carry the link (approve_drafts forces TWITTER_TAIL_LINK_RATE=1.0), so
       // this is the target that WILL be appended. Show the TARGET only; never
       // pre-mint the real /r/ code (that would waste pool codes / split clicks).
       const link = c.link_url
@@ -1346,7 +1346,7 @@ async function postApproved(batchId: string, plan: Plan) {
         exit_code: 0,
         summary:
           "another posting drain has been running for 8+ minutes; approved cards stay " +
-          "queued in the review store — re-run post_drafts once it finishes",
+          "queued in the review store — re-run approve_drafts once it finishes",
       };
     }
     if (waited) {
@@ -1481,7 +1481,7 @@ async function postApproved(batchId: string, plan: Plan) {
         redditFailed++;
         continue;
       }
-      // The card's reply_text is the CANONICAL text (post_drafts edits write
+      // The card's reply_text is the CANONICAL text (approve_drafts edits write
       // there); the embedded decision still carries the draft-time original.
       // Posting dec.text verbatim would silently discard a human edit.
       const decPost: Record<string, unknown> = {
@@ -1551,7 +1551,7 @@ async function postApproved(batchId: string, plan: Plan) {
         redditPosted++;
       } else {
         // Leave the approval sticky (approved && !posted && !terminal) so the
-        // next post_drafts call retries, mirroring twitter's failed-drain
+        // next approve_drafts call retries, mirroring twitter's failed-drain
         // semantics; only stamp terminal on a conclusive CDP refusal. This
         // list MUST stay a superset of post_reddit.py's own
         // _PERMANENT_CDP_ERRORS (account_blocked_in_sub, no_permalink) —
@@ -1656,7 +1656,7 @@ async function postApproved(batchId: string, plan: Plan) {
     // we can write our own pid) — a pathological edge case, not the normal path.
     // Bail out rather than proceed without ever confirming we hold it. Approved
     // cards stay sticky (approved && !posted && !terminal), so the very next
-    // post_drafts call — the next approval, or this same tool retried — picks
+    // approve_drafts call — the next approval, or this same tool retried — picks
     // them straight back up; nothing is lost or re-queued.
     postingActive = false;
     stopPostingFlagHeartbeat();
@@ -1665,7 +1665,7 @@ async function postApproved(batchId: string, plan: Plan) {
       exit_code: 0,
       summary:
         "couldn't pin down the twitter-browser lock after repeated attempts; approved cards " +
-        "stay queued — re-run post_drafts to retry",
+        "stay queued — re-run approve_drafts to retry",
     };
   }
   const approvedBatch = `${batchId}_approved`;
@@ -1724,9 +1724,9 @@ async function postApproved(batchId: string, plan: Plan) {
             // are now no-ops for the normal path — every approved candidate
             // already carries tail_link_variant by the time it reaches this MCP
             // tool. They're left in place as a defense-in-depth fallback for the
-            // rare case a candidate reaches post_drafts unstamped (e.g. a plan
+            // rare case a candidate reaches approve_drafts unstamped (e.g. a plan
             // already in flight from before this change): S4L_SKIP_LINK_TAIL=1
-            // still guarantees post_drafts (a synchronous call the user is
+            // still guarantees approve_drafts (a synchronous call the user is
             // waiting on) never makes a blocking Claude/queue call at post time,
             // no matter what.
             TWITTER_TAIL_LINK_RATE: "1.0",
@@ -1769,7 +1769,7 @@ async function postApproved(batchId: string, plan: Plan) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     fs.writeFileSync(
       path.join(postLogDir, `post-${stamp}.log`),
-      `# post_drafts batch=${batchId} approved=${approvedTwitter.length} exit=${res.code} ` +
+      `# approve_drafts batch=${batchId} approved=${approvedTwitter.length} exit=${res.code} ` +
         `shell_lock=${heldShellLock}\n\n=== stdout ===\n${res.stdout}\n\n=== stderr ===\n${res.stderr}\n`
     );
   } catch {
@@ -1844,7 +1844,7 @@ async function postApproved(batchId: string, plan: Plan) {
         // ... waited 45s, giving up."). None of those mean the draft is
         // doomed, only that this attempt didn't get a turn with the shared
         // browser. Leave the card sticky (approved && !posted && !terminal)
-        // so the next post_drafts call retries it, mirroring Reddit's
+        // so the next approve_drafts call retries it, mirroring Reddit's
         // _TRANSIENT_CDP_ERRORS handling. Unconditionally marking terminal
         // here (found 2026-07-16) silently and permanently discarded 7 real
         // approved drafts on nothing worse than lock contention — Reddit's
@@ -1898,7 +1898,7 @@ async function postApproved(batchId: string, plan: Plan) {
   const hasRealFailure = res.code !== 0 || Boolean(summObj?.failure_reasons);
   if (hasRealFailure) {
     captureError(
-      new Error(`post_drafts: ${realPosted}/${approvedTwitter.length} posted (exit=${res.code})`),
+      new Error(`approve_drafts: ${realPosted}/${approvedTwitter.length} posted (exit=${res.code})`),
       {
         component: "post",
         exit_code: String(res.code),
@@ -3239,12 +3239,12 @@ tool(
   }
 );
 
-// ---- post_drafts: post the user's chosen drafts from a batch ---------------
+// ---- approve_drafts: post the user's chosen drafts from a batch ---------------
 // Second half of the manual loop. The user reviewed the menu-bar cards a draft
 // cycle produced and said which numbers to post / edit; this posts exactly those.
 // Editing a draft implies posting it. Indices are 1-based, matching the table.
 tool(
-  "post_drafts",
+  "approve_drafts",
   {
     title: "Post chosen drafts",
     description:
@@ -3452,7 +3452,7 @@ tool(
 
     // STICKY approve: record the approval DURABLY and never clear another card's
     // prior approval. The old `c.approved = approve.has(i+1)` reset every card on
-    // each call, so a later post_drafts for a different card dropped a
+    // each call, so a later approve_drafts for a different card dropped a
     // restart-interrupted approved card back into "pending". postApproved filters
     // posted/terminal, so the approved set only ever drains what's genuinely left.
     approve.forEach((n) => {
@@ -3486,7 +3486,7 @@ tool(
       });
       storeWriteDone = await patchReviewStore(patches);
       if (!storeWriteDone)
-        console.error("[post_drafts] store_patch.py failed; falling back to unlocked plan write");
+        console.error("[approve_drafts] store_patch.py failed; falling back to unlocked plan write");
     }
     if (!storeWriteDone) writePlan(batch_id, plan);
 
@@ -4530,12 +4530,12 @@ function queueWorkerAllowedTools(): string[] {
     "Grep",
     // This server's tools, both namespaces (manifest name + protocol name).
     "mcp__social-autoposter__queue_setup",
-    "mcp__social-autoposter__post_drafts",
+    "mcp__social-autoposter__approve_drafts",
     "mcp__social-autoposter__project_config",
     "mcp__social-autoposter__get_stats",
     "mcp__social-autoposter__dashboard",
     "mcp__S4L__queue_setup",
-    "mcp__S4L__post_drafts",
+    "mcp__S4L__approve_drafts",
     "mcp__S4L__project_config",
     "mcp__S4L__get_stats",
     "mcp__S4L__dashboard",
@@ -4730,7 +4730,7 @@ function kickerEnv(): Record<string, string> {
     // The persona lane exports =0 per cycle via s4l_mode.py env (link-free
     // organic replies); promotion cycles keep the script's own default so
     // draft-only-OFF posts carry the project link per the A/B gate, and card posts
-    // still force =1.0 inside post_drafts.
+    // still force =1.0 inside approve_drafts.
     // Virality bar percentile is NOT set here: it is hardcoded to 0.90 in
     // skill/run-twitter-cycle.sh (single source of truth, no env dependency).
   };
@@ -5922,7 +5922,7 @@ function persistStatusSummary(snap: Record<string, unknown>): void {
 // chat-table review path is unchanged and still works; this just ALSO lets the
 // corner cards drive review (both surfaces de-dup via the plan's `posted` flag).
 // The menu bar reads review-request.json, presents the cards, posts via the
-// loopback post_drafts tool, then clears the file. Best-effort: a write failure
+// loopback approve_drafts tool, then clears the file. Best-effort: a write failure
 // just means no pop-ups this batch (chat review still works).
 function writeReviewRequest(req: {
   batch_id: string;
@@ -6117,7 +6117,7 @@ function sigkillAllScans(): void {
 
 // ---- Lock grace-hold: hold the /tmp lock CONTINUOUSLY across per-card posts ----
 // The plist pipeline acquires the browser lock ONCE and holds it through the whole
-// posting phase. The MCP posts per approved card (separate post_drafts calls), and
+// posting phase. The MCP posts per approved card (separate approve_drafts calls), and
 // the old code acquired+released the lock PER CARD — leaving a release window
 // BETWEEN every card that a parked scan stale-reclaimed (the hijack). Instead we
 // keep the lock and only release it after SHELL_LOCK_GRACE_MS of no posting, so the
@@ -6285,7 +6285,7 @@ appTool(
       "connection, autopilot state, and 7-day stats, with buttons to set up the schedule, connect X, " +
       "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
-      "action (post_drafts, get_stats, project_config) so the user sees the " +
+      "action (approve_drafts, get_stats, project_config) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     // fallback_url is set only when the host can't render the ui:// resource and
