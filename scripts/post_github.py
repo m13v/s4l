@@ -1191,6 +1191,11 @@ def main():
                 f"during sleep (last={counts.get('last_commenter')}/"
                 f"{counts.get('last_comment_assoc')})"
             )
+            _cand_mark_skipped(
+                c["url"], "gate_maintainer_t1",
+                f"maintainer arrived during sleep: "
+                f"{counts.get('last_commenter')}/"
+                f"{counts.get('last_comment_assoc')}")
             continue
         c["comment_count_t1"] = counts["comment_count"]
         c["reaction_count_t1"] = counts["reaction_count"]
@@ -1202,6 +1207,8 @@ def main():
             c["comment_count_t0"], c["reaction_count_t0"],
             c["comment_count_t1"], c["reaction_count_t1"],
         )
+        _cand_set_t1(c["url"], c["comment_count_t1"], c["reaction_count_t1"],
+                     c["delta_score"])
         survivors.append(c)
     if skipped_maintainer_phase2:
         log(
@@ -1223,6 +1230,11 @@ def main():
     candidates.sort(key=lambda c: c["delta_score"], reverse=True)
     top = candidates[:CLAUDE_CANDIDATE_LIMIT]
     log(f"Phase 2b: showing Claude top {len(top)} by delta, cap = {cap}")
+    # Candidates below the top-N cut never reach Claude; record why.
+    for c in candidates[CLAUDE_CANDIDATE_LIMIT:]:
+        _cand_mark_skipped(
+            c["url"], "momentum_cut",
+            f"delta={c['delta_score']:.1f} below top {CLAUDE_CANDIDATE_LIMIT}")
 
     if cap <= 0:
         log("cap=0, nothing to post. Exiting.")
@@ -1337,11 +1349,11 @@ def main():
     # candidates table, so the cycle log is the system of record here.
     for _s in skipped:
         if isinstance(_s, dict):
-            log(
-                f"  claude-skip "
-                f"{_s.get('url') or _s.get('thread_url') or '?'}: "
-                f"{str(_s.get('reason') or '(no reason given)')[:220]}"
-            )
+            _s_url = _s.get("url") or _s.get("thread_url") or "?"
+            _s_reason = str(_s.get("reason") or "(no reason given)")
+            log(f"  claude-skip {_s_url}: {_s_reason[:220]}")
+            if _s_url != "?":
+                _cand_mark_skipped(_s_url, "claude", _s_reason)
 
     # Relevance gate. Anything Claude scored below MIN_RELEVANCE goes to the
     # skipped bucket, NOT posted, regardless of how confident the comment_text
@@ -1370,6 +1382,8 @@ def main():
         )
         for r in relevance_dropped:
             log(f"  drop {r['url']}: {r['reason']}")
+            if r.get("url"):
+                _cand_mark_skipped(r["url"], "claude", r["reason"])
     skipped.extend(relevance_dropped)
     posts = kept_posts
 
@@ -1408,6 +1422,9 @@ def main():
             log(f"SKIP: bad URL or empty text: {thread_url}")
             failed += 1
             _RUN_STATE["failed"] = failed
+            if thread_url:
+                _cand_mark_skipped(thread_url, "post_failed",
+                                   "bad URL or empty text")
             continue
 
         # URL-wrap before sending to GitHub. project for wrapping is the
@@ -1461,6 +1478,8 @@ def main():
             log(f"POST FAILED: {url_or_err}")
             failed += 1
             _RUN_STATE["failed"] = failed
+            _cand_mark_skipped(thread_url, "post_failed",
+                               str(url_or_err)[:300])
             time.sleep(3)
             continue
 
@@ -1494,6 +1513,7 @@ def main():
         _RUN_STATE["failed"] = failed
         _RUN_STATE["skipped"] = len(skipped)
         log(f"POSTED: {url_or_err or 'ok'}")
+        _cand_mark_posted(thread_url, new_post_id)
 
         # ---- Optional self-reply with ONE github blob URL ------------------
         # Restored 2026-05-17 after the April 13 over-correction stripped
@@ -1573,6 +1593,18 @@ def main():
                 _RUN_STATE["failed"] = failed
 
         time.sleep(3)
+
+    # Any candidate shown to Claude but absent from BOTH posts and skipped is
+    # an undocumented drop (the prompt asks for every candidate to appear in
+    # one bucket, but models drift); close its row so nothing stays pending.
+    _decided_urls = {(d.get("thread_url") or "").strip() for d in posts}
+    _decided_urls |= {
+        (s.get("url") or s.get("thread_url") or "").strip()
+        for s in skipped if isinstance(s, dict)
+    }
+    for c in top:
+        if (c.get("url") or "").strip() not in _decided_urls:
+            _cand_mark_skipped(c["url"], "claude", "not_mentioned_in_decisions")
 
     # Clean up the generation_trace temp file. By this point every post
     # that landed has its trace persisted to posts.generation_trace JSONB,
