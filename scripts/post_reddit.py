@@ -2580,7 +2580,7 @@ def _draft_iteration(plan, config, reddit_username):
             merged_d["thread_title"] = drafted_d.get("thread_title") or c.get("thread_title")
             merged_d["engagement_style"] = _style_a or c.get("engagement_style")
             # Top-level assigned_style/assigned_mode default to Draft A (the
-            # legacy-mirror draft); the MCP post_drafts edit path overwrites
+            # legacy-mirror draft); the MCP approve_drafts edit path overwrites
             # these on the card when a human switches to Draft B (mirrors
             # twitter_post_plan.py's per-candidate override, see
             # _post_iteration below and index.ts's reddit approval branch).
@@ -2681,7 +2681,7 @@ def _post_iteration(plan, reddit_username):
         # Two-draft cards (2026-07-15): each decision may carry its OWN
         # (assigned_style, assigned_mode) reflecting whichever draft is
         # actually posting — either Draft A (stamped at plan-write time) or
-        # Draft B (stamped by the MCP post_drafts edit path when a human
+        # Draft B (stamped by the MCP approve_drafts edit path when a human
         # switched drafts on the review card). Without this, every card
         # would coerce back to the single batch-wide Draft A assignment even
         # when it posted under Draft B's style, silently corrupting the
