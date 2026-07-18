@@ -268,8 +268,22 @@ def _load_comment_blocked_subs(project_name=None):
         current_account = _resolve_account("reddit") or None
         blocked = set()
         bans = config.get("subreddit_bans") or {}
-        if isinstance(bans, dict):
-            for entry in bans.get("comment_blocked") or []:
+        # Backend union (2026-07-19): the subreddit_bans TABLE is the source
+        # of truth; config.json is the write-through cache / offline fallback.
+        # Union both so neither a missed mirror nor an API outage can un-ban
+        # a sub. fetch_entries returns None on "backend unknown" (never treat
+        # that as "no bans"); entries share the config.json shape so the same
+        # account-scope loop below applies.
+        entries = list(bans.get("comment_blocked") or []) if isinstance(bans, dict) else []
+        try:
+            import subreddit_bans_client as _sbc
+            _backend = _sbc.fetch_entries("comment_blocked", account=current_account)
+            if _backend:
+                entries.extend(_backend)
+        except Exception:
+            pass  # reader must never break on backend/cache trouble
+        if entries:
+            for entry in entries:
                 slug = _ban_entry_to_slug(entry)
                 if not slug:
                     continue
