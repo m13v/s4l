@@ -215,7 +215,7 @@ log "Cycle batch_id=$BATCH_ID"
 # Reddit exactly like the X cycle: when ON, both lanes stop after the draft
 # phase and merge their drafted decisions into the menu-bar review cards
 # (merge_review_queue.py --reddit-plan); posting then happens one approved
-# card at a time via the plugin's post_drafts tool, which reconstructs a
+# card at a time via the plugin's approve_drafts tool, which reconstructs a
 # one-decision plan and reuses `post_reddit.py --phase post` unchanged. When
 # OFF (operator opt-out), the lanes post autonomously below as always.
 # Fail-safe default is 1 (draft-only) — same posture as the X wrapper.
