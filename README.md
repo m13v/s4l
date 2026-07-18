@@ -157,7 +157,7 @@ The plugin exposes MCP tools for the user-facing workflow:
 - `project_config` configures projects, products, voice, topics, and X auth.
 - `engagement_mode` chooses personal-brand and product-promotion lanes.
 - `dashboard` opens the review dashboard.
-- `post_drafts` posts only the drafts the user selected.
+- `approve_drafts` posts only the drafts the user selected.
 - `get_stats` reads X/Twitter stats.
 - `pause_s4l` pauses or resumes scheduled S4L jobs.
 - `runtime` installs, updates, and diagnoses the local runtime.
