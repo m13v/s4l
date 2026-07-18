@@ -158,18 +158,30 @@ def load_thread_blocked_subs(config):
             return False
         return (now - added).total_seconds() > q_days * 86400
 
-    out = set()
+    # Backend union (2026-07-19): the subreddit_bans TABLE is the source of
+    # truth; config.json is the write-through cache / offline fallback. Union
+    # both so neither a missed mirror nor an API outage can un-block a sub.
+    # Backend entries share the config shape, so the same quarantine-expiry
+    # filter applies to them.
+    entries = []
     if isinstance(bans, dict):
-        for entry in bans.get("thread_blocked") or []:
-            slug = _ban_entry_to_slug(entry)
-            if slug and not _expired_quarantine(entry):
-                out.add(slug)
+        entries.extend(bans.get("thread_blocked") or [])
     elif isinstance(bans, list):
         # Legacy flat-list form, treat as thread_blocked.
-        for entry in bans:
-            slug = _ban_entry_to_slug(entry)
-            if slug:
-                out.add(slug)
+        entries.extend(bans)
+    try:
+        import subreddit_bans_client as _sbc
+        _backend = _sbc.fetch_entries("thread_blocked")
+        if _backend:
+            entries.extend(_backend)
+    except Exception:
+        pass  # reader must never break on backend/cache trouble
+
+    out = set()
+    for entry in entries:
+        slug = _ban_entry_to_slug(entry)
+        if slug and not _expired_quarantine(entry):
+            out.add(slug)
     return out
 
 
