@@ -225,6 +225,15 @@ RECENT_STYLES=$(python3 "$RT_HELPER" recent-styles --project "$PROJECT" --limit 
 # Top performers (tone calibration)
 TOP_POSTS=$(python3 "$RT_HELPER" top-posts --project "$PROJECT" --min-score 5 --limit 10 2>/dev/null || echo "(api error)")
 
+# Past moderation verdicts for THIS sub (strike feedback loop, 2026-07-19).
+# Pulls platform_removed/platform_banned events from the review_events ledger,
+# including the mod team's stated removal reasons captured at strike time by
+# platform_strike_events.py. Injected into the prompt so the rules-check step
+# is calibrated by what these mods ACTUALLY removed, not just the rules page.
+# Critical after a 30-day quarantine expires: the retry must not repeat the
+# removed pattern. Empty when the sub has no history (helper prints nothing).
+MOD_HISTORY=$(python3 "$REPO_DIR/scripts/sub_moderation_history.py" "$SUB_SLUG" --max 6 2>/dev/null || true)
+
 if [ "$IS_OWN" = "True" ]; then
   CADENCE_NOTE="This is our OWNED subreddit. Daily cadence (1-day floor). Be yourself, no product pitches."
 else
@@ -379,6 +388,8 @@ ${RECENT_STYLES}
 ## Top performing ${PROJECT} posts (match tone/style)
 ${TOP_POSTS}
 
+${MOD_HISTORY}
+
 ## Workflow
 
 1. RESEARCH (required): Read the product source paths listed in the context block. Specifically:
@@ -414,6 +425,7 @@ ${TOP_POSTS}
 
 5. SUBREDDIT RULES CHECK (bh_run: goto_url to https://old.reddit.com/${SUBREDDIT}/about/rules + wait_for_load)
    - If strict no-self-promo and our post would read promotional, ABORT. Set abort_reason and permalink=null.
+   - If a PAST MODERATION VERDICTS section appears above: those are this sub's mods rejecting our actual posts. Their stated reasons define off-topic for this sub and OVERRIDE your own reading of the rules page. If your draft fits a removed pattern, ABORT rather than post a variation.
    - Note whether flair is required.
 
    PERMANENT_BLOCK DECISION (always set this field):
