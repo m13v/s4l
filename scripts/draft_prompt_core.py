@@ -645,6 +645,19 @@ Examples of WRONG proposals (do not emit):
 Do NOT narrate beyond the persist calls. Gate, draft-or-reject, persist, return the single JSON object."""
 
 
+def _strip_grounding_section(styles_block):
+    """Drop the '## GROUNDING RULE' tail that get_assigned_style_prompt
+    appends to every style block. Reddit-draft-only (2026-07-18 content-rule
+    deprecation): the reddit draft prompt no longer carries the GROUNDING
+    RULE or VOICE RELATIONSHIP sections, so the style-block copy would both
+    resurrect a deprecated rule and dangle a reference to a section that no
+    longer exists. X and the engage rails keep their copies (their prompts
+    still render the sections it points at). Safe as truncation because the
+    grounding rule is the LAST thing get_assigned_style_prompt appends."""
+    i = (styles_block or "").find("## GROUNDING RULE")
+    return styles_block[:i].rstrip() if i != -1 else (styles_block or "")
+
+
 def render_reddit_prompt(ing):
     """Render the full Reddit draft prompt. Keys in `ing`:
     project_name, content_angle, candidates_block, n_candidates, batch_id,
@@ -684,8 +697,8 @@ def render_reddit_prompt(ing):
         .replace("@BATCH_ID@", ing.get("batch_id") or "")
         .replace("@RECENT_SELF_BLOCK@", ing.get("recent_self_block") or "")
         .replace("@TOP_CTX@", top_ctx)
-        .replace("@STYLES_BLOCK_A@", ing.get("styles_block_a") or "")
-        .replace("@STYLES_BLOCK_B@", ing.get("styles_block_b") or "")
+        .replace("@STYLES_BLOCK_A@", _strip_grounding_section(ing.get("styles_block_a")))
+        .replace("@STYLES_BLOCK_B@", _strip_grounding_section(ing.get("styles_block_b")))
         .replace("@DRAFT_DIRECTIVE@", draft_directive(arm, lane))
         .replace("@STYLE_A_NAME@", ing.get("style_a_name") or "style_name")
         .replace("@STYLE_B_NAME@", ing.get("style_b_name") or "style_name")
