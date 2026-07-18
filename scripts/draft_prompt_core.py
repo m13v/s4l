@@ -355,24 +355,6 @@ def recent_self_block(platform, limit=20):
         return ""
 
 
-def product_names():
-    """Every configured project name (lowercased) plus the agency tag, for
-    the reddit never-name-the-product rule. Falls back to a generic list on
-    config failure so the rule never silently vanishes."""
-    names = []
-    try:
-        config = _load_config()
-        for p in config.get("projects", []):
-            n = (p.get("name") or "").strip().lower()
-            if n and n not in names:
-                names.append(n)
-    except Exception:
-        pass
-    if "s4l" not in names:
-        names.append("s4l")
-    return names
-
-
 # --------------------------------------------------------------------------
 # TWITTER renderer. Byte-exact transcription of the run-twitter-cycle.sh
 # PREP_PROMPT heredoc (2026-07-16). @TOKENS@ are unique and replaced below;
@@ -702,15 +684,16 @@ def render_reddit_prompt(ing):
         .replace("@BATCH_ID@", ing.get("batch_id") or "")
         .replace("@RECENT_SELF_BLOCK@", ing.get("recent_self_block") or "")
         .replace("@TOP_CTX@", top_ctx)
-        .replace("@PRODUCT_NAMES@", ", ".join(product_names()))
-        .replace("@CONTENT_RULES@", get_content_rules("reddit"))
         .replace("@STYLES_BLOCK_A@", ing.get("styles_block_a") or "")
         .replace("@STYLES_BLOCK_B@", ing.get("styles_block_b") or "")
         .replace("@DRAFT_DIRECTIVE@", draft_directive(arm, lane))
-        .replace("@VOICE_RELATIONSHIP@", get_voice_relationship_rule())
         .replace("@STYLE_A_NAME@", ing.get("style_a_name") or "style_name")
         .replace("@STYLE_B_NAME@", ing.get("style_b_name") or "style_name")
         .replace("@PROJECT_NAME@", project_name)
+        # The treatment length note is shared text written for X; on Reddit
+        # keep the same short-length instruction without the platform label.
+        .replace("well under Twitter's 250-character practical limit",
+                 "well under 250 characters")
     )
 
 
