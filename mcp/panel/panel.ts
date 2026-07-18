@@ -518,6 +518,9 @@ app.ontoolresult = (result) => {
     if (data.runtime_ready) {
       // Stats need the runtime; load them once it's confirmed ready.
       void loadStats();
+      // Prime the scanner status/countdown now (the loopback first-paint
+      // snapshot omits the live fields), then the 5s poll keeps it fresh.
+      void pollScanStatus();
     } else if (data.runtime_provisioning) {
       // An install is already underway (another surface / prior open) — resume
       // following it without waiting for a click.
@@ -550,6 +553,7 @@ async function refresh() {
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
     log("");
     void loadStats();
+    void pollScanStatus();
   } catch (e: any) {
     log("Refresh failed: " + (e?.message || e));
   }
@@ -687,6 +691,23 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
   } catch (e: any) {
     log("Couldn\u2019t start setup: " + (e?.message || e));
   }
+}));
+
+// Run scan now: fire ONE scanner cycle immediately via the scan_now tool
+// (launchctl kickstart of the launchd kicker — no model in the loop, unlike
+// Setup). Same control as the menu bar's "Run scan now". After firing, poll
+// scan_status so the status flips to "Scanning now…" without waiting for the
+// next 5s poll.
+btnScanNow.addEventListener("click", () => busy(btnScanNow, "Starting…", async () => {
+  try {
+    const res = await call("scan_now");
+    if (res?.paused) log("S4L is paused — resume it first, then the scanner can run.");
+    else if (res?.ok) log("Scanner started — new drafts land in a few minutes.");
+    else log("Couldn’t start the scanner: " + (res?.detail || "unknown error"));
+  } catch (e: any) {
+    log("Couldn’t start the scanner: " + (e?.message || e));
+  }
+  await pollScanStatus();
 }));
 
 // Set up draft schedule for THIS account. Like Setup, this needs the model in the
