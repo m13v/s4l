@@ -37,14 +37,14 @@ sentry_init.init_sentry = lambda *a, **k: None
 sentry_init.capture = lambda *a, **k: None
 sys.modules["sentry_init"] = sentry_init
 
-# Track concurrency + record every post_drafts call.
+# Track concurrency + record every approve_drafts call.
 overlap_detected = []
 inflight = {"n": 0}
 inflight_lock = threading.Lock()
 calls = []
 activity_events = []
 
-def fake_post_drafts(batch_id, post=None, edits=None, timeout=900, activity_label=None):
+def fake_approve_drafts(batch_id, post=None, edits=None, timeout=900, activity_label=None):
     with inflight_lock:
         inflight["n"] += 1
         if inflight["n"] > 1:
@@ -65,7 +65,7 @@ def fake_post_drafts(batch_id, post=None, edits=None, timeout=900, activity_labe
     return {"posted": n_posted}
 
 st = types.ModuleType("s4l_state")
-st.post_drafts = fake_post_drafts
+st.approve_drafts = fake_approve_drafts
 st.write_activity = lambda state, label: activity_events.append((state, label))
 st.accessibility_trusted = lambda: True
 st.clear_review_request = lambda: None
