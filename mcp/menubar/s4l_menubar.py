@@ -2963,17 +2963,11 @@ class S4LMenuBar(rumps.App):
             else None,
             os.path.exists(PAUSE_FLAG),
             pending_count,
-            # Snooze end (0 = not snoozed): rebuilds the menu when a snooze is
-            # set, cleared, or lapses, so the "Snoozed until HH:MM" label and
-            # the review item stay honest.
-            int(self._review_snooze_until)
-            if time.time() < self._review_snooze_until
-            else 0,
             # Reveal cadence: rebuilds when the preset changes (checkmark +
-            # submenu title) and when a hold starts or lapses (the "Next cards
-            # around HH:MM" line in _state_c).
+            # submenu title). The snooze-end and reveal-hold rebuild triggers
+            # were dropped with the _state_c courtesy sublines they drove
+            # (2026-07-17) — nothing visible depends on them anymore.
             round(st.read_reveal_cadence()),
-            int(self._reveal_hold_until(pending_count)),
             # View mode: rebuilds when the review layout changes (checkmark
             # in the "View Mode" submenu + whether the cadence item shows).
             st.read_review_layout(),
@@ -4373,47 +4367,21 @@ class S4LMenuBar(rumps.App):
         if pending_count <= 0:
             return []
         plural = "s" if pending_count != 1 else ""
-        items = [
+        # Just the clickable review item — no secondary grey subline. The old
+        # snooze / reveal-cadence courtesy lines ("Snoozed until…", "Next cards
+        # around…", "Cards hidden…", "Canvas opens from the review item above")
+        # were removed per user request (2026-07-17): "Review N pending drafts"
+        # opens them right now regardless of the pop-up pacing, so the extra line
+        # only restated the click behavior. The reveal-cadence + snooze controls
+        # still live in _build_menu; this just drops the redundant readout.
+        # No bulk-discard item here either: "Discard all…" lives in the review
+        # card's title bar (2026-07-10).
+        return [
             rumps.MenuItem(
                 f"Review {pending_count} pending draft{plural}",
                 callback=self._review_now,
             )
         ]
-        # The review-surface picker ("View Mode") lives in _build_menu now
-        # (2026-07-16): always visible, not just while something is pending.
-        if time.time() < self._review_snooze_until:
-            items.append(
-                self._label(
-                    "Snoozed until "
-                    + time.strftime(
-                        "%H:%M", time.localtime(self._review_snooze_until)
-                    )
-                )
-            )
-        else:
-            # Reveal-cadence hold: the backlog exists but the pop-up is being
-            # paced, or suppressed entirely ("Never"). Same courtesy line as
-            # the snooze; "Review N pending drafts" above shows them right
-            # now regardless.
-            hold_until = self._reveal_hold_until(pending_count)
-            if hold_until < 0:
-                if st.read_review_layout() == "cards":
-                    items.append(self._label("Cards hidden — see count in the menu bar"))
-                else:
-                    # Canvas mode: it never auto-opens; the review item above
-                    # is the one way in.
-                    items.append(self._label("Canvas opens from the review item above"))
-            elif hold_until:
-                items.append(
-                    self._label(
-                        "Next cards around "
-                        + time.strftime("%H:%M", time.localtime(hold_until))
-                    )
-                )
-        # No bulk-discard item here anymore: "Discard all…" lives in the
-        # review card's title bar (2026-07-10). Reaching it with no card open
-        # is "Review N pending drafts" -> Discard all, two clicks.
-        return items
 
 
 if __name__ == "__main__":
