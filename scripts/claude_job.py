@@ -972,12 +972,18 @@ def _attempt_claim(ns, qtype: str) -> bool:
     return False
 
 
+def _is_paused() -> bool:
+    # S4L paused (mcp/src/index.ts pauseS4L / the menubar pause button): the
+    # one flag file every pipeline surface honors.
+    return os.path.exists(os.path.join(state_dir(), "paused.flag"))
+
+
 def cmd_next(ns) -> int:
     _apply_state_dir_override(ns)
-    # S4L paused (mcp/src/index.ts pauseAutopilot): report no work instead of
-    # claiming a job, so an already-queued draft can't drain/post while paused
-    # even though the scheduled task worker still fires on its own cadence.
-    if os.path.exists(os.path.join(state_dir(), "paused.flag")):
+    # S4L paused: report no work instead of claiming a job, so an
+    # already-queued draft can't drain/post while paused even though the
+    # scheduled task worker still fires on its own cadence.
+    if _is_paused():
         print(json.dumps({}))
         return 0
     qtype = ns.type
@@ -997,6 +1003,13 @@ def cmd_next(ns) -> int:
     start = time.time()
     attempt = 0
     while True:
+        # Re-check pause on every iteration, not just at entry: a worker
+        # already inside its wait window when Pause is clicked must stop
+        # claiming immediately (observed 2026-07-18: pause at 12:24, a
+        # pre-pause poller claimed a reddit-draft job at 12:29 anyway).
+        if _is_paused():
+            _plog(f"polling {qtype}: paused.flag appeared mid-wait; exiting without claiming")
+            break
         if _attempt_claim(ns, qtype):
             return 0
         attempt += 1
