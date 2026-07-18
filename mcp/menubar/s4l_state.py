@@ -269,7 +269,7 @@ def autopilot_loaded() -> bool:
 # A machine with any system-wide proxy configured (corporate VPN client,
 # security software, a residential-IP proxy for platform fingerprinting,
 # etc.) whose bypass list doesn't happen to include 127.0.0.1/localhost will
-# have every loopback health check and post_drafts call silently routed out
+# have every loopback health check and approve_drafts call silently routed out
 # through that proxy instead of hitting the MCP server directly — surfacing
 # as an opaque connection error/403 with no indication the proxy is at
 # fault. This is a local process talking to its own local server: it must
@@ -534,7 +534,7 @@ def accessibility_trusted() -> bool:
 # draft_cycle writes review-request.json when a fresh batch is ready; we read
 # the linked plan file (the /tmp/twitter_cycle_plan_<batch>.json the pipeline
 # produced), present the cards, then post the approved subset via the loopback
-# post_drafts tool. The chat-table review still works in parallel; both surfaces
+# approve_drafts tool. The chat-table review still works in parallel; both surfaces
 # de-dup on the plan's per-candidate `posted` flag.
 # How long an activity signal may go un-refreshed before the menu bar treats it
 # as idle. This is the SELF-HEAL for a frozen spinner: a writer can set a label
@@ -585,7 +585,7 @@ def read_activity():
 def write_activity(state: str, label: str):
     """Best-effort local activity update. The MCP server normally owns this file,
     but the menu-bar posting queue knows the whole approved-card burst while the
-    server only sees one post_drafts call at a time."""
+    server only sees one approve_drafts call at a time."""
     try:
         p = Path(state_dir()) / "activity.json"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -928,7 +928,7 @@ def store_mark_post_failed(batch, n, candidate_id=None, error=None):
 
 def store_pending_posts(batch="review-queue"):
     """Approved-but-unposted candidates, for the restart resume path. Skips
-    posted/terminal/failed rows; each entry carries everything post_drafts
+    posted/terminal/failed rows; each entry carries everything approve_drafts
     needs (n, final text, drop_link)."""
     plan = read_plan(store_path())
     out = []
@@ -951,7 +951,7 @@ def store_pending_posts(batch="review-queue"):
 
 def store_reconcile_decisions(batch, decisions):
     """Re-stamp any of this session's decisions the store no longer shows. The
-    MCP server's post_drafts does a whole-file read-modify-write while a batch
+    MCP server's approve_drafts does a whole-file read-modify-write while a batch
     posts (minutes), so a decision stamped mid-drain can be clobbered by its
     stale rewrite; the menubar calls this every timer tick with its in-memory
     decision list so the store always converges back to what the user chose.
@@ -985,7 +985,7 @@ def review_queue_posted_count():
     """Posts that have LANDED in the review-queue plan — the durable, cross-process
     truth. Independent of the menu bar's in-memory burst queue (which dies on a
     restart) and of WHICH process is posting (the menu bar worker, the autopilot,
-    or a host agent draining via post_drafts). Returns the posted count, or None
+    or a host agent draining via approve_drafts). Returns the posted count, or None
     when the plan can't be read. Drives the menu-bar posting indicator so progress
     stays visible regardless of how the drain is driven."""
     plan_path = None
@@ -1022,7 +1022,7 @@ def review_drafts(plan, batch="review-queue"):
             continue
         out.append(
             {
-                "n": i + 1,  # 1-based, matches post_drafts numbering
+                "n": i + 1,  # 1-based, matches approve_drafts numbering
                 # Platform tag (reddit cards, 2026-07-14): absent/None means
                 # twitter (every plan written before the field shipped). The
                 # card renders the platform mark and profile link from this.
@@ -1394,7 +1394,7 @@ def toggle_lane(lane):
 # + store_pending_posts) is the only decision record and resume source now.
 
 
-def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
+def approve_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
     """Post / reject drafts via the loopback tool. `post` = 1-based numbers to post
     as-is; `edits` = [{n, text}] to rewrite then post; `reject` = numbers to mark
     DONE so they're never shown for review again (not posted); `clear_link` =
@@ -1404,7 +1404,7 @@ def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, t
     args = {"batch_id": batch_id, "post": post or [], "edits": edits or [], "reject": reject or [], "clear_link": clear_link or []}
     if activity_label:
         args["__s4l_activity_label"] = activity_label
-    return loopback_tool("post_drafts", args, timeout=timeout)
+    return loopback_tool("approve_drafts", args, timeout=timeout)
 
 
 # ---- review-events outbox (2026-07-02) --------------------------------------
