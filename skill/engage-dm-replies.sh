@@ -1355,6 +1355,17 @@ esac
 NEEDS_CLAUDE=false
 GATE_REASON=""
 
+# Pending human replies (Phase 0) must wake Claude even when no inbound
+# signal fires: the operator's email-escalation reply is outbound-only work,
+# so gating purely on inbound counts starved pending rows on quiet-inbox
+# days (surfaced 2026-07-18: DM #106383's reply sat pending while the gate
+# logged "nothing to do" and exited at cost=$0).
+if [ -n "$PHASE0_INSTRUCTIONS" ]; then
+    NEEDS_CLAUDE=true
+    GATE_REASON="phase0: ${HR_COUNT:-?} pending human replies to deliver"
+    log "[gate] ${GATE_REASON}"
+fi
+
 # Helper: count DMs where last message is inbound, per platform. Includes
 # both 'active' and 'needs_reply' because Phase A.0 ingest flips status to
 # 'needs_reply' the moment a fresh inbound lands; gating on 'active' alone
