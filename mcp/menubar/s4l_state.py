@@ -1282,11 +1282,16 @@ def write_review_layout(layout):
 # Server-side per-install throttle for the twitter cycle's virality bar:
 # high|medium|low|None (None = driver default). Source of truth is
 # installations.posting_mode via /api/v1/installations/posting-mode; unlike
-# the lane flags there is NO local mode.json copy, because the whole point is
-# remote adjustability (dashboard and menubar must agree with the server).
+# the lane flags there is NO local mode.json copy that RESOLVES the mode,
+# because the whole point is remote adjustability (dashboard and menubar must
+# agree with the server).
 # Reads are cached so the menu rebuild tick never blocks on the network: a
 # stale/missing cache kicks one background refresh and returns the last-known
-# value (None until the first refresh lands; the next rebuild shows the mark).
+# value. The in-memory cache is seeded from a disk copy of the last server
+# answer (scripts/s4l_posting_mode.py cache file, 2026-07-17): without it,
+# every menubar restart (updates restart the menubar) displayed the default
+# "Steady" until the first refresh landed, which read as the user's chosen
+# mode having been reset. The seed never suppresses a refresh (at stays 0.0).
 POSTING_MODE_TTL_SECS = 600
 _posting_mode_cache = {"mode": None, "known": False, "at": 0.0}
 _posting_mode_lock = threading.Lock()
@@ -1299,21 +1304,42 @@ def _scripts_on_path():
         sys.path.insert(0, scripts)
 
 
+def _seed_posting_mode_from_disk():
+    """Seed the in-memory cache with the last server answer that any surface
+    persisted (menubar, MCP tool, panel). at stays 0.0 so the first read still
+    kicks a real refresh; the server answer overwrites the seed when it lands."""
+    try:
+        _scripts_on_path()
+        from s4l_posting_mode import read_cached_mode
+
+        mode = read_cached_mode()
+        if mode:
+            with _posting_mode_lock:
+                _posting_mode_cache["mode"] = mode
+    except Exception:
+        pass
+
+
+_seed_posting_mode_from_disk()
+
+
 def _refresh_posting_mode():
     try:
         _scripts_on_path()
         from http_api import api_get
+        from s4l_posting_mode import write_cached_mode
 
         r = api_get("/api/v1/installations/posting-mode")
         d = (r or {}).get("data") or {}
         mode = d.get("mode")
+        mode = mode if mode in ("high", "medium", "low") else None
+        write_cached_mode(mode)
         with _posting_mode_lock:
-            _posting_mode_cache.update(
-                mode=mode if mode in ("high", "medium", "low") else None,
-                known=True,
-                at=time.time(),
-            )
-    except Exception as e:
+            _posting_mode_cache.update(mode=mode, known=True, at=time.time())
+    except (Exception, SystemExit) as e:
+        # http_api raises SystemExit (not Exception) on terminal failure;
+        # catching only Exception let it kill this thread BEFORE the retry
+        # throttle below, so offline boxes hot-looped refresh attempts.
         sys.stderr.write(f"[s4l-state] posting-mode refresh failed: {e}\n")
         with _posting_mode_lock:
             # Throttle retries to the TTL window; keep last-known value.
@@ -1341,12 +1367,15 @@ def write_posting_mode(mode):
     r = api_post("/api/v1/installations/posting-mode", {"mode": mode})
     d = (r or {}).get("data") or {}
     stored = d.get("mode")
+    stored_valid = stored if stored in ("high", "medium", "low") else None
+    try:
+        from s4l_posting_mode import write_cached_mode
+
+        write_cached_mode(stored_valid)
+    except Exception:
+        pass
     with _posting_mode_lock:
-        _posting_mode_cache.update(
-            mode=stored if stored in ("high", "medium", "low") else None,
-            known=True,
-            at=time.time(),
-        )
+        _posting_mode_cache.update(mode=stored_valid, known=True, at=time.time())
     return stored
 
 
