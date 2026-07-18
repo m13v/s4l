@@ -790,6 +790,51 @@ class S4LMenuBar(rumps.App):
             "that schedules the draft tasks for this account",
         )
 
+    def _restart_claude_for_wedge(self, _=None):
+        """One-click fix for the scheduler_wedged ⚠: fully quit and reopen
+        Claude Desktop. That clears the warm-session pileup behind the
+        scheduler's overlap guard (the per_task_limit skip ledger), which is
+        the known root cause — the task registration itself is fine, so no
+        scheduled-task changes here, unlike _rearm/_finish_schedule_setup.
+        Confirmed with a modal first (the restart closes the user's Claude
+        window), captured so fleet forensics can tie a recovery to the click."""
+        _activate_front()
+        choice = _show_alert(
+            title="Restart Claude Desktop?",
+            message=(
+                "Claude Desktop has stopped running the scheduled draft tasks "
+                "(a known Claude bug where finished sessions pile up and block "
+                "the scheduler). Restarting Claude clears it.\n\n"
+                "Claude's window will close and reopen in a moment; any chat "
+                "in progress will be interrupted."
+            ),
+            ok="Quit & restart Claude", cancel="Cancel",
+        )
+        if choice != 1:  # only default button (OK) proceeds
+            return
+        _capture_msg(
+            "S4L scheduler-wedge restart clicked",
+            phase="scheduler_wedge",
+            surface="menubar",
+            _extra={
+                "detail": (self._stall_reason_info or ("", ""))[1],
+                "registry": _registry_summary_for_capture(),
+            },
+        )
+        self._notify("S4L", "Restarting Claude to un-wedge the draft scheduler…")
+
+        def work():
+            # Capture custom --user-data-dir profiles while Claude is still
+            # alive (unreadable after the kill), same as the update flow.
+            try:
+                user_data_dirs = self._claude_user_data_dirs()
+            except Exception:
+                user_data_dirs = None
+            self._quit_claude_and_wait()
+            self._relaunch_claude(user_data_dirs)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _finish_schedule_setup(self, _=None):
         """One-click fix for schedule_state == 'missing' when
         scheduled_task_selfheal.can_create_for_active_account() confirms an
@@ -896,8 +941,10 @@ class S4LMenuBar(rumps.App):
         queue has no pending job, running/ is empty, and the drain latch zeroes
         on every successful consume (claude_job._mark_drain_success), so none of
         the three signals can hold a stale True after recovery. Tick-freshness
-        'stalled' from schedule_state no longer flips the ⚠ at all — it renders
-        as a plain diagnostic line (see _build_menu).
+        'stalled' from schedule_state no longer flips the ⚠ at onset — it
+        renders as a plain diagnostic line (see _build_menu) and only escalates
+        once the wedge is persistent AND active (see the SCHED_WEDGE_* block
+        in _tick).
         """
         qroot = os.path.join(st.state_dir(), "claude-queue")
         # (1) latched producer drain-status
@@ -3954,10 +4001,12 @@ class S4LMenuBar(rumps.App):
             # NON-ALARM diagnostic (2026-07-09): the task is registered + enabled
             # for the active account but the host's per-minute tick is stale or
             # mostly skipped (Desktop warm-session wedge). The queue checks above
-            # would have flipped ⚠ if jobs were actually stuck, so reaching here
-            # means drafts still drain; say so with numbers instead of alarming.
-            # tick_stats is cached by _tick (refreshed ≤ once/min, None outside
-            # 'stalled').
+            # would have flipped ⚠ if jobs were actually stuck, and _tick's
+            # scheduler-wedge escalation owns the persistent-wedge ⚠, so reaching
+            # here means drafts still drain; the label says exactly that (the old
+            # "Scheduler degraded" wording read as broken while everything worked,
+            # reworded 2026-07-17). tick_stats is cached by _tick (refreshed ≤
+            # once/min, None outside 'stalled').
             _ts = self._tick_stats or {}
             _skips = _ts.get("skips_in_window")
             _age = _ts.get("last_run_age_s")
@@ -3966,7 +4015,7 @@ class S4LMenuBar(rumps.App):
                 _bits.append(f"{_skips} of ~60 ticks skipped last hour")
             if _age is not None:
                 _bits.append(f"last run {max(0, int(_age)) // 60}m ago")
-            items.append(self._label("Scheduler degraded (drafts still running)"))
+            items.append(self._label("Scheduler skipping runs (drafts unaffected)"))
             if _bits:
                 items.append(self._label("   " + ", ".join(_bits)))
             # Keep the one-click remedy reachable without dressing it as urgent:
