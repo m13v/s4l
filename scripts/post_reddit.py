@@ -688,6 +688,15 @@ def mark_comment_blocked(thread_url: str,
 # Tuned 2026-04-29: broaden to catch mod-rule bans expressed in present tense
 # ("the sub bans software", "no software allowed") in addition to account-level
 # bans ("u/X has been banned"). Each new pattern observed from real abort logs.
+# Reason prefix that marks a TIME-LIMITED quarantine entry in
+# subreddit_bans.thread_blocked (written by platform_strike_events.py when a
+# moderator removes one of our original threads). pick_thread_target.py
+# expires these after threads.quarantine_days (default 30); every other
+# reason is a permanent block. Keep this literal in sync with the reason
+# string platform_strike_events.py builds and the check in
+# pick_thread_target.load_thread_blocked_subs.
+QUARANTINE_REASON_PREFIX = "thread_removed_by_moderation"
+
 _THREAD_BLOCK_PATTERNS = [
     r"\bbanned\b",
     r"\bbans\b\s+(all|any|every|every kind|posts?|comments?|software|websites?|self[- ]promo|advertising|promotional)",
@@ -718,6 +727,26 @@ def _abort_is_permanent_block(abort_reason: str) -> bool:
     return False
 
 
+def _mirror_ban_to_backend(kind: str, entry: dict) -> None:
+    """Mirror a config.json ban entry to the backend subreddit_bans table
+    (source of truth as of 2026-07-19; config.json is the write-through
+    cache). Best-effort: the local write already happened and readers union
+    both sources, so a failed mirror degrades to local-only state, never to
+    an un-banned sub."""
+    try:
+        import subreddit_bans_client
+        subreddit_bans_client.record(
+            kind,
+            entry.get("sub") or "",
+            reason=entry.get("reason"),
+            account=entry.get("account"),
+            project=entry.get("noticed_by_project") or entry.get("project"),
+            added_at=entry.get("added_at"),
+        )
+    except Exception as e:
+        print(f"[post_reddit] WARNING: backend ban mirror failed: {e}")
+
+
 def mark_thread_blocked(subreddit: str, abort_reason: str = "",
                          project: str | None = None,
                          force: bool = False) -> None:
@@ -737,6 +766,13 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
     force=True bypasses the abort_reason regex gate (used when an upstream
     signal — e.g. the model's permanent_block=true — has already decided
     this is permanent and the reason text alone wouldn't match the patterns).
+
+    Quarantine refresh (2026-07-19): entries whose reason starts with
+    QUARANTINE_REASON_PREFIX are TIME-LIMITED (pick_thread_target expires
+    them after threads.quarantine_days, default 30). When a NEW quarantine
+    strike arrives for a sub whose existing entry is also a quarantine, the
+    entry's added_at/reason are refreshed so the 30-day clock re-arms.
+    Permanent entries (bans, 403s, standing-rule verdicts) are never touched.
     """
     sub = re.sub(r"^r/", "", subreddit, flags=re.IGNORECASE).strip().lower()
     if not sub:
@@ -751,15 +787,36 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
         blocked = bans.setdefault("thread_blocked", [])
         existing = _ban_entries_to_subs(blocked)
         if sub not in existing:
-            blocked.append(_make_ban_entry(sub, reason_str, project))
+            new_entry = _make_ban_entry(sub, reason_str, project)
+            blocked.append(new_entry)
             blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
             with open(CONFIG_PATH, "w") as f:
                 json.dump(config, f, indent=2)
                 f.write("\n")
             print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts "
                   f"(reason={reason_str!r} project={project!r})")
+            _mirror_ban_to_backend("thread_blocked", new_entry)
         else:
-            print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
+            # Re-arm an existing QUARANTINE entry on a fresh quarantine strike
+            # (both old and new reasons carry the prefix). Never overwrite a
+            # permanent entry with a weaker time-limited one.
+            entry = next((e for e in blocked
+                          if isinstance(e, dict) and _ban_entry_sub(e) == sub), None)
+            old_reason = (entry or {}).get("reason") or ""
+            new_is_q = (reason_str or "").startswith(QUARANTINE_REASON_PREFIX)
+            if entry is not None and new_is_q and old_reason.startswith(QUARANTINE_REASON_PREFIX):
+                from datetime import datetime, timezone
+                entry["reason"] = reason_str
+                entry["added_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(config, f, indent=2)
+                    f.write("\n")
+                print(f"[post_reddit] Refreshed r/{sub} thread quarantine "
+                      f"(30-day clock re-armed)")
+                _mirror_ban_to_backend("thread_blocked", entry)
+            else:
+                print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
     except Exception as e:
         print(f"[post_reddit] WARNING: could not persist thread-blocked sub r/{sub}: {e}")
 
