@@ -86,6 +86,15 @@ trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts
 # touches the locked cycle. heartbeat() re-stamps ONLY while the state is still
 # "scanning", so once the provider advances the phase it goes quiet (no flicker).
 "$PY" "$REPO_DIR/scripts/s4l_activity.py" write scanning "scan…" 2>/dev/null || true
+# Persistent "last scanner cycle started" marker (survives between cycles, unlike
+# activity.json which the EXIT trap clears). live_status.py reads this + the
+# kicker's StartInterval to derive next_run = last_start + interval, powering the
+# menu-bar + dashboard countdown. Stamped HERE (past the posting-defer gate, at
+# the real scan start) so a deferred tick doesn't reset the countdown without a
+# scan. Best-effort; a failed write just leaves the countdown blank.
+STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+date +%s > "$STATE_DIR/last-cycle-start" 2>/dev/null || true
 SCAN_T0=$(date +%s)
 (
   while true; do
