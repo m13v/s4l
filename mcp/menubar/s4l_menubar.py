@@ -291,6 +291,12 @@ STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
 # pauseFlagPath() in mcp/src/index.ts.
 PAUSE_FLAG = os.path.join(st.state_dir(), "paused.flag")
 
+# The launchd kicker label for the scanner (the twitter scan+draft cycle). "Run
+# scan now" kickstarts it directly — Claude-independent, so it works even when
+# the MCP server / Desktop is closed. Keep in sync with TWITTER_AUTOPILOT_LABEL
+# in mcp/src/index.ts.
+TWITTER_CYCLE_LABEL = "com.m13v.social-twitter-cycle"
+
 # Autopilot scheduled tasks. Queue workers must RUN in a dedicated folder
 # (~/.s4l-worker) so their once-a-minute sessions don't flood the user's
 # interactive Claude Code history (Claude buckets sessions by cwd). s4l-worker
