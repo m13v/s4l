@@ -201,6 +201,85 @@ def record_confirmed_bans(subs, project=None) -> dict:
             "unknown": unknown}
 
 
+# Removal-context JS: fetch each permalink's .json and extract the moderation
+# artifacts a removal leaves behind: removed_by_category, the (possibly
+# mod-rewritten) link flair, and any AutoModerator / distinguished-mod / sticky
+# comments explaining the removal. All of this is public data; unlike
+# banned_state no logged-in session is required, the CDP browser just gets us
+# past Reddit's non-browser 403 wall.
+_CONTEXT_JS = r"""
+async (urls) => {
+  const out = {};
+  for (const u of urls) {
+    try {
+      const r = await fetch(u + '/.json?raw_json=1&limit=100',
+                            {headers:{'Accept':'application/json'}, credentials:'include'});
+      if (!r.ok) { out[u] = {http: r.status}; continue; }
+      const d = await r.json();
+      const s = d[0].data.children[0].data;
+      const comments = ((d[1] && d[1].data.children) || [])
+        .map(c => c.data).filter(c => c && c.author);
+      const modish = comments.filter(c =>
+        c.author === 'AutoModerator' || c.distinguished === 'moderator' || c.stickied);
+      out[u] = {
+        removed_by: s.removed_by_category || null,
+        flair: s.link_flair_text || null,
+        mod_notes: modish.slice(0, 2).map(c =>
+          (c.author + ': ' + (c.body || '').replace(/\s+/g, ' ')).slice(0, 400)),
+      };
+    } catch (e) { out[u] = {err: String(e).slice(0, 80)}; }
+    await new Promise(x => setTimeout(x, 400));
+  }
+  return out;
+}
+"""
+
+
+def removal_context(urls) -> dict:
+    """Fetch moderation context for removed reddit posts.
+
+    urls: iterable of reddit permalinks (old. or www., thread or comment).
+    Returns {original_url: {"removed_by": str|None, "flair": str|None,
+    "mod_notes": [str, ...]} | None}. None = unknown (no browser reachable /
+    fetch failed); callers MUST degrade gracefully, the strike event is still
+    valid without context."""
+    cleaned = {}  # original -> normalized fetch url
+    for u in urls:
+        u = str(u or "").strip()
+        if not u or "reddit.com" not in u:
+            continue
+        cleaned[u] = u.replace("www.reddit.com", "old.reddit.com").rstrip("/")
+    result = {u: None for u in cleaned}
+    if not cleaned:
+        return result
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return result
+    with sync_playwright() as pw:
+        browser, page = _reddit_page(pw)
+        if page is None:
+            return result
+        try:
+            page.goto("https://old.reddit.com/", wait_until="domcontentloaded",
+                      timeout=20000)
+            raw = page.evaluate(_CONTEXT_JS, list(cleaned.values()))
+        except Exception:
+            return result
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+    for orig, norm in cleaned.items():
+        v = (raw or {}).get(norm) or {}
+        if "removed_by" in v or "flair" in v or "mod_notes" in v:
+            result[orig] = {"removed_by": v.get("removed_by"),
+                            "flair": v.get("flair"),
+                            "mod_notes": v.get("mod_notes") or []}
+    return result
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
