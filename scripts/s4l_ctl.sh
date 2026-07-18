@@ -63,13 +63,13 @@ PYEOF
     if [ "$YES" != "1" ]; then
       echo "REFUSING: 'approve $*' will POST those cards to live X. Re-run with --yes to confirm." >&2; exit 3; fi
     echo "posting cards [$nums] ..."
-    tool post_drafts 900 "{\"batch_id\":\"$BATCH\",\"post\":[$nums]}" ; echo ;;
+    tool approve_drafts 900 "{\"batch_id\":\"$BATCH\",\"post\":[$nums]}" ; echo ;;
   approve-all)
     n="$(pending_count)"
     if [ "$YES" != "1" ]; then
       echo "REFUSING: approve-all will POST all $n pending cards to live X. Re-run with --yes to confirm." >&2; exit 3; fi
     echo "posting all $n pending cards ..."
-    tool post_drafts 1800 "{\"batch_id\":\"$BATCH\",\"post_all\":true}" ; echo ;;
+    tool approve_drafts 1800 "{\"batch_id\":\"$BATCH\",\"post_all\":true}" ; echo ;;
   *)
     echo "usage: s4l_ctl.sh {status|count|drafts|approve <n...>|approve-all} [--yes]" >&2; exit 64 ;;
 esac
