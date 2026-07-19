@@ -11,20 +11,30 @@ background job:
     GET /api/v1/topic-funnel?project=<name> — server-side aggregation,
     no local-file state (replaces ~/social-autoposter/state/topic_ledger.json
     from earlier draft of this job, 2026-05-28).
-  - Asks Claude to propose 3-5 NEW search_topic candidates given the
-    project's description, the existing universe, the strong/decent
+  - Asks Claude to propose ONE new search_topic per scan slot given the
+    project's description, the COMPLETE existing universe, the strong/decent
     performers, the duds, and the untried tail.
-  - For each proposal, computes the closest existing neighbor in the
-    project's universe via token-Jaccard similarity (cheap, no
-    embeddings needed at our scale).
-  - Drops proposals that are exact-match dupes or near-dupes
-    (Jaccard >= SIMILARITY_THRESHOLD against any existing topic).
+  - Dedups post-hoc via token-Jaccard against the full universe; a dupe
+    re-prompts with a grown avoid-list (up to DUPE_RETRIES_PER_SLOT).
   - POSTs survivors to /api/v1/project-search-topics with
     source='invented', status='active'.
   - POSTs an audit row to /api/v1/invented-topics-audit so invention
     quality is reviewable offline (no local file).
 
-Cadence: hourly via launchd com.m13v.social-invent-topics.
+Queue-native (2026-07-06): EVERY Claude turn is a typed job on the local
+claude-queue (scripts/claude_job.py, tags invent-topic / invent-queries),
+drained by the Claude Desktop scheduled-task worker — on every install,
+operator Mac included. There is no `claude -p` path and no provider env
+switch in this pipeline; call_claude pins S4L_CLAUDE_PROVIDER=queue into
+run_claude.sh. No worker firing => the run logs and skips (exit 79 from
+the provider), same failure posture as the drafting pipeline. The old
+in-session invent-tools MCP mode (scripts/invent_mcp_server.py) was
+deleted with this change; its full-universe visibility moved into the
+prompt and its server-side dedup moved back to validate_proposals().
+
+Cadence: invoked by the skill/run-draft-and-publish.sh kicker on every
+install (state-file gate, S4L_INVENT_EVERY_HOURS). The operator-only
+launchd job com.m13v.social-invent-topics is retired.
 Project budget: one per run (n=1). Knob is PROJECTS_PER_RUN below.
 
 CLI:
@@ -64,6 +74,12 @@ WINDOW_DAYS = 30  # ledger window the picker reads from
 DEFAULT_TARGET = 1        # qualifying topics wanted per run (one is enough; supply is the real target)
 DEFAULT_MAX_ATTEMPTS = 5  # hard cap on loop iterations per run (cost guard)
 
+# Dupe handling is POST-HOC (validate_proposals) since the queue-native
+# rewrite: a rejected near-dupe re-prompts with the grown avoid-list, at most
+# this many times per scan slot before the run declares saturation. Each retry
+# is a full queue job, so keep this small.
+DUPE_RETRIES_PER_SLOT = 3
+
 # Supply-test knobs (2026-05-28: invent loop now scans drafted queries before
 # committing, mirroring the cycle's Phase 1 freshness gate).
 QUERIES_PER_TOPIC = 5     # distinct queries drafted + scanned per invented topic
@@ -72,9 +88,13 @@ FRESHNESS_HOURS = 6       # freshness window each query is scanned at (matches d
 CDP_PORT = 9555           # managed Chrome the twitter-harness drives
 LOCK_TIMEOUT_SEC = 600    # how long the supply-test helper waits for twitter-browser lock
 
-_REPO_DIR = os.path.expanduser("~/social-autoposter")
+# Honor S4L_REPO_DIR (set by the MCP wrapper + the kicker on .mcpb installs)
+# so the plugin's installed package resolves its own helpers; operator Macs
+# fall back to the classic path.
+_REPO_DIR = os.environ.get("S4L_REPO_DIR") or os.path.expanduser("~/social-autoposter")
 _SUPPLY_TEST_SH = os.path.join(_REPO_DIR, "skill", "invent-supply-test.sh")
 _LOG_ATTEMPTS_PY = os.path.join(_REPO_DIR, "scripts", "log_twitter_search_attempts.py")
+_RUN_CLAUDE_SH = os.path.join(_REPO_DIR, "scripts", "run_claude.sh")
 
 
 # --- Query normalization (copied verbatim from qualified_query_bank.normalize
@@ -224,37 +244,71 @@ def _format_topic_table(rows: list[dict], max_per_bucket: int = 12) -> str:
     return "\n".join(parts)
 
 
+def _table_visible_rows(rows: list[dict], max_per_bucket: int = 12) -> list[dict]:
+    """The exact rows _format_topic_table renders (top N per verdict bucket),
+    so build_prompt can exclude them from the remaining-universe list."""
+    buckets: dict[str, list[dict]] = {}
+    for r in rows:
+        buckets.setdefault(r.get("verdict", "untried"), []).append(r)
+    out: list[dict] = []
+    for verdict in ("strong", "decent", "weak", "dud", "untried"):
+        out.extend(buckets.get(verdict, [])[:max_per_bucket])
+    return out
+
+
+def _format_universe_list(universe: set[str], shown_in_table: set[str]) -> str:
+    """Complete plain list of every active topic NOT already detailed in the
+    stats table, so the prompt carries FULL-universe visibility (this replaced
+    the retired invent-tools search_topics/get_topic_stats session tools; the
+    table alone truncates at 12 per bucket). Comma-separated: topics are short
+    2-6 word strings, so even hundreds fit in a few KB of prompt."""
+    rest = sorted(t for t in universe if t not in shown_in_table)
+    if not rest:
+        return ""
+    return (
+        f"\n## Remaining active topics not detailed above ({len(rest)} more — "
+        "together with the table this is the COMPLETE universe; anything here "
+        "or a paraphrase of it is a dupe)\n\n"
+        + ", ".join(rest) + "\n"
+    )
+
+
 def build_prompt(
     project: dict,
     topics: list[dict],
     n_proposals: int,
     avoid_topics: set[str] | None = None,
+    universe: set[str] | None = None,
 ) -> str:
-    """Assemble the Claude prompt for one tool-using topic invention session.
+    """Assemble the single text->JSON topic-invention prompt (one queue job).
 
-    This version of the prompt gives Claude the invent-tools MCP suite
-    (search_topics / get_topic_stats / submit_topic) so dedup runs IN-SESSION
-    instead of post-hoc. The ledger snapshot is still included as a quick
-    overview, but Claude is expected to use the tools to verify against the
-    full universe before submitting. submit_topic returns a tool-call error
-    on near-dupes, so Claude can react and propose a different angle without
-    a new session.
+    Flattened (2026-07-06, queue-native rewrite): no tools. The prompt carries
+    the stats table (top 12 per bucket) PLUS the complete remaining topic-name
+    list, so the model has full-universe visibility for both gap-finding and
+    dupe avoidance. Dedup runs post-hoc in validate_proposals(); a rejected
+    near-dupe re-prompts with the grown `avoid_topics` list.
 
-    `avoid_topics` carries topics already proposed earlier in THIS run.
-    Empty/None when the outer loop is on its first session.
+    `avoid_topics` carries topics already proposed earlier in THIS run
+    (committed or rejected). `universe` is the full working universe including
+    topics minted earlier this run.
     """
     name = project.get("name", "")
     description = project.get("description", "")
     voice = project.get("voice_relationship", "")
 
     table = _format_topic_table(topics)
+    shown_in_table = {
+        (r.get("search_topic") or "").strip().lower()
+        for r in _table_visible_rows(topics)
+    }
+    universe_block = _format_universe_list(universe or set(), shown_in_table)
 
     avoid_block = ""
     if avoid_topics:
         avoid_lines = "\n".join(f"- {t}" for t in sorted(avoid_topics))
         avoid_block = (
             "\n## Already proposed earlier this run — DO NOT repeat or paraphrase\n\n"
-            "An earlier session this run already suggested the topics below "
+            "An earlier attempt this run already suggested the topics below "
             "(committed OR rejected as dupes). Stay clear of these:\n\n"
             f"{avoid_lines}\n"
         )
@@ -268,18 +322,10 @@ A topic is a short concept phrase (2-6 words typically) used to draft Twitter se
 - Description: {description}
 - Voice: {voice}
 
-## Performance ledger snapshot (top 12 per bucket; full universe has {len(topics)} topics)
+## Performance ledger (stats for top 12 per bucket; full universe has {len(topics)} topics)
 
 {table}
-
-## Tools available — USE THEM before submitting
-
-You have THREE tools exposed by the `invent-tools` MCP server. The ledger above is a snapshot; for ground truth and full coverage, call the tools.
-
-1. **search_topics(project, q="", limit=200)** — search the FULL active topic universe. Use a short substring (e.g. `q="agent"`) to scan everything adjacent to your candidate before you commit. Empty `q` returns the whole list.
-2. **get_topic_stats(project, topic)** — pull the topic-funnel row for any specific topic (attempts, supply, candidates, posted, likes, clicks, verdict). Use this when search_topics shows an adjacent topic and you need to know if it's STRONG (propose ADJACENT angle) or WEAK/DUD (AVOID neighborhood).
-3. **submit_topic(project, topic, rationale)** — submit your final topic. The tool runs Jaccard dedup against the full universe ON THE SERVER. If your topic is a near-dupe it returns `ok: false` with the offending neighbor and similarity score. PROPOSE A DIFFERENT ANGLE and try again. When it returns `ok: true`, the topic is committed.
-
+{universe_block}
 ## Ledger bucket guide
 - **STRONG** (clicks_per_post >= 1.0): audience converts. Invent ADJACENT angles, not paraphrases.
 - **DECENT** (>= 0.3): solid signal. Same as strong, lower peak.
@@ -288,124 +334,121 @@ You have THREE tools exposed by the `invent-tools` MCP server. The ledger above 
 - **UNTRIED** (no attempts in 30d): unknown. Read carefully before proposing nearby.
 {avoid_block}
 ## Workflow (follow strictly)
-1. Pick a candidate gap angle you think is genuinely new.
-2. Call `search_topics(project="{name}", q="<one-word probe from your candidate>")` to scan the neighborhood.
-3. For the 1-2 closest existing topics, call `get_topic_stats(project="{name}", topic="<the topic>")` to read their verdict.
-4. Based on what you find: keep your candidate if the gap is real, or pivot to a different angle.
-5. Call `submit_topic(project="{name}", topic="<2-6 words, lowercase>", rationale="<≤30 words, why this gap>")`.
-6. If `ok: false` (dupe error): use the `neighbor` field to pivot, then call submit_topic again with a genuinely different topic. Up to 5 submission attempts per session.
-7. When a submission returns `ok: true`, STOP and answer with the final JSON envelope below.
+1. Scan the full universe above (table + remaining-topics list) for genuinely uncovered angles.
+2. For your candidate, check its nearest neighbors in the ledger: adjacent to STRONG/DECENT is good ground; adjacent to WEAK/DUD is poisoned ground; a paraphrase of ANY listed topic is a dupe and will be rejected.
+3. Answer with exactly ONE proposal in the JSON envelope below. It will be dedup-checked (token-Jaccard) against the full universe after you answer, so self-check first: if you cannot phrase a real gap in genuinely different words, say so via the saturation envelope instead of forcing a paraphrase.
 
 ## Required final answer
 
-After a successful submit_topic call, end your response with EXACTLY this JSON (no prose around it):
+Return STRICT JSON only, no prose around it:
 
 ```json
-{{"submitted_topic": "the topic you successfully submitted, verbatim", "rationale": "your rationale, verbatim"}}
+{{"proposals": [{{"topic": "<2-6 words, lowercase>", "rationale": "<≤30 words, why this gap>"}}]}}
 ```
 
-If you cannot find a non-dupe topic after several submit attempts and the project is genuinely saturated, end with:
+If the universe is genuinely saturated and you cannot propose a non-dupe:
 
 ```json
-{{"submitted_topic": null, "reason": "short explanation, e.g. 'tried X, Y, Z all dupes; project saturated this hour'"}}
+{{"proposals": [], "reason": "short explanation, e.g. 'every angle adjacent to the strong topics is already covered'"}}
 ```
 
-Strict topic constraints (enforced by submit_topic too):
+Strict topic constraints (dedup-enforced after you answer):
 - Lowercase, 2-6 words
 - No quotes inside topic strings
 - NO Twitter operators (no `min_faves:`, `-filter:replies`, `since:` — those are added at query-draft time downstream)"""
 
 
-# --- Claude invocation ------------------------------------------------------
+# --- Claude invocation (queue-only) ------------------------------------------
 
-# Path to the MCP server that exposes search/stats/submit tools for the
-# in-session topic + query lookups. Kept beside this file so the launchd job
-# always finds it.
-_MCP_SERVER_PY = os.path.join(_REPO_DIR, "scripts", "invent_mcp_server.py")
+# Top-level JSON schemas forwarded with each job (--json-schema). The worker
+# validates its result against the top-level required keys before submitting,
+# so a malformed turn is retried worker-side instead of surfacing here as a
+# parse failure. Saturation MUST still carry proposals=[] (required key).
+TOPIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["topic"],
+            },
+        },
+        "reason": {"type": "string"},
+    },
+    "required": ["proposals"],
+}
+QUERIES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "queries": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["queries"],
+}
 
-# Tool names the topic round is allowed to call. Claude Code's --allowed-tools
-# accepts the `mcp__<server-name>__<tool>` form for MCP-provided tools.
-# `invent-tools` is the name we passed to FastMCP() in the server.
-_TOPIC_TOOLS = [
-    "mcp__invent-tools__search_topics",
-    "mcp__invent-tools__get_topic_stats",
-    "mcp__invent-tools__submit_topic",
-]
-# Query round may also probe history if it wants to (read-only).
-_QUERY_TOOLS = [
-    "mcp__invent-tools__search_queries",
-    "mcp__invent-tools__get_query_stats",
-]
-
-
-def _write_mcp_config_file() -> str:
-    """Write a temporary MCP config JSON pointing at our invent-tools server
-    and return its path. claude -p --mcp-config <file> will spawn the server
-    as a subprocess over stdio."""
-    cfg = {
-        "mcpServers": {
-            "invent-tools": {
-                "command": "/opt/homebrew/bin/python3.11",
-                "args": [_MCP_SERVER_PY],
-            }
-        }
-    }
-    fd, path = tempfile.mkstemp(prefix="invent-mcp-", suffix=".json")
-    with os.fdopen(fd, "w") as f:
-        json.dump(cfg, f)
-    return path
+# Queue jobs wait for the every-minute scheduled-task worker to claim + run
+# the turn; give each call the same generous budget the drafting pipeline's
+# queued calls get.
+QUEUE_CALL_TIMEOUT_SEC = 900
 
 
-def call_claude(prompt: str, timeout_sec: int = 300,
-                allowed_tools: list[str] | None = None) -> str:
-    """Run a single `claude -p` invocation and return its text output.
+def call_claude(prompt: str, script_tag: str,
+                schema: dict | None = None,
+                timeout_sec: int = QUEUE_CALL_TIMEOUT_SEC) -> str:
+    """One queue-routed Claude turn via run_claude.sh and return its text.
 
-    When `allowed_tools` is non-empty the call goes through the invent-tools
-    MCP server (search/stats/submit) and the model can call those tools
-    in-session before producing its final response. The Jaccard dedup runs
-    on the SERVER inside submit_topic, so a near-dupe surfaces as a
-    tool-call error Claude can react to instead of a silent post-hoc kill.
-
-    Inherits the global model from ~/.claude/settings.json per the
-    project's "single source of truth" convention (do NOT hardcode
-    --model here). The CLAUDE_MODEL env var, if set, is forwarded.
+    Queue-ONLY by design (2026-07-06): S4L_CLAUDE_PROVIDER is pinned to
+    "queue" here, so run_claude.sh always delegates to claude_job.py, which
+    enqueues the prompt for the Claude Desktop scheduled-task worker — on
+    every install, operator Mac included. There is no `claude -p` fallback:
+    no worker firing means the provider exits 79 and the run skips, the same
+    failure posture as the drafting pipeline. run_claude.sh stays in the path
+    (rather than calling claude_job.py directly) so session tagging and cost
+    tracking keep flowing through the one chokepoint every pipeline uses.
     """
-    cmd = ["claude", "-p", "--output-format", "json"]
-    model = os.environ.get("CLAUDE_MODEL")
-    if model:
-        cmd += ["--model", model]
-    # When the parent process is in dry-run mode it sets INVENT_DRY_RUN=1
-    # in its own env at startup; claude -p inherits it, which propagates to
-    # the MCP server, which short-circuits submit_topic without POSTing.
-    mcp_cfg_path = None
-    if allowed_tools:
-        mcp_cfg_path = _write_mcp_config_file()
-        # --strict-mcp-config: ignore any user-level MCP config so test runs
-        # never pick up the operator's personal MCP servers by accident.
-        # --allowed-tools: explicit allow-list so Claude can't reach for any
-        # other tool (Read/Bash/etc) it might infer from its default kit.
-        cmd += ["--mcp-config", mcp_cfg_path,
-                "--strict-mcp-config",
-                "--allowed-tools", ",".join(allowed_tools)]
+    env = dict(os.environ)
+    env["S4L_CLAUDE_PROVIDER"] = "queue"
+    schema_path = None
+    cmd = ["bash", _RUN_CLAUDE_SH, script_tag, "-p", "--output-format", "json"]
     try:
+        if schema is not None:
+            fd, schema_path = tempfile.mkstemp(prefix="invent-schema-",
+                                               suffix=".json")
+            with os.fdopen(fd, "w") as f:
+                json.dump(schema, f)
+            cmd += ["--json-schema", schema_path]
+        cmd.append(prompt)
         proc = subprocess.run(
             cmd,
-            input=prompt,
             text=True,
             capture_output=True,
             timeout=timeout_sec,
+            env=env,
         )
     finally:
-        if mcp_cfg_path:
+        if schema_path:
             try:
-                os.remove(mcp_cfg_path)
+                os.remove(schema_path)
             except OSError:
                 pass
+    if proc.returncode == 79:
+        # Provider timed out / blocked (no worker drained the job) — the
+        # queue's quota-skip-shaped exit. Skip the run; the next kicker
+        # firing retries.
+        raise SystemExit(
+            f"queue provider blocked for tag={script_tag!r} (exit 79: no "
+            f"worker drained the job within its window); skipping this run"
+        )
     if proc.returncode != 0:
         raise SystemExit(
-            f"claude -p exited {proc.returncode}: {proc.stderr[:500]}"
+            f"run_claude.sh tag={script_tag!r} exited {proc.returncode}: "
+            f"{(proc.stderr or '')[:500]}"
         )
-    # claude -p --output-format json wraps the model's text in
+    # The provider prints a claude `--output-format json`-shaped envelope:
     # {"result": "...", ...}. Extract the result string.
     try:
         envelope = json.loads(proc.stdout)
@@ -418,16 +461,16 @@ def call_claude(prompt: str, timeout_sec: int = 300,
 
 # --- Output parsing ---------------------------------------------------------
 
-def extract_proposals(claude_text: str) -> list[dict]:
-    """Pull the proposals[] array out of Claude's output.
+def _extract_envelope(claude_text: str) -> dict | None:
+    """Parse the JSON object out of Claude's output.
 
     Defensive: handles plain JSON, JSON in fenced code blocks, and the
-    occasional preamble. Returns [] on any parse failure; the caller
-    audit-logs the raw text so we can debug offline.
+    occasional preamble/trailing prose. Returns None when nothing parseable
+    is found; the caller audit-logs the raw text so we can debug offline.
     """
     text = (claude_text or "").strip()
     if not text:
-        return []
+        return None
     # Try fenced JSON first
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidate = m.group(1) if m else None
@@ -437,11 +480,12 @@ def extract_proposals(claude_text: str) -> list[dict]:
         if start >= 0:
             candidate = text[start:]
     if not candidate:
-        return []
+        return None
     try:
         env = json.loads(candidate)
     except json.JSONDecodeError:
         # Trailing prose can break json.loads; try to find the matching brace
+        env = None
         try:
             depth = 0
             for i, ch in enumerate(candidate):
@@ -452,13 +496,14 @@ def extract_proposals(claude_text: str) -> list[dict]:
                     if depth == 0:
                         env = json.loads(candidate[: i + 1])
                         break
-            else:
-                return []
         except Exception:
-            return []
-    props = env.get("proposals") or []
+            return None
+    return env if isinstance(env, dict) else None
+
+
+def _clean_proposals(env: dict) -> list[dict]:
     cleaned: list[dict] = []
-    for p in props:
+    for p in env.get("proposals") or []:
         if not isinstance(p, dict):
             continue
         topic = (p.get("topic") or "").strip().lower()
@@ -469,56 +514,27 @@ def extract_proposals(claude_text: str) -> list[dict]:
     return cleaned
 
 
-def extract_submitted_topic(claude_text: str) -> dict | None:
-    """Parse Claude's final envelope from the tool-using topic session.
+def extract_proposals(claude_text: str) -> list[dict]:
+    """Pull the proposals[] array out of Claude's output ([] on any failure)."""
+    env = _extract_envelope(claude_text)
+    return _clean_proposals(env) if env else []
 
-    Looks for the LAST JSON object in the response containing a
-    `submitted_topic` field. Returns:
-      - {"topic": "...", "rationale": "..."} on a successful submission
-      - {"topic": None, "reason": "..."} on a saturated session
-      - None if the envelope is missing or malformed (caller treats as bailout)
+
+def extract_proposals_env(claude_text: str) -> tuple[list[dict], str | None]:
+    """(proposals, saturation_reason) from one flattened topic turn.
+
+    saturation_reason is non-None ONLY when the model explicitly answered the
+    saturation envelope (a parseable object whose `proposals` key is present
+    and empty); a plain parse failure returns ([], None) so the caller can
+    tell "model says the universe is saturated" from "turn was garbage".
     """
-    text = (claude_text or "").strip()
-    if not text:
-        return None
-    # Walk all fenced JSON blocks first, then any bare {...} blocks; take the
-    # LAST that contains "submitted_topic" so trailing prose from the tool
-    # iteration doesn't shadow the final answer.
-    candidates: list[str] = []
-    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL):
-        candidates.append(m.group(1))
-    # Fallback: scan balanced braces for any unfenced JSON
-    depth, start = 0, -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    candidates.append(text[start:i + 1])
-                    start = -1
-    last_ok: dict | None = None
-    for blob in candidates:
-        try:
-            env = json.loads(blob)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(env, dict) or "submitted_topic" not in env:
-            continue
-        topic_val = env.get("submitted_topic")
-        if topic_val is None:
-            last_ok = {"topic": None,
-                       "reason": (env.get("reason") or "").strip()}
-        else:
-            topic = (str(topic_val) or "").strip().lower()
-            if not topic:
-                continue
-            last_ok = {"topic": topic,
-                       "rationale": (env.get("rationale") or "").strip()}
-    return last_ok
+    env = _extract_envelope(claude_text)
+    if env is None:
+        return [], None
+    props = _clean_proposals(env)
+    if not props and "proposals" in env:
+        return [], ((env.get("reason") or "").strip() or "(no reason given)")
+    return props, None
 
 
 # --- Validation -------------------------------------------------------------
@@ -1061,7 +1077,7 @@ def process_topic(
 
     # 1. Draft queries.
     qprompt = build_query_prompt(project, topic, QUERIES_PER_TOPIC)
-    raw = call_claude(qprompt)
+    raw = call_claude(qprompt, "invent-queries", schema=QUERIES_SCHEMA)
     drafted = extract_queries(raw, QUERIES_PER_TOPIC)
     print(f"  [{topic}] drafted {len(drafted)} queries", file=sys.stderr)
 
@@ -1076,7 +1092,8 @@ def process_topic(
             project, topic, QUERIES_PER_TOPIC,
             avoid_queries={normalize_query(q) for q in drafted},
         )
-        refill_raw = call_claude(refill_prompt)
+        refill_raw = call_claude(refill_prompt, "invent-queries",
+                                 schema=QUERIES_SCHEMA)
         refill = extract_queries(refill_raw, QUERIES_PER_TOPIC)
         more_new, _ = dedup_queries(refill, tried_cores)
         for q in more_new:
@@ -1145,11 +1162,6 @@ def main():
     ap.add_argument("--window-days", type=int, default=WINDOW_DAYS,
                     help="Ledger window passed to /api/v1/topic-funnel")
     args = ap.parse_args()
-
-    # Propagate dry-run into the spawned claude -p / MCP server subprocess
-    # tree so submit_topic short-circuits without POSTing during smoke tests.
-    if args.dry_run:
-        os.environ["INVENT_DRY_RUN"] = "1"
 
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     t0 = time.time()
@@ -1224,12 +1236,12 @@ def main():
     avoid_topics: set[str] = set()
 
     processed: list[dict] = []     # one entry per topic we supply-tested
-    all_rejected: list[dict] = []  # filled by submit_topic dupe errors reported by Claude
-    total_proposals_parsed = 0     # kept for audit compatibility; counts successful submits
+    all_rejected: list[dict] = []  # dupes killed by validate_proposals (post-hoc)
+    total_proposals_parsed = 0     # every proposal the model returned, dupe or not
     last_raw = ""
     attempts_used = 0       # SCANS performed (the only thing that ticks up to max_attempts)
-    claude_calls = 0        # ALL Claude sessions (tool calls hidden inside each session)
-    dupe_retries_total = 0  # kept for audit compatibility; always 0 in MCP-session mode
+    claude_calls = 0        # ALL queue-routed Claude turns (topic proposals only here)
+    dupe_retries_total = 0  # re-prompts caused by all-dupe proposal turns
     aborted_untested = False
     saturated_bailout = False
 
@@ -1240,52 +1252,76 @@ def main():
         if n_qualifying() >= args.target:
             break
 
-        # --- ONE tool-using Claude session per scan slot. Inside this session
-        #     Claude can call search_topics / get_topic_stats to explore, and
-        #     submit_topic to commit. submit_topic runs Jaccard dedup on the
-        #     server, so near-dupes surface as in-session tool errors Claude
-        #     reacts to — no post-hoc kill, no dupe-retry-doesn't-count
-        #     bookkeeping needed in Python. The session ends when Claude
-        #     emits the final JSON envelope with `submitted_topic`. -----------
-        prompt = build_prompt(project, topics_for_project, args.proposals,
-                              avoid_topics=avoid_topics)
-        last_raw = call_claude(prompt, allowed_tools=_TOPIC_TOOLS)
-        claude_calls += 1
+        # --- ONE flattened text->JSON queue job per proposal turn. Dedup runs
+        #     post-hoc in validate_proposals against the full working universe;
+        #     a dupe re-prompts with the grown avoid list (each retry is a full
+        #     queue job, hence the small DUPE_RETRIES_PER_SLOT cap). The model
+        #     self-reports saturation via the proposals=[] envelope. ----------
+        picked: dict | None = None
+        for retry in range(1 + DUPE_RETRIES_PER_SLOT):
+            prompt = build_prompt(project, topics_for_project, args.proposals,
+                                  avoid_topics=avoid_topics,
+                                  universe=working_universe)
+            last_raw = call_claude(prompt, "invent-topic", schema=TOPIC_SCHEMA)
+            claude_calls += 1
 
-        envelope = extract_submitted_topic(last_raw)
-        if envelope is None:
-            print(f"[invent_topics] session returned no parseable envelope; "
-                  f"raw head: {(last_raw or '')[:200]!r}", file=sys.stderr)
-            saturated_bailout = True
-            break
-
-        if envelope.get("topic") is None:
-            # Claude self-reported saturation (tried N submits, all dupes).
-            reason = envelope.get("reason") or "(no reason given)"
-            print(f"[invent_topics] saturated: claude session reports "
-                  f"no non-dupe available — {reason}",
+            proposals, sat_reason = extract_proposals_env(last_raw)
+            total_proposals_parsed += len(proposals)
+            if not proposals:
+                if sat_reason is not None:
+                    print(f"[invent_topics] saturated: model reports no "
+                          f"non-dupe available — {sat_reason}", file=sys.stderr)
+                else:
+                    print(f"[invent_topics] turn returned no parseable "
+                          f"proposals; raw head: {(last_raw or '')[:200]!r}",
+                          file=sys.stderr)
+                saturated_bailout = True
+                break
+            for p in proposals:
+                avoid_topics.add(p["topic"])
+            committed_ok, rejected = validate_proposals(proposals,
+                                                        working_universe)
+            all_rejected.extend(rejected)
+            if committed_ok:
+                picked = committed_ok[0]
+                break
+            dupe_retries_total += 1
+            print(f"[invent_topics] all {len(proposals)} proposal(s) were "
+                  f"dupes (retry {retry + 1}/{DUPE_RETRIES_PER_SLOT}); "
+                  f"re-prompting with grown avoid list", file=sys.stderr)
+        else:
+            # Dupe-retry budget exhausted without a non-dupe: saturation.
+            print(f"[invent_topics] no non-dupe topic after "
+                  f"{DUPE_RETRIES_PER_SLOT} dupe retries; stopping run",
                   file=sys.stderr)
             saturated_bailout = True
+
+        if picked is None:
             break
 
-        topic = envelope["topic"]
-        rationale = envelope.get("rationale", "")
-        total_proposals_parsed += 1
-        avoid_topics.add(topic)
+        topic = picked["topic"]
+        rationale = picked.get("rationale", "")
         working_universe.add(topic)
         print(f"[invent_topics] scan {attempts_used+1}/{args.max_attempts}: "
-              f"submitted {topic!r} (qualifying so far={n_qualifying()}/{args.target})",
+              f"proposed {topic!r} (qualifying so far={n_qualifying()}/{args.target})",
               file=sys.stderr)
         print(f"  rationale: {rationale[:120]}", file=sys.stderr)
 
-        # The topic is ALREADY in project_search_topics via the submit_topic
-        # tool — do not re-commit. Now draft queries + supply-test.
+        # Commit BEFORE the supply test — same semantics the retired MCP
+        # submit_topic tool had: the topic is a real concept either way; its
+        # supply record lives in twitter_search_attempts.
+        if not commit_topic(project_name, topic, dry_run=args.dry_run):
+            print(f"[invent_topics] commit failed for {topic!r}; stopping run",
+                  file=sys.stderr)
+            break
+
         result = process_topic(project, topic, existing_query_cores,
                                batch_id, dry_run=args.dry_run)
 
         # A False 'tested' means the browser dropped mid-run; abort the run
-        # and let the next hourly retry it. The topic stays committed (it's a
-        # real concept either way), but we don't fabricate a supply verdict.
+        # and let the next kicker firing retry it. The topic stays committed
+        # (it's a real concept either way), but we don't fabricate a supply
+        # verdict.
         if not result.get("tested", False):
             print(f"[invent_topics] supply test UNTESTED for {topic!r} "
                   f"(browser unavailable); aborting run.", file=sys.stderr)
@@ -1302,8 +1338,10 @@ def main():
         processed.append({
             "topic": topic,
             "rationale": rationale,
+            "neighbor": picked.get("neighbor"),
+            "similarity": picked.get("similarity"),
             **result,
-            "committed": True,  # submit_topic already wrote it
+            "committed": True,
             "attempt": attempts_used,
         })
 

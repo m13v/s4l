@@ -31,14 +31,17 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get  # noqa: E402
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 DEFAULT_TOPIC_FLOOR_DAYS = 2
 TWITTER_DAILY_CAP = 3      # hard global cap. user requirement, do not raise without explicit ask.
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def _fetch_picker_context(angle_window_days=14, counts_window_days=7):
@@ -154,7 +157,7 @@ def main():
         sys.exit(3)
 
     project_recents = recent_angles_by_project(ctx.get("project_angles"))
-    candidates = build_candidates(config, project_recents)
+    candidates, _ = build_candidates(config, project_recents)
     recent_project_counts = ctx.get("recent_posts_by_project") or {}
 
     if args.show_all:

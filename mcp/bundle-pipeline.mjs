@@ -26,7 +26,7 @@ fs.mkdirSync(distDir, { recursive: true });
 
 // Pack into a temp dir, then move to dist/pipeline.tgz. --json prints the
 // produced filename so we don't have to guess the version-stamped name.
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "saps-pack-"));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "s4l-pack-"));
 let produced;
 try {
   const out = execFileSync("npm", ["pack", "--json", "--pack-destination", tmpDir], {

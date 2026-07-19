@@ -119,7 +119,7 @@ def copy_db(src: Path) -> Optional[Path]:
     if not src.exists():
         return None
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="saps_cookies_"))
+        tmp = Path(tempfile.mkdtemp(prefix="s4l_cookies_"))
         dst = tmp / src.name
         shutil.copy2(src, dst)
         for suffix in ("-wal", "-shm"):

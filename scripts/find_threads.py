@@ -29,14 +29,15 @@ except Exception:
     def _resolve_account(_platform):  # type: ignore[unused-arg]
         return None
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 
 
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
 
 
 def fetch_json(url, headers=None, user_agent="social-autoposter/1.0"):
@@ -451,7 +452,8 @@ def main():
         project_config.get("subreddits", config.get("subreddits", []))
         if project_config else config.get("subreddits", [])
     )
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+    from account_resolver import resolve as _resolve_account
+    reddit_username = _resolve_account("reddit") or ""
     user_agent = f"social-autoposter/1.0 (u/{reddit_username})" if reddit_username else "social-autoposter/1.0"
 
     # Rate limit check

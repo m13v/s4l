@@ -36,7 +36,7 @@ import json
 import os
 import random
 import sys as _sys_mod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ── Style taxonomy ──────────────────────────────────────────────────
 
@@ -1034,8 +1034,64 @@ def compute_target_distribution(platform, context="posting"):
 # mode="invent" and the prompt hands the model the top N as reference
 # material to derive a new style from.
 
-INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
+# 2026-07-10: inline invention retired (rate 0). It ran inside the drafting
+# prep session with the top-performers leaderboard + winner exemplars in
+# context, so every "new" style was a renamed clone of the winning
+# agree-then-relocate move; combined with name-only dedup the registry hit
+# ~938 styles that were mostly one structure. Invention now lives in the
+# standalone scripts/invent_styles.py job (operator-only launchd
+# com.m13v.s4l-invent-styles: the registry is global across installs, so a
+# central daily run replaces per-post rolls). The invent-mode plumbing in
+# pickers/posters is kept intact: register_style() is what the standalone
+# job calls, and a nonzero rate here re-enables the inline path if ever
+# wanted.
+INVENT_RATE = 0.0  # retired inline roll (was 0.05, ~1 in 20 posts)
 CURATED_TOP_N = 5   # size of the invent-mode reference list (top 5 by score)
+
+# Draft-prompt treatment_v4 assigns NO real engagement style, on ANY platform
+# that participates in the S4L_DRAFT_PROMPT_VARIANT experiment (currently
+# Twitter and Reddit, both of which export it via
+# draft_prompt_core.pick_draft_prompt_arm() before picking a style). This is
+# the ONE place that decision is made: pick_style_for_post() and
+# pick_exploration_style() below both short-circuit on it, so every caller
+# (Twitter's s4l_pick_style bash wrapper, Reddit's direct Python call, and
+# any future platform driver) gets the same behavior for free, with nothing
+# to remember to wire up per-platform. A caller that reads the env var
+# directly instead of routing through these functions is the only way to
+# miss this. Must match draft_prompt_core.py's ARM_TREATMENT = "treatment_v4".
+# 2026-07-17: consolidated here after a real bug -- the same "treatment_v4 =
+# no style" check used to live only in run-twitter-cycle.sh (Twitter's bash
+# driver), one layer above this shared function, so Reddit (which calls
+# pick_style_for_post() directly, bypassing that bash script entirely) never
+# got it: Reddit kept assigning a real style, the model still correctly
+# wrote "voice_first" per get_assigned_style_prompt()'s render-side check
+# below, and validate_or_register()'s USE-mode drift protection silently
+# coerced "voice_first" back to the real assigned style at post time.
+STYLE_SENTINEL_TREATMENT = "voice_first"
+
+
+def _is_treatment_v4():
+    return (os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or "").strip() == "treatment_v4"
+
+
+def _treatment_v4_assignment():
+    """The single no-style assignment returned by both pickers below when
+    _is_treatment_v4(). style is the literal sentinel, not None/empty, on
+    purpose: this makes the assignment identical to what the model is told
+    to output (see get_assigned_style_prompt), so validate_or_register's
+    first, simplest check (style == assigned_style -> valid) accepts it
+    with no special-casing anywhere downstream, on either platform."""
+    return {
+        "mode": "use",
+        "style": STYLE_SENTINEL_TREATMENT,
+        "description": None,
+        "example": None,
+        "note": None,
+        "target_chars": None,
+        "reference_styles": [],
+        "distribution_snapshot": [],
+        "picked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
 
 # Fallback target comment length (chars) for any style that lacks an explicit
 # target_chars (legacy DB rows, cold-start before the registry is reachable).
@@ -1196,6 +1252,9 @@ def pick_style_for_post(platform, context="posting",
             "picked_at": ISO-8601 UTC,
         }
     """
+    if _is_treatment_v4():
+        return _treatment_v4_assignment()
+
     rnd = rng or random
 
     # Human-derived branch (2026-05-22, second pass): on every platform,
@@ -1330,6 +1389,112 @@ def pick_style_for_post(platform, context="posting",
     }
 
 
+# Days back a model_invented style still counts as "recent" for the Draft-B
+# exploration pool. The registry holds ~900 pre-2026-07-10 inventions that
+# are mostly clones of the agree-then-relocate skeleton (see the
+# invent_styles.py docstring); the exploration slot exists to trial the
+# standalone job's structurally-diverse output, not to resurrect those.
+# human_derived rows are NOT date-gated: they arrive one per platform per
+# day and least-used ordering naturally favors the fresh ones.
+EXPLORATION_INVENTED_MAX_AGE_DAYS = 14
+# Hard floor: never trial inventions from before the inline INVENT_RATE was
+# zeroed (2026-07-10). Anything older is the clone flood, regardless of how
+# recent the rolling window makes it look.
+EXPLORATION_INVENTED_EPOCH = datetime(2026, 7, 10, 21, 0,
+                                      tzinfo=timezone.utc)
+
+
+def pick_exploration_style(platform, context="posting", exclude=None,
+                           rng=None):
+    """Draft-B exploration picker (2026-07-11). NEVER invents.
+
+    Returns an assignment dict in the exact pick_style_for_post() shape
+    (so s4l_render_style_block and every downstream consumer work
+    unchanged) with an extra "source" key in {"human_derived",
+    "model_invented"}, or None when the pool is empty / anything fails
+    (caller falls back to the scored picker).
+
+    Pool: registry rows with kind='human_derived' (any age) plus
+    kind='model_invented' rows registered in the last
+    EXPLORATION_INVENTED_MAX_AGE_DAYS days. Selection is LEAST-USED first
+    (30-day post count on this platform via compute_target_distribution),
+    uniform among the up-to-5 least-used, so every new style gets trial
+    exposure instead of waiting behind the score-weighted sampler's
+    winner-take-most weights. This is the distribution channel for the
+    standalone invent_styles.py job; the review card's pick plus the
+    posted draft's engagement write the style's first real score, and
+    winners graduate into the Draft-A pool through the normal sampler.
+    """
+    if _is_treatment_v4():
+        # No exploration under treatment_v4 (see STYLE_SENTINEL_TREATMENT
+        # above): return None so the caller's existing "pool empty, fall
+        # back to the scored picker" path fires, which routes through
+        # pick_style_for_post() and converges on the same sentinel.
+        return None
+    rnd = rng or random
+    try:
+        never = set(PLATFORM_POLICY.get(platform, {}).get("never", []))
+        skip = set(exclude or ()) | never
+        registry = _fetch_registry_styles()
+        cutoff = max(
+            datetime.now(timezone.utc)
+            - timedelta(days=EXPLORATION_INVENTED_MAX_AGE_DAYS),
+            EXPLORATION_INVENTED_EPOCH,
+        )
+        pool = {}
+        for name, entry in registry.items():
+            if name in skip:
+                continue
+            if (entry.get("status") or "active") != "active":
+                continue
+            kind = entry.get("kind")
+            if kind == "human_derived":
+                pool[name] = entry
+            elif kind == "model_invented":
+                invented_at = _parse_iso_utc(entry.get("invented_at"))
+                if invented_at is not None and invented_at >= cutoff:
+                    pool[name] = entry
+        if not pool:
+            return None
+        usage = {r["style"]: int(r.get("n") or 0)
+                 for r in compute_target_distribution(platform,
+                                                      context=context)}
+        names = list(pool.keys())
+        rnd.shuffle(names)  # random tie order before the stable sort
+        names.sort(key=lambda s: usage.get(s, 0))
+        chosen = rnd.choice(names[:5])
+        entry = pool[chosen]
+        return {
+            "mode": "use",
+            "style": chosen,
+            "description": entry.get("description"),
+            "example": entry.get("example"),
+            "note": entry.get("note"),
+            "target_chars": entry.get("target_chars") or DEFAULT_TARGET_CHARS,
+            "source": entry.get("kind"),
+            "usage_n_30d": usage.get(chosen, 0),
+            "reference_styles": [],
+            "distribution_snapshot": [],
+            "picked_at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"),
+        }
+    except Exception:
+        return None
+
+
+def _parse_iso_utc(value):
+    """Parse an ISO timestamp into aware-UTC; None on any failure."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
 def get_assigned_style_prompt(platform, assignment, context="posting"):
     """Compact prompt block built from a pick_style_for_post() assignment.
 
@@ -1352,7 +1517,48 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
     policy = PLATFORM_POLICY.get(platform, PLATFORM_POLICY["reddit"])
     lines = []
 
-    if assignment["mode"] == "use":
+    # Draft-prompt A/B v4 (voice-first, 2026-07-15 RESET of v3; style
+    # assignment dropped entirely 2026-07-17): v3's treatment rendered the
+    # style as the BINDING FORM of the draft. v4 first demoted it to "an
+    # optional idea for angle/length", but a real 21-pair batch comparison
+    # showed the demoted style block was STILL polluting context: the
+    # picker's one canonical example for a batch's assigned style bled its
+    # own vocabulary into every candidate that batch regardless of topic
+    # (e.g. a batch drawing 'attention_is_the_input' produced 6/6 drafts
+    # pivoting on "who's paying attention", across unrelated threads). Style
+    # is now not shown to the model AT ALL for treatment_v4: the account's
+    # real voice corpus + learned_preferences are the sole drafting signal.
+    # The arm is read from the env HERE because this block is rendered
+    # inside the cycle process where run-twitter-cycle.sh assigns and
+    # exports S4L_DRAFT_PROMPT_VARIANT (stamp-at-source: that same process
+    # also stamps the arm onto every plan candidate via active_experiments).
+    # Unset or control_v4 (and every non-twitter caller, which never has the
+    # env) renders the legacy block below unchanged — that block IS the v4
+    # control arm, same as it was the v3 control arm.
+    #
+    # pick_style_for_post()/pick_exploration_style() (above, in this same
+    # module) already refuse to assign a real style under treatment_v4 and
+    # return STYLE_SENTINEL_TREATMENT itself as `assignment["style"]`, so
+    # this render-side check and that pick-side check agree by construction
+    # instead of by convention -- no separate literal to keep in sync here.
+    if _is_treatment_v4():
+        lines.append(
+            "## Engagement style: not used for this draft (voice-first mode)"
+        )
+        lines.append("")
+        lines.append(
+            "This account's real voice (the ACCOUNT VOICE CORPUS block and "
+            "voice.examples) and learned_preferences drive this reply, not a "
+            "named engagement style — no style name, description, example, "
+            "or length target is assigned this draft. "
+            f'In your output JSON, set "engagement_style" to exactly '
+            f'"{STYLE_SENTINEL_TREATMENT}" and leave "new_style" as null, for BOTH '
+            "Draft A and Draft B. Do not invent, reuse, or reference any "
+            "other style name for this draft."
+        )
+    elif assignment["mode"] == "use":
+        # This IS the v4 control arm (unchanged since v3 control / v2's control
+        # text). treatment_v4 never reaches here; see the sentinel branch above.
         lines.append(f"## Your assigned engagement style: **{assignment['style']}**")
         lines.append("")
         lines.append(
@@ -1371,13 +1577,35 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
         # LENGTH A/B CONCLUDED 2026-06-04: control won, so the prompt always
         # uses the legacy generic length guidance. The treatment's per-style
         # target prompt remains preserved only in the shipped experiment card.
-        lines.append("")
-        lines.append(
-            "**LENGTH: keep it tight.** One or two sentences, well under the "
-            "250-character Twitter limit. A short, sharp reply almost always "
-            "beats a paragraph. This applies to the comment text only; any "
-            "link/CTA the system appends afterward is separate."
-        )
+        #
+        # EXCEPTION (2026-07-11, Draft-B explore slot): exploration
+        # assignments (pick_exploration_style, marked by `source`) honor the
+        # style's own target_chars so the A/B pair diverges on the length
+        # axis too. The uniform clamp flattened every draft to the same
+        # 2-sentence shape (user: "the older drafts looked all very similar
+        # in terms of the length"). The 06-04 conclusion still governs the
+        # scored path, which never carries `source`.
+        _explore_tc = assignment.get("target_chars")
+        if (assignment.get("source") in ("human_derived", "model_invented")
+                and _explore_tc):
+            lines.append("")
+            lines.append(
+                f"**LENGTH: aim for about {int(_explore_tc)} characters** "
+                "(this style's own winning length; within about 30% either "
+                "way is fine, never above 250). Let the target set the form: "
+                "a very short target means one clipped line, a long one can "
+                "breathe. Do NOT default to the usual two-sentence shape. "
+                "This applies to the comment text only; any link/CTA the "
+                "system appends afterward is separate."
+            )
+        else:
+            lines.append("")
+            lines.append(
+                "**LENGTH: keep it tight.** One or two sentences, well under the "
+                "250-character Twitter limit. A short, sharp reply almost always "
+                "beats a paragraph. This applies to the comment text only; any "
+                "link/CTA the system appends afterward is separate."
+            )
         lines.append("")
         lines.append(
             'In your output JSON, set "engagement_style" to exactly '
@@ -1644,13 +1872,15 @@ def get_content_rules(platform):
     ]
 
     platform_rules = {
-        "reddit": [
-            "Go BIMODAL: either 1 punchy sentence (<100 chars, highest avg upvotes) or 4-5 sentences of real substance. AVOID the 2-3 sentence dead zone.",
-            "Lead with personal experience or observation ('I tried X' / 'I noticed X' / 'the part that broke for me was X') rather than instructional advice ('you should X'). Whether you can speak AS the project's maker is governed by the VOICE RELATIONSHIP rule.",
-            "No markdown in Reddit (no ##, **, numbered lists). Casual tone, lowercase OK, fragments OK.",
-            "NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l). NEVER include URLs or links.",
-            "Statements beat questions. Be authoritative, not inquisitive. No 'anyone else experience this?'",
-        ],
+        # Reddit-specific rules deprecated 2026-07-18 (user decision): the
+        # 2026-04-13 "data-driven" claims behind them (bimodal length,
+        # statements>questions, first-person openings) no longer reproduce on
+        # current posts data, and they blocked X/Reddit draft-prompt parity.
+        # The reddit DRAFT prompt no longer includes content rules at all
+        # (draft_prompt_core dropped @CONTENT_RULES@); only the engage rail
+        # still renders this, now common-rules-only. The stale hardcoded
+        # product-name list that lived here is gone with them.
+        "reddit": [],
         "twitter": [
             "Keep it short: 1-2 sentences max. Fragments and lowercase OK.",
             "Direct product mentions OK when relevant (unlike Reddit).",

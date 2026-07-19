@@ -27,6 +27,10 @@
 		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
 		<key>HOME</key>
 		<string>/Users/matthewdi</string>
+		<key>S4L_DASHBOARD_WARMERS</key>
+		<string>0</string>
+		<key>S4L_DASHBOARD_WARMERS</key>
+		<string>0</string>
 	</dict>
 </dict>
 </plist>

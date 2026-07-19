@@ -1,0 +1,130 @@
+diff --git a/src/browser_harness/helpers.py b/src/browser_harness/helpers.py
+index 2014887..2887b3f 100644
+--- a/src/browser_harness/helpers.py
++++ b/src/browser_harness/helpers.py
+@@ -157,6 +157,7 @@ def _has_return_statement(expression):
+ 
+ # --- navigation / page ---
+ def goto_url(url):
++    _tab_event("goto_url", f"url={url[:90]}")
+     r = cdp("Page.navigate", url=url)
+     if os.environ.get("BH_DOMAIN_SKILLS") != "1":
+         return r
+@@ -295,12 +296,55 @@ def current_tab():
+     r = _send({"meta": "current_tab"})
+     return {"targetId": r["targetId"], "url": r["url"], "title": r["title"]}
+ 
++def _tab_event(fn, detail=""):
++    """One stderr line per tab-mutating CDP call, stamped with the entry
++    script. These calls (Target.createTarget / activateTarget / closeTarget)
++    can ACTIVATE Chrome on macOS — raise the window and steal app focus. The
++    S4L menubar's browser-foreground telemetry (s4l_browser_foreground.py,
++    [browser-foreground] lines in menubar.err.log) records every activation
++    with a timestamp; this line is the other half of the correlation: WHICH
++    harness call fired at that moment, from WHICH pipeline step. Added
++    2026-07-14 to attribute chronic 1-5x/hour focus steals."""
++    try:
++        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
++        entry = os.path.basename(sys.argv[0] or "?") if sys.argv else "?"
++        print(
++            f"[bh_tab_event] {ts} fn={fn} entry={entry} "
++            f"bu={os.environ.get('BU_NAME', '?')} {detail}",
++            file=sys.stderr, flush=True,
++        )
++    except Exception:
++        pass
++
++
+ def _mark_tab():
+     """Prepend horse emoji to tab title so the user can see which tab the agent controls."""
+     try: cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
+     except Exception: pass
+ 
+-def switch_tab(target):
++def _is_offscreen_harness():
++    """True when this harness window is parked offscreen (BH_WINDOW_POS with a
++    negative coordinate), i.e. a background automation harness that must NEVER
++    steal the user's OS focus. The three S4L harnesses (twitter/reddit/linkedin)
++    all launch at y=-1032; interactive browsers sit onscreen (e.g. 100,100).
++    Cached; env is fixed for a process's life."""
++    global _OFFSCREEN_CACHE
++    try:
++        return _OFFSCREEN_CACHE
++    except NameError:
++        pass
++    off = False
++    try:
++        xy = os.environ.get("BH_WINDOW_POS", "")
++        if xy:
++            off = any(int(float(v)) < 0 for v in xy.split(",")[:2])
++    except Exception:
++        off = False
++    globals()["_OFFSCREEN_CACHE"] = off
++    return off
++
++
++def switch_tab(target, activate=None):
+     # Accept either a raw targetId string or the dict returned by current_tab() / list_tabs(),
+     # so `switch_tab(current_tab())` works without a manual ["targetId"] dance.
+     target_id = target.get("targetId") if isinstance(target, dict) else target
+@@ -308,18 +352,48 @@ def switch_tab(target):
+     # plus the trailing space = 3 code units, so slice(3) cleanly removes the prefix.
+     try: cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F434 '))document.title=document.title.slice(3)")
+     except Exception: pass
+-    cdp("Target.activateTarget", targetId=target_id)
++    _tab_event("switch_tab", f"target={target_id}")
++    # Target.activateTarget raises/focuses the OS window (2026-07-15: 7/7
++    # same-second harness_browser_foregrounded correlation) but is NOT needed
++    # for CDP automation — Page.captureScreenshot and Input.dispatchMouseEvent
++    # are session-scoped and the occlusion flags keep offscreen tabs painting.
++    # So on an offscreen automation harness (twitter/reddit/linkedin) skip it:
++    # this is the SINGLE shared fix for the reddit focus-pops that twitter had
++    # to work around per-caller. Callers wanting the old behavior pass
++    # activate=True; interactive (onscreen) harnesses still activate by default.
++    if activate is None:
++        activate = not _is_offscreen_harness()
++    if activate:
++        cdp("Target.activateTarget", targetId=target_id)
+     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
+     _send({"meta": "set_session", "session_id": sid, "target_id": target_id})
+     _mark_tab()
+     return sid
+ 
+-def new_tab(url="about:blank"):
++def new_tab(url="about:blank", background=False):
+     # Always create blank, then goto: passing url to createTarget races with
+     # attach, so the brief about:blank is "complete" by the time the caller
+     # polls and wait_for_load() returns before navigation actually starts.
+-    tid = cdp("Target.createTarget", url="about:blank")["targetId"]
+-    switch_tab(tid)
++    #
++    # background=True creates the target without focusing it AND attaches
++    # without Target.activateTarget — activation is proven to raise/focus the
++    # Chrome window on macOS (2026-07-15: 7/7 same-second correlation with
++    # harness_browser_foregrounded). Recovery paths that mint a replacement
++    # tab for a wedged one must never pop the window.
++    # On an offscreen automation harness, ALWAYS create in background (no
++    # window raise) regardless of the caller's default — same rationale as
++    # switch_tab. This is what makes the reddit DM/engage flow (which calls
++    # new_tab(background=False) per destination) stop popping without touching
++    # every caller. Onscreen/interactive harnesses keep the requested behavior.
++    bg = background or _is_offscreen_harness()
++    _tab_event("new_tab", f"url={url} background={bg}")
++    tid = cdp("Target.createTarget", url="about:blank", background=bg)["targetId"]
++    if bg:
++        sid = cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
++        _send({"meta": "set_session", "session_id": sid, "target_id": tid})
++        _mark_tab()
++    else:
++        switch_tab(tid)
+     if url != "about:blank":
+         goto_url(url)
+     return tid
+@@ -330,6 +404,7 @@ def close_tab(target=None):
+     target_id = target.get("targetId") if isinstance(target, dict) else target
+     if target_id is None:
+         target_id = current_tab()["targetId"]
++    _tab_event("close_tab", f"target={target_id}")
+     cdp("Target.closeTarget", targetId=target_id)
+ 
+ 

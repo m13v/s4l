@@ -36,12 +36,14 @@ down it sleeps and retries; it never crashes the pipeline.
 
 from __future__ import annotations
 
+import fcntl
 import glob
 import json
 import os
 import re
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -55,7 +57,7 @@ def _ensure_playwright_interpreter() -> None:
         return
     except Exception:
         pass
-    if os.environ.get("_SAPS_OVERLAY_REEXEC") == "1":
+    if os.environ.get("_S4L_OVERLAY_REEXEC") == "1":
         return  # already tried; fall through and let the import error surface
     for cand in (
         "/opt/homebrew/bin/python3.11",
@@ -63,7 +65,7 @@ def _ensure_playwright_interpreter() -> None:
         "/opt/homebrew/bin/python3",
     ):
         if Path(cand).exists() and os.path.realpath(cand) != os.path.realpath(sys.executable):
-            env = dict(os.environ, _SAPS_OVERLAY_REEXEC="1")
+            env = dict(os.environ, _S4L_OVERLAY_REEXEC="1")
             os.execve(cand, [cand, os.path.abspath(__file__), *sys.argv[1:]], env)
 
 
@@ -72,9 +74,9 @@ _ensure_playwright_interpreter()
 # --- config -----------------------------------------------------------------
 
 CDP_URL = os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555").strip()
-LOG_DIR = Path(os.environ.get("SAPS_LOG_DIR", str(Path.home() / "social-autoposter" / "skill" / "logs")))
+LOG_DIR = Path(os.environ.get("S4L_LOG_DIR", str(Path.home() / "social-autoposter" / "skill" / "logs")))
 # How stale a cycle log can be (seconds) before we treat the harness as idle.
-IDLE_AFTER_SEC = int(os.environ.get("SAPS_OVERLAY_IDLE_SEC", "240"))
+IDLE_AFTER_SEC = int(os.environ.get("S4L_OVERLAY_IDLE_SEC", "240"))
 
 TITLE = "S4L"
 REASSURE = (
@@ -83,30 +85,30 @@ REASSURE = (
 )
 
 # --- the page-side overlay builder ------------------------------------------
-# `_BODY` defines window.__sapsPaint(payload): idempotently creates the overlay
+# `_BODY` defines window.__s4lPaint(payload): idempotently creates the overlay
 # DOM, then updates its text. A lone setInterval drives both the pulse and the
 # "updated Ns ago" ticker so the overlay always looks alive between status
 # pushes. Built with createElement + element.style.<prop> + textContent only
 # (CSP-safe; no <style> tag, no innerHTML-with-style-attrs). pointer-events is
 # none so the overlay can never intercept the automation's own clicks.
 _BODY = r"""
-window.__sapsAnnounce = function(payload){
+window.__s4lAnnounce = function(payload){
   // One-time, dismissible-forever launch notice. The reassurance disclaimer
   // lives HERE (a big centered modal with an OK button) instead of eating space
   // in the always-on status overlay. Once OK is clicked we stamp localStorage so
   // it never shows again. Best-effort + CSP-safe (createElement/style/textContent
   // + addEventListener only); never throws into the page.
   try {
-    var KEY = "__saps_announce_v1";
+    var KEY = "__s4l_announce_v1";
     var dismissed = false;
     try { dismissed = window.localStorage.getItem(KEY) === "1"; } catch(e) {}
-    if(window.__sapsAnnounceDismissed) dismissed = true;  // session fallback if storage is blocked
+    if(window.__s4lAnnounceDismissed) dismissed = true;  // session fallback if storage is blocked
     if(dismissed) return;
-    if(document.getElementById("__saps_announce")) return;
+    if(document.getElementById("__s4l_announce")) return;
 
     function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
 
-    var back = mk("div", document.documentElement); back.id = "__saps_announce";
+    var back = mk("div", document.documentElement); back.id = "__s4l_announce";
     var bs = back.style;
     bs.position="fixed"; bs.top="0"; bs.left="0"; bs.width="100vw"; bs.height="100vh";
     bs.zIndex="2147483647"; bs.display="flex";
@@ -146,21 +148,21 @@ window.__sapsAnnounce = function(payload){
     os_.fontWeight="600"; os_.minWidth="120px";
     ok.addEventListener("click", function(){
       try { window.localStorage.setItem(KEY, "1"); } catch(e) {}
-      window.__sapsAnnounceDismissed = true;  // session fallback if storage is blocked
+      window.__s4lAnnounceDismissed = true;  // session fallback if storage is blocked
       if(back && back.remove) back.remove();
     });
   } catch(e) { /* announcement is best-effort, never throw into the page */ }
 };
 
-window.__sapsPaint = function(payload){
+window.__s4lPaint = function(payload){
   try {
-    var ID = "__saps_overlay";
-    var st = window.__sapsOverlayState || (window.__sapsOverlayState = {});
+    var ID = "__s4l_overlay";
+    var st = window.__s4lOverlayState || (window.__s4lOverlayState = {});
     st.title = payload.title; st.reassure = payload.reassure;
     st.status = payload.status; st.ts = payload.ts || Date.now();
 
     // Surface the one-time launch notice (carries the reassurance disclaimer).
-    try { window.__sapsAnnounce({title: st.title + " is running", reassure: st.reassure}); } catch(e){}
+    try { window.__s4lAnnounce({title: st.title + " is running", reassure: st.reassure}); } catch(e){}
 
     function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
 
@@ -173,7 +175,11 @@ window.__sapsPaint = function(payload){
       // coordinates (Input.dispatchMouseEvent) and by Playwright hit-testing,
       // both of which an opaque clickable card sitting over a target would eat.
       s.position="fixed"; s.top="50%"; s.left="50%"; s.transform="translate(-50%,-50%)";
-      s.zIndex="2147483647"; s.pointerEvents="none"; s.maxWidth="460px";
+      // Sit one below the announce modal (2147483647) so the one-time "S4L is
+      // running" notice + its OK button always stack ON TOP of this always-on
+      // status box. They're both screen-centered, so equal z-index would let
+      // whichever was appended last (this overlay) cover the OK button.
+      s.zIndex="2147483646"; s.pointerEvents="none"; s.maxWidth="460px";
       s.boxSizing="border-box"; s.padding="10px 14px"; s.borderRadius="12px";
       s.background="rgba(15,15,17,0.92)"; s.color="#fff";
       s.font="13px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
@@ -238,153 +244,14 @@ window.__sapsPaint = function(payload){
 
 # Playwright evaluate expression: (re)define the painter, then call it with the
 # arg Playwright passes. Used for live updates on existing pages.
-PAINT_EXPR = "(payload) => { " + _BODY + " try { window.__sapsPaint(payload); } catch(e){} }"
+PAINT_EXPR = "(payload) => { " + _BODY + " try { window.__s4lPaint(payload); } catch(e){} }"
 
 # Removes the overlay from a page.
 CLEAR_EXPR = (
-    "() => { var e=document.getElementById('__saps_overlay'); if(e&&e.remove)e.remove(); "
-    "var a=document.getElementById('__saps_announce'); if(a&&a.remove)a.remove(); "
-    "var s=window.__sapsOverlayState; if(s&&s._iv)clearInterval(s._iv); }"
+    "() => { var e=document.getElementById('__s4l_overlay'); if(e&&e.remove)e.remove(); "
+    "var a=document.getElementById('__s4l_announce'); if(a&&a.remove)a.remove(); "
+    "var s=window.__s4lOverlayState; if(s&&s._iv)clearInterval(s._iv); }"
 )
-
-
-# --- the interactive draft sidebar ------------------------------------------
-# A left-edge panel that lists the drafts waiting to post. Unlike the status
-# overlay (which is pointer-events:none and purely cosmetic), the sidebar is
-# INTERACTIVE: pointer-events:auto, buttons the user can click. Because a button
-# runs in the page's JS world and cannot call Python/CDP directly, the click
-# bridge is a poll: a click stashes {id, ts} on window.__sapsClick, and the
-# Python watch loop reads + clears it each tick, then drives the preview
-# (navigate to the tweet + type the draft into the reply box, NEVER submit).
-#
-# Same CSP discipline as the status overlay: createElement + element.style.<prop>
-# + textContent only, click handlers via addEventListener (NOT inline attrs / no
-# innerHTML). The two elements are kept deliberately separate so the sidebar's
-# pointer-events:auto can never bleed into the cosmetic status overlay and start
-# intercepting the automation's own clicks.
-_SIDEBAR_BODY = r"""
-window.__sapsPaintSidebar = function(payload){
-  try {
-    var ID = "__saps_sidebar";
-    var drafts = (payload && payload.drafts) || [];
-    var note = (payload && payload.note) || "";
-    function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
-
-    var root = document.getElementById(ID);
-    var rebuilt = false;
-    if(!root || !root.isConnected){
-      root = mk("div", document.documentElement); root.id = ID;
-      var s = root.style;
-      s.position="fixed"; s.top="0"; s.right="0"; s.height="100vh"; s.width="264px";
-      s.zIndex="2147483646"; s.pointerEvents="auto"; s.boxSizing="border-box";
-      s.padding="14px 12px"; s.overflowY="auto";
-      s.background="rgba(15,15,17,0.96)"; s.color="#fff";
-      s.font="13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
-      s.borderLeft="1px solid rgba(255,255,255,0.12)";
-      s.boxShadow="-2px 0 18px rgba(0,0,0,0.40)";
-      s.backdropFilter="blur(6px)"; s.webkitBackdropFilter="blur(6px)";
-      rebuilt = true;
-    }
-    var st = window.__sapsSidebarState || (window.__sapsSidebarState = {});
-    var sig = drafts.map(function(d){return d.id;}).join(",");
-    if(rebuilt || st.sig !== sig){
-      st.sig = sig;
-      while(root.firstChild) root.removeChild(root.firstChild);
-
-      var head = mk("div", root);
-      head.style.display="flex"; head.style.alignItems="center"; head.style.gap="8px";
-      var ttl = mk("span", head); ttl.textContent="Drafts to post";
-      ttl.style.fontWeight="600";
-      var cnt = mk("span", head); cnt.textContent=String(drafts.length);
-      cnt.style.marginLeft="auto"; cnt.style.opacity="0.55"; cnt.style.fontSize="11px";
-      cnt.style.fontVariantNumeric="tabular-nums";
-
-      var sub = mk("div", root);
-      sub.textContent="Click one to load it into the reply box. It won\u2019t post.";
-      sub.style.opacity="0.6"; sub.style.fontSize="11px"; sub.style.margin="3px 0 10px";
-
-      var noteEl = mk("div", root); st._note = noteEl; noteEl.id="__saps_sb_note";
-      noteEl.style.minHeight="14px"; noteEl.style.fontSize="11px";
-      noteEl.style.opacity="0.85"; noteEl.style.marginBottom="10px";
-      noteEl.textContent = note;
-
-      if(!drafts.length){
-        var empty = mk("div", root);
-        empty.textContent="No drafts waiting. Run a draft cycle.";
-        empty.style.opacity="0.5"; empty.style.fontSize="12px";
-      }
-      drafts.forEach(function(d){
-        var b = mk("div", root); var bs = b.style;
-        bs.cursor="pointer"; bs.padding="9px 10px"; bs.marginBottom="8px";
-        bs.borderRadius="10px"; bs.border="1px solid rgba(255,255,255,0.10)";
-        bs.background=(window.__sapsSelectedId==d.id)?"rgba(255,255,255,0.16)":"rgba(255,255,255,0.06)";
-        b.setAttribute("data-saps-id", String(d.id));
-
-        var meta = mk("div", b);
-        meta.style.display="flex"; meta.style.gap="6px"; meta.style.alignItems="center";
-        meta.style.marginBottom="4px";
-        if(d.project){
-          var proj = mk("span", meta); proj.textContent=d.project;
-          proj.style.fontSize="10px"; proj.style.fontWeight="600";
-          proj.style.padding="1px 6px"; proj.style.borderRadius="6px";
-          proj.style.background="rgba(255,255,255,0.14)";
-        }
-        if(d.handle){
-          var who = mk("span", meta); who.textContent="@"+d.handle;
-          who.style.fontSize="11px"; who.style.opacity="0.6";
-          who.style.overflow="hidden"; who.style.textOverflow="ellipsis"; who.style.whiteSpace="nowrap";
-        }
-        var txt = mk("div", b);
-        txt.textContent = d.draft_text || "(no draft text)";
-        txt.style.fontSize="12px"; txt.style.lineHeight="1.35";
-        txt.style.display="-webkit-box"; txt.style.webkitLineClamp="3";
-        txt.style.webkitBoxOrient="vertical"; txt.style.overflow="hidden";
-
-        b.addEventListener("mouseenter", function(){ bs.background="rgba(255,255,255,0.12)"; });
-        b.addEventListener("mouseleave", function(){
-          bs.background=(window.__sapsSelectedId==d.id)?"rgba(255,255,255,0.16)":"rgba(255,255,255,0.06)";
-        });
-        b.addEventListener("click", function(){
-          window.__sapsClick = {id: d.id, ts: Date.now()};
-          window.__sapsSelectedId = d.id;
-          var all = root.querySelectorAll("[data-saps-id]");
-          for(var i=0;i<all.length;i++){ all[i].style.background="rgba(255,255,255,0.06)"; }
-          bs.background="rgba(255,255,255,0.16)";
-          if(st._note) st._note.textContent="Loading draft into the reply box\u2026";
-        });
-      });
-    }
-    if(st._note && typeof note === "string" && note.length) st._note.textContent = note;
-  } catch(e) { /* sidebar is best-effort, never throw into the page */ }
-};
-"""
-
-SIDEBAR_PAINT_EXPR = "(payload) => { " + _SIDEBAR_BODY + " try { window.__sapsPaintSidebar(payload); } catch(e){} }"
-
-# Update ONLY the note line without rebuilding the button list (cheap, called on
-# preview start / success / error).
-SB_NOTE_EXPR = (
-    "(note) => { try { var e=document.getElementById('__saps_sb_note'); "
-    "if(e) e.textContent=note; } catch(e){} }"
-)
-
-# Read-and-clear the pending click set by a sidebar button.
-READ_CLICK_EXPR = "() => { var c = window.__sapsClick || null; window.__sapsClick = null; return c; }"
-
-CLEAR_SB_EXPR = "() => { var e=document.getElementById('__saps_sidebar'); if(e&&e.remove)e.remove(); }"
-
-# Reply composer selectors (mirrors twitter_browser._wait_for_reply_textbox).
-_REPLY_SELECTORS = (
-    '[data-testid="tweetTextarea_0"]',
-    '[role="textbox"][aria-label="Post text"]',
-    '[role="textbox"][aria-label="Tweet your reply"]',
-    '[role="textbox"][aria-label="Post your reply"]',
-)
-
-# Whether the sidebar is enabled at all (set SAPS_SIDEBAR=0 to disable).
-SIDEBAR_ENABLED = os.environ.get("SAPS_SIDEBAR", "1").strip() != "0"
-# How often (seconds) to re-fetch the drafts list from the API.
-SIDEBAR_REFRESH_SEC = int(os.environ.get("SAPS_SIDEBAR_REFRESH_SEC", "12"))
 
 
 def _build_init_script(title: str, reassure: str, status: str) -> str:
@@ -392,7 +259,7 @@ def _build_init_script(title: str, reassure: str, status: str) -> str:
     it with the latest known text so a mid-cycle navigation paints instantly."""
     seed = json.dumps({"title": title, "reassure": reassure, "status": status})
     return _BODY + (
-        "try { var __p = " + seed + "; __p.ts = Date.now(); window.__sapsPaint(__p); } catch(e){}"
+        "try { var __p = " + seed + "; __p.ts = Date.now(); window.__s4lPaint(__p); } catch(e){}"
     )
 
 
@@ -440,6 +307,21 @@ class Harness:
                 ctx.add_init_script(script)
             except Exception:
                 pass
+            # The overlay shares this CDP session with the real twitter-harness
+            # automation. When x.com throws up a native JS dialog, both clients'
+            # Playwright drivers race to auto-dismiss it (the default behavior
+            # when no listener is registered); the loser gets a
+            # "Page.handleJavaScriptDialog: No dialog is showing" protocol error
+            # that is an UNCAUGHT rejection in the Node driver, killing that
+            # whole driver process. A no-op listener opts this connection out of
+            # the race entirely (dialog handling stays the automation's job);
+            # once the driver's default-dismiss is suppressed here, evaluate()
+            # calls on the affected page resume normally as soon as the other
+            # side clears the dialog.
+            try:
+                ctx.on("dialog", lambda dialog: None)
+            except Exception:
+                pass
 
     def paint(self, title: str, reassure: str, status: str) -> int:
         """Paint/refresh the overlay on every live page. Returns pages touched."""
@@ -462,148 +344,6 @@ class Harness:
             except Exception:
                 pass
         return n
-
-    # --- interactive sidebar -------------------------------------------------
-
-    def register_sidebar_init(self, drafts: list) -> None:
-        """Rebuild the sidebar on every new document so it survives navigation."""
-        seed = json.dumps({"drafts": drafts, "note": ""})
-        script = _SIDEBAR_BODY + ("try { window.__sapsPaintSidebar(" + seed + "); } catch(e){}")
-        for ctx in self._browser.contexts:
-            try:
-                ctx.add_init_script(script)
-            except Exception:
-                pass
-
-    def paint_sidebar(self, drafts: list, note: str = "") -> int:
-        n = 0
-        payload = {"drafts": drafts, "note": note}
-        for p in self._pages():
-            try:
-                p.evaluate(SIDEBAR_PAINT_EXPR, payload)
-                n += 1
-            except Exception:
-                pass
-        return n
-
-    def set_sidebar_note(self, note: str) -> None:
-        for p in self._pages():
-            try:
-                p.evaluate(SB_NOTE_EXPR, note)
-            except Exception:
-                pass
-
-    def read_click(self):
-        """Return (click_dict, page) for the first pending sidebar click, else (None, None)."""
-        for p in self._pages():
-            try:
-                c = p.evaluate(READ_CLICK_EXPR)
-                if c:
-                    return c, p
-            except Exception:
-                pass
-        return None, None
-
-    def clear_sidebar(self) -> int:
-        n = 0
-        for p in self._pages():
-            try:
-                p.evaluate(CLEAR_SB_EXPR)
-                n += 1
-            except Exception:
-                pass
-        return n
-
-    def _wait_reply_box(self, page, total_ms: int = 30000):
-        import time as _t
-        deadline = _t.monotonic() + total_ms / 1000.0
-        while _t.monotonic() < deadline:
-            for sel in _REPLY_SELECTORS:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() > 0 and loc.is_visible():
-                        return loc
-                except Exception:
-                    pass
-            page.wait_for_timeout(500)
-        return None
-
-    def preview_draft(self, page, tweet_url: str, text: str) -> dict:
-        """Navigate to the tweet and TYPE the draft into the reply box.
-
-        Deliberately stops before submitting: there is no click on the Reply /
-        tweetButtonInline button anywhere in this method. It mirrors the
-        navigate+locate+type prefix of twitter_browser.reply_to_tweet, minus the
-        post step, so the user sees exactly how the reply would look without it
-        going live.
-        """
-        try:
-            try:
-                page.goto(tweet_url, wait_until="load", timeout=60000)
-            except Exception:
-                try:
-                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
-                except Exception:
-                    pass
-            page.wait_for_timeout(2500)
-            try:
-                page.wait_for_selector("main", state="attached", timeout=20000)
-            except Exception:
-                pass
-            box = self._wait_reply_box(page, 30000)
-            if not box:
-                return {"ok": False, "error": "reply_box_not_found"}
-            box.click()
-            page.wait_for_timeout(400)
-            # Clear anything already in the composer so a re-preview is clean.
-            try:
-                page.keyboard.press("Meta+A")
-                page.keyboard.press("Delete")
-            except Exception:
-                pass
-            page.keyboard.type(text, delay=8)
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-
-# --- drafts data source -----------------------------------------------------
-
-def _fetch_drafts(limit: int = 40) -> list:
-    """Fetch the drafts waiting to post (status='drafted') via the s4l.ai API.
-
-    Returns a compact list the sidebar can render. Best-effort: any failure
-    (API down, no identity, SSL hiccup) returns [] so the watch loop never
-    crashes the pipeline over a missing sidebar list.
-    """
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from http_api import api_get
-        resp = api_get(
-            "/api/v1/twitter-candidates",
-            query={"status": "drafted", "limit": str(limit)},
-        )
-    except BaseException:
-        # api_get raises SystemExit (a BaseException, NOT Exception) on terminal
-        # HTTP failure; a transient 500 must yield [] for this tick, never kill
-        # the watch loop. Catch BaseException so the sidebar degrades gracefully.
-        return []
-    rows = (resp.get("data") or {}).get("candidates") if isinstance(resp, dict) else None
-    rows = rows or (resp.get("candidates") if isinstance(resp, dict) else None) or []
-    drafts = []
-    for r in rows:
-        text = (r.get("draft_reply_text") or "").strip()
-        url = r.get("tweet_url") or ""
-        if not text or not url:
-            continue
-        drafts.append({
-            "id": r.get("id"),
-            "project": r.get("matched_project") or "",
-            "handle": r.get("author_handle") or "",
-            "tweet_url": url,
-            "draft_text": text,
-        })
-    return drafts
 
 
 # --- cycle-log -> friendly status -------------------------------------------
@@ -731,21 +471,58 @@ def cmd_watch(interval: float = 2.0) -> int:
     holds ONE CDP connection open across ticks (light, and friendly to the
     poster's concurrent CDP session) and only reconnects when the harness Chrome
     comes/goes. Never raises into the pipeline."""
+    # Singleton guard: there must be exactly ONE watcher painting at a time, or
+    # two loops fight over the same overlay (double heartbeat, flicker). Two start
+    # lanes can race to spawn this: the MCP's foreground KeepAlive launchd job and
+    # the best-effort run-overlay-watch.sh supervisor. Hold an exclusive,
+    # non-blocking flock for the life of the process; if another watcher already
+    # holds it, exit 0 quietly and let that one own the overlay. The lock fd is
+    # intentionally leaked (kept open) until the process dies so the OS releases
+    # it automatically on exit/kill.
+    try:
+        _lock_fd = os.open("/tmp/s4l_overlay_watch.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another overlay watcher already running; exiting", file=sys.stderr)
+        return 0
     print(f"watching {LOG_DIR}/twitter-cycle-*.log -> overlay on {CDP_URL} (Ctrl-C to stop)")
-    if SIDEBAR_ENABLED:
-        print(f"interactive drafts sidebar ON (refresh every {SIDEBAR_REFRESH_SEC}s; SAPS_SIDEBAR=0 to disable)")
     # Treat SIGTERM (launchd unload, `kill`) like Ctrl-C so the overlay is
     # cleared on the way out instead of lingering until the next navigation.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    # Hard watchdog: a wedged CDP call (e.g. a page whose JS is paused on a
+    # native dialog) can block the loop body indefinitely without ever raising,
+    # so the normal try/except reconnect logic below never gets a chance to
+    # run. That let a past incident spin a full core for ~3.5 hours with the
+    # overlay silently stuck instead of failing loudly. A background thread
+    # that self-terminates the process if the main loop hasn't ticked in too
+    # long is the only thing that reliably fires even when the main thread is
+    # stuck inside a blocking Playwright/CDP call; os._exit() skips Python-level
+    # cleanup on purpose since a stuck process can't be trusted to run it
+    # either. launchd's KeepAlive relaunches a clean instance immediately.
+    WATCHDOG_MAX_STALL_SEC = 60.0
+    _last_tick = {"t": time.time()}
+
+    def _watchdog() -> None:
+        while True:
+            time.sleep(10)
+            stalled = time.time() - _last_tick["t"]
+            if stalled > WATCHDOG_MAX_STALL_SEC:
+                print(
+                    f"[watchdog] loop stalled {stalled:.0f}s (>{WATCHDOG_MAX_STALL_SEC:.0f}s); "
+                    "self-terminating for a clean launchd restart",
+                    file=sys.stderr,
+                )
+                os._exit(1)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+
     last_status = None
     h: Harness | None = None
     registered = False
-    drafts: list = []
-    drafts_by_id: dict = {}
-    last_sb_fetch = 0.0
-    last_sb_sig = None
     try:
         while True:
+            _last_tick["t"] = time.time()
             # Never let status computation (log globbing/stat, all racing against
             # live log rotation) kill the watcher; fall back to a neutral status.
             try:
@@ -759,48 +536,12 @@ def cmd_watch(interval: float = 2.0) -> int:
                 if not registered:
                     # Re-register init on each (re)connect so fresh tabs inherit it.
                     h.register_init(TITLE, REASSURE, status)
-                    if SIDEBAR_ENABLED:
-                        h.register_sidebar_init(drafts)
                     registered = True
                 # Repaint every tick even when text is unchanged: the timestamp
                 # reset keeps the heartbeat fresh so the dot never looks dead.
                 if h.paint(TITLE, REASSURE, status) == 0:
                     # No live page (all tabs closed/navigating) -> drop & retry.
                     raise RuntimeError("no live page")
-
-                if SIDEBAR_ENABLED:
-                    now = time.time()
-                    if now - last_sb_fetch >= SIDEBAR_REFRESH_SEC:
-                        drafts = _fetch_drafts()
-                        drafts_by_id = {str(d["id"]): d for d in drafts}
-                        last_sb_fetch = now
-                        sig = ",".join(str(d["id"]) for d in drafts)
-                        if sig != last_sb_sig:
-                            # List changed -> re-register init (fresh tabs) + repaint.
-                            h.register_sidebar_init(drafts)
-                            last_sb_sig = sig
-                    h.paint_sidebar(drafts)
-
-                    # Click bridge: a sidebar button stashed {id, ts} -> drive preview.
-                    click, click_page = h.read_click()
-                    if click and click_page is not None:
-                        did = str(click.get("id"))
-                        d = drafts_by_id.get(did)
-                        if d is None:
-                            h.set_sidebar_note("That draft is no longer in the list.")
-                        elif "posting" in status.lower():
-                            # Collision guard: a posting step is driving the same
-                            # Chrome right now. Refuse so we don't fight it.
-                            h.set_sidebar_note("Busy posting right now \u2014 try again in a moment.")
-                        else:
-                            short = (d["draft_text"][:40] + "\u2026") if len(d["draft_text"]) > 40 else d["draft_text"]
-                            h.set_sidebar_note("Opening tweet + typing draft\u2026")
-                            print(f"[{time.strftime('%H:%M:%S')}] preview draft id={did} -> {d['tweet_url']}")
-                            res = h.preview_draft(click_page, d["tweet_url"], d["draft_text"])
-                            if res.get("ok"):
-                                h.set_sidebar_note(f"\u2713 Loaded into reply box (not posted): \u201c{short}\u201d")
-                            else:
-                                h.set_sidebar_note(f"Couldn\u2019t load draft: {res.get('error')}")
             except Exception:
                 # Harness down or transient CDP hiccup; tear down and retry next tick.
                 if h is not None:
@@ -823,10 +564,6 @@ def cmd_watch(interval: float = 2.0) -> int:
             except Exception:
                 pass
             try:
-                h.clear_sidebar()
-            except Exception:
-                pass
-            try:
                 h.__exit__(None, None, None)
             except Exception:
                 pass
@@ -835,17 +572,6 @@ def cmd_watch(interval: float = 2.0) -> int:
                 cmd_clear()
             except Exception:
                 pass
-    return 0
-
-
-def cmd_drafts() -> int:
-    """Print the drafts the sidebar would show (debug helper, no browser needed)."""
-    drafts = _fetch_drafts()
-    print(f"{len(drafts)} draft(s) waiting:")
-    for d in drafts:
-        short = (d["draft_text"][:70] + "\u2026") if len(d["draft_text"]) > 70 else d["draft_text"]
-        print(f"  [{d['id']}] {d['project']} @{d['handle']}: {short}")
-        print(f"        {d['tweet_url']}")
     return 0
 
 
@@ -866,8 +592,6 @@ def main(argv: list[str]) -> int:
     if cmd == "watch":
         iv = float(argv[1]) if len(argv) > 1 else 2.0
         return cmd_watch(iv)
-    if cmd == "drafts":
-        return cmd_drafts()
     print(f"unknown command: {cmd}", file=sys.stderr)
     print(__doc__)
     return 2

@@ -20,29 +20,59 @@ Everything is best-effort: any failure degrades to "unknown / open Claude".
 import json
 import os
 import subprocess
+import sys
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
-# Mirrors shared/onboarding-ledger.cjs MILESTONES (same order).
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists still
+# export SAPS_*; this module reads S4L_* (STATE_DIR / REPO_DIR / ACTIVITY_TTL).
+# The repo dir must be read tolerantly INLINE (old name included) because the
+# mirror module itself lives in $REPO/scripts and isn't importable before the
+# sys.path insertion below. Best-effort: failure degrades to defaults.
+_repo_for_env = os.environ.get("S4L_REPO_DIR") or os.environ.get("SAPS_REPO_DIR")
+if _repo_for_env:
+    _scripts_for_env = os.path.join(_repo_for_env, "scripts")
+    if _scripts_for_env not in sys.path:
+        sys.path.insert(0, _scripts_for_env)
+try:
+    import s4l_env  # noqa: E402
+
+    s4l_env.mirror()
+except Exception:
+    pass
+
+
+# Mirrors shared/onboarding-ledger.cjs MILESTONES (same order). The ledger's
+# OPTIONAL milestones (reddit_connected / reddit_verified) are deliberately NOT
+# listed here, same as x_verified: this list drives the offline completeness
+# check and the step list, and optional platform milestones must never make an
+# X-only box read as "Setting up".
 MILESTONES = [
     "environment_checked",
     "runtime_ready",
     "x_connected",
     "profile_scanned",
+    "mode_chosen",
     "project_ready",
     "topics_seeded",
-    "draft_verified",
+    "tasks_scheduled",
 ]
 
-# Mirrors panel.ts MILESTONE_LABELS.
+# Mirrors panel.ts MILESTONE_LABELS. Includes labels for optional milestones so
+# server-snapshot rows (which include them once touched) render nicely.
 MILESTONE_LABELS = {
     "environment_checked": "Environment checked",
     "runtime_ready": "Runtime ready",
     "x_connected": "X connected",
     "profile_scanned": "Profile scanned",
+    "mode_chosen": "Mode chosen",
     "project_ready": "Project ready",
     "topics_seeded": "Topics seeded",
-    "draft_verified": "Draft cycle verified",
+    "tasks_scheduled": "Tasks scheduled",
+    "reddit_connected": "Reddit connected",
+    "reddit_verified": "Reddit verified",
 }
 
 # Mirrors index.ts TWITTER_AUTOPILOT_LABEL.
@@ -50,9 +80,108 @@ AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle"
 
 
 def state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or str(
+    return os.environ.get("S4L_STATE_DIR") or str(
         Path.home() / ".social-autoposter-mcp"
     )
+
+
+# ---- pause/resume: stop drafting/posting without touching Claude Desktop ---
+# Real mechanics (flag file + launchctl bootout/bootstrap), NOT a loopback call
+# to the MCP: this needs to work from BOTH the menu bar (s4l_menubar.py) and
+# the Claude-independent dashboard_server.py, which share this process but
+# are a different process from the MCP server, so there's no way to delegate
+# to mcp/src/index.ts's pauseS4L/resumeS4L here. The label SET is not
+# duplicated though: index.ts's PAUSE_TARGETS registry is the single source of
+# truth, mirrored to <state>/pause-targets.json at every MCP boot and
+# pause/resume; pause_target_labels() reads that manifest, so a pipeline daemon
+# added to the registry reaches this button without touching this file.
+# PAUSE_TARGET_LABELS below is only the fallback for a box whose MCP has never
+# written the manifest. What this resume deliberately does NOT do:
+# mcp/src/index.ts's resumeS4L also re-runs the readiness-gated install logic
+# (persona/project/X-verified checks, content-aware plist rewrite) via
+# ensure*Installed() — that only matters for a box that was never fully set up
+# before Pause, an edge case the next Claude boot / project_config call
+# naturally heals once unpaused. This resume just reloads the exact plists
+# Pause unloaded (Pause never deletes anything).
+PAUSE_TARGET_LABELS = (
+    AUTOPILOT_LABEL,
+    "com.m13v.social-reddit-search",
+    "com.m13v.social-claude-reaper",
+    "com.m13v.social-autopilot-stall-watch",
+    "com.m13v.social-memory-snapshot",
+)
+
+
+def pause_target_labels() -> tuple:
+    try:
+        data = json.loads((Path(state_dir()) / "pause-targets.json").read_text())
+        labels = tuple(
+            l for l in data.get("labels", [])
+            if isinstance(l, str) and l.startswith("com.m13v.")
+        )
+        if labels:
+            return labels
+    except Exception:
+        pass
+    return PAUSE_TARGET_LABELS
+
+
+def pause_flag_path() -> str:
+    return os.path.join(state_dir(), "paused.flag")
+
+
+def is_paused() -> bool:
+    return os.path.exists(pause_flag_path())
+
+
+def pause_s4l() -> dict:
+    if is_paused():
+        return {"ok": True, "paused": True, "detail": "already paused"}
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(pause_flag_path(), "w") as fh:
+            fh.write(f"paused at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
+    except Exception as e:
+        return {"ok": False, "paused": is_paused(), "detail": f"could not write pause flag: {e}"}
+    uid = os.getuid()
+    results = []
+    for label in pause_target_labels():
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{uid}/{label}"],
+                capture_output=True, timeout=15,
+            )
+            results.append(f"{label}: unloaded")
+        except Exception as e:
+            results.append(f"{label}: {e}")
+    return {"ok": True, "paused": True, "detail": "; ".join(results)}
+
+
+def resume_s4l() -> dict:
+    try:
+        os.remove(pause_flag_path())
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    uid = os.getuid()
+    la_dir = str(Path.home() / "Library" / "LaunchAgents")
+    results = []
+    for label in pause_target_labels():
+        plist = os.path.join(la_dir, f"{label}.plist")
+        if not os.path.exists(plist):
+            results.append(f"{label}: no plist, skip")
+            continue
+        try:
+            subprocess.run(["launchctl", "enable", f"gui/{uid}/{label}"], capture_output=True, timeout=15)
+            r = subprocess.run(
+                ["launchctl", "bootstrap", f"gui/{uid}", plist],
+                capture_output=True, timeout=15,
+            )
+            results.append(f"{label}: rc={r.returncode}")
+        except Exception as e:
+            results.append(f"{label}: {e}")
+    return {"ok": True, "paused": is_paused(), "detail": "; ".join(results)}
 
 
 def read_json(name: str):
@@ -69,14 +198,64 @@ def read_onboarding():
     if not d or not isinstance(d.get("milestones"), dict):
         return None
     ms = d["milestones"]
-    milestones = [{"id": mid, **(ms.get(mid) or {})} for mid in MILESTONES]
-    complete = all(
-        (ms.get(mid) or {}).get("status") == "complete" for mid in MILESTONES
-    )
+
+    # mode_chosen (added 2026-06-26) won't exist in ledgers written before it.
+    # Mirror the server's backfill so adding this milestone never flips an already-
+    # onboarded box back to "Setting up…" in the offline view: treat it complete
+    # when the user has picked a mode (mode.json exists) OR the install is already
+    # past setup (project_ready complete = a legacy onboard).
+    def _status(mid):
+        st = (ms.get(mid) or {}).get("status")
+        if mid == "mode_chosen" and st != "complete":
+            mode_picked = (Path(state_dir()) / MODE_FILE).exists()
+            past_setup = (ms.get("project_ready") or {}).get("status") == "complete"
+            if mode_picked or past_setup:
+                return "complete"
+        return st
+
+    # Any-of platform completion (mirror of onboarding-ledger.cjs
+    # milestoneSatisfied, 2026-07-15): a reddit-only install must read complete.
+    # x_connected also counts when reddit_connected is complete, and
+    # profile_scanned (an X-account scan) is required only while X is the
+    # connected platform. reddit_* ids are read straight from the raw ledger
+    # dict; they are deliberately not in MILESTONES (optional, never gating).
+    def _satisfied(mid):
+        if _status(mid) == "complete":
+            return True
+        reddit_done = (ms.get("reddit_connected") or {}).get("status") == "complete"
+        if mid == "x_connected":
+            return reddit_done
+        if mid == "profile_scanned":
+            return _status("x_connected") != "complete" and reddit_done
+        return False
+
+    # Omit pristine-pending rows the other platform satisfies (reddit-only
+    # install: x_connected / profile_scanned), and append touched optional
+    # reddit rows, mirroring the server snapshot's row filtering.
+    milestones = [
+        {"id": mid, **(ms.get(mid) or {}), "status": _status(mid)}
+        for mid in MILESTONES
+        if not (_status(mid) in (None, "pending") and _satisfied(mid))
+    ]
+    for mid in ("reddit_connected", "reddit_verified"):
+        st = (ms.get(mid) or {}).get("status")
+        if st and st != "pending":
+            milestones.append({"id": mid, **(ms.get(mid) or {}), "optional": True})
+    complete = all(_satisfied(mid) for mid in MILESTONES)
+    # Blocker suppression, mirror of the server snapshot: a blocker on an
+    # optional reddit milestone or on a milestone the other platform satisfies
+    # must not flag attention.
+    blocker = d.get("current_blocker")
+    if blocker:
+        bmid = blocker.get("milestone")
+        if bmid in ("reddit_connected", "reddit_verified"):
+            blocker = None
+        elif bmid in MILESTONES and _satisfied(bmid):
+            blocker = None
     return {
         "complete": complete,
         "milestones": milestones,
-        "current_blocker": d.get("current_blocker"),
+        "current_blocker": blocker,
     }
 
 
@@ -88,20 +267,6 @@ def runtime_ready() -> bool:
     return bool(py and os.path.exists(py))
 
 
-def version():
-    ep = read_json("panel-endpoint.json") or {}
-    return ep.get("version")
-
-
-def _launchctl_list() -> str:
-    try:
-        return subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True, timeout=10
-        ).stdout
-    except Exception:
-        return ""
-
-
 def autopilot_loaded() -> bool:
     # Autopilot is now the Claude Desktop scheduled task, not the legacy launchd job.
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(str(Path.home()), ".claude")
@@ -110,18 +275,61 @@ def autopilot_loaded() -> bool:
     )
 
 
-# ---- loopback panel server (live, when Claude Desktop is running) ----------
+# ---- loopback MCP server (live, when an MCP instance is running) -----------
+# Used ONLY as a "can posting reach the MCP tool handlers?" gate (the approved-
+# drafts resume path). It is NOT a dashboard source: "Open dashboard" always
+# serves the menu bar's own dashboard_server (single path, per user 2026-07-03).
+# panel-endpoint.json is last-writer-wins across many short-lived MCP instances,
+# so treat reachability as best-effort.
+#
+# Bypass any configured system/env HTTP proxy for these calls. On macOS,
+# urllib.request honors the system proxy (via _scproxy) for ALL requests,
+# 127.0.0.1 included, unless a proxy is explicitly disabled per-request — a
+# plain urlopen() does NOT skip loopback the way browsers/curl typically do.
+# A machine with any system-wide proxy configured (corporate VPN client,
+# security software, a residential-IP proxy for platform fingerprinting,
+# etc.) whose bypass list doesn't happen to include 127.0.0.1/localhost will
+# have every loopback health check and approve_drafts call silently routed out
+# through that proxy instead of hitting the MCP server directly — surfacing
+# as an opaque connection error/403 with no indication the proxy is at
+# fault. This is a local process talking to its own local server: it must
+# never go through any proxy, regardless of what's configured system-wide.
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+# /health is a trivial constant response, so any real latency is the OWNING MCP
+# process being briefly CPU-starved or paged out under machine load (Nhat's box:
+# ~8.6GB swap, 39% mem pressure, 582 procs), not the endpoint doing work. The old
+# single 1.5s attempt flapped a perfectly-alive server to "unreachable" on one
+# transient stall, and a false negative here strands approved drafts (see the
+# "dead pointer" note in mcp/src/index.ts). So probe forgivingly: a longer
+# deadline plus ONE retry. A genuinely-dead endpoint fails fast either way
+# (ECONNREFUSED returns immediately, both attempts), so this only rescues live
+# servers -- it never lets a real outage look healthy.
+_HEALTH_TIMEOUT_S = 4.0
+_HEALTH_ATTEMPTS = 2
+_HEALTH_RETRY_BACKOFF_S = 0.15
+
+
 def _endpoint_url():
     ep = read_json("panel-endpoint.json")
     url = (ep or {}).get("url")
     if not url:
         return None
-    try:
-        with urllib.request.urlopen(url + "health", timeout=1.5) as r:
-            if r.status == 200:
-                return url
-    except Exception:
-        return None
+    last = None
+    for attempt in range(_HEALTH_ATTEMPTS):
+        try:
+            with _NO_PROXY_OPENER.open(url + "health", timeout=_HEALTH_TIMEOUT_S) as r:
+                return url if r.status == 200 else None
+        except Exception as e:
+            last = e
+            if attempt + 1 < _HEALTH_ATTEMPTS:
+                time.sleep(_HEALTH_RETRY_BACKOFF_S)
+    sys.stderr.write(
+        f"[s4l-state] loopback health check failed after {_HEALTH_ATTEMPTS} "
+        f"attempts: {type(last).__name__}: {last}\n"
+    )
+    sys.stderr.flush()
     return None
 
 
@@ -164,61 +372,162 @@ def loopback_tool(name: str, args=None, timeout: float = 20.0):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _NO_PROXY_OPENER.open(req, timeout=timeout) as r:
             return _parse_tool_result(json.loads(r.read().decode()))
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[s4l-state] loopback_tool({name!r}) failed: {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
         return None
 
 
 # ---- the snapshot the menu bar renders ------------------------------------
+# Background snapshot cache. scripts/snapshot.py reads files but may spawn the
+# X-status subprocess (setup_twitter_auth.py -> CDP to Chrome), which must NEVER
+# run on the menu bar's UI thread — a hung Chrome would freeze the menu. So a
+# daemon thread recomputes and snapshot() returns the last cached value INSTANTLY.
+_snap_cache = {"val": None, "at": 0.0}
+_snap_lock = threading.Lock()
+_snap_refreshing = [False]
+
+
+def _snapshot_module():
+    repo = (
+        os.environ.get("S4L_REPO_DIR")
+        or str(Path.home() / "social-autoposter")
+    )
+    scripts = os.path.join(repo, "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import snapshot as _snapshot_mod  # scripts/snapshot.py
+    return _snapshot_mod
+
+
+def _compute_snapshot_full():
+    return _snapshot_module().compute()
+
+
+def ver_key(v):
+    """rc-aware version precedence key, delegated to scripts/snapshot.py::
+    _ver_key so there is exactly ONE Python implementation (kept in lockstep
+    with mcp/src/version.ts::verKey). The update verifier used to carry its
+    own third copy, which drifted rc-blind (2026-07-03); do not re-add one."""
+    return _snapshot_module()._ver_key(v)
+
+
+def version():
+    """Installed version, delegated to scripts/snapshot.py::_resolve_version so
+    there is exactly ONE Python implementation, same pattern as ver_key above."""
+    return _snapshot_module()._resolve_version()
+
+
+def _refresh_snapshot_bg():
+    try:
+        snap = _compute_snapshot_full()
+        if isinstance(snap, dict) and "projects_total" in snap:
+            with _snap_lock:
+                _snap_cache["val"] = snap
+                _snap_cache["at"] = time.time()
+    except Exception:
+        pass
+    finally:
+        _snap_refreshing[0] = False
+
+
+# ---- version/update check: refreshed independently of the full snapshot ----
+# compute() calls _x_status() FIRST, which can block up to 90s in a subprocess
+# (setup_twitter_auth.py -> CDP to Chrome) whenever a scan job has the browser
+# busy. That stalls _refresh_snapshot_bg() for the whole duration, so
+# update_available/latest_version stay frozen on a busy box even though the
+# GitHub check itself is a ~1s curl. Poll scripts/snapshot.py::version_status()
+# on its own short cadence, gated by its own lock, so the "Update available"
+# banner never waits on X/Chrome state.
+_ver_cache = {"val": None, "at": 0.0}
+_ver_refreshing = [False]
+_VER_REFRESH_TTL = 20.0
+
+
+def _refresh_version_bg():
+    try:
+        val = _snapshot_module().version_status()
+        if isinstance(val, dict) and "update_available" in val:
+            with _snap_lock:
+                _ver_cache["val"] = val
+                _ver_cache["at"] = time.time()
+    except Exception:
+        pass
+    finally:
+        _ver_refreshing[0] = False
+
+
+def _version_overlay():
+    now = time.time()
+    with _snap_lock:
+        cached = _ver_cache["val"]
+        age = now - _ver_cache["at"]
+    if (cached is None or age > _VER_REFRESH_TTL) and not _ver_refreshing[0]:
+        _ver_refreshing[0] = True
+        threading.Thread(target=_refresh_version_bg, daemon=True).start()
+    return cached
+
+
 def snapshot():
-    """Full live snapshot via the loopback dashboard tool, else a file-built
-    fallback covering the essentials (runtime, onboarding, autopilot)."""
-    snap = loopback_tool("dashboard", {})
-    if isinstance(snap, dict) and "projects_total" in snap:
-        snap["_live"] = True
-        return snap
-    ob = read_onboarding()
-    return {
-        "_live": False,
-        "runtime_ready": runtime_ready(),
-        "onboarding": ob,
-        "autopilot_on": autopilot_loaded(),
-        "x_connected": False,  # unknowable offline; State derives from onboarding
-        "x_handle": None,
-        "projects_ready": 0,
-        "projects_total": 0,
-        "version": version(),
-        "update_available": False,
-        "latest_version": None,
-    }
+    """Full snapshot computed DIRECTLY from the stateful files via
+    scripts/snapshot.py — the SAME single-source module the MCP shells out to, so
+    the two surfaces can't diverge. NO loopback / MCP dependency, so a restarting
+    or closed Claude can't freeze or stale the menu (the old tier-1 `loopback_tool`
+    blocked the UI thread up to 20s and was the freeze). The heavy compute runs on
+    a BACKGROUND thread; this returns the last cached result instantly.
 
+    Tiers: (1) the background-computed local snapshot; (2) the server's last
+    persisted `status-summary.json`; (3) the onboarding ledger. The version/update
+    fields are always overlaid from the independent _version_overlay() cache
+    (see above) so they stay live even while tier (1)'s compute() is blocked."""
+    now = time.time()
+    with _snap_lock:
+        cached = _snap_cache["val"]
+        age = now - _snap_cache["at"]
+    if (cached is None or age > 4.0) and not _snap_refreshing[0]:
+        _snap_refreshing[0] = True
+        threading.Thread(target=_refresh_snapshot_bg, daemon=True).start()
 
-def stats_7d():
-    """7-day post stats; loopback only (the DB read needs the owned runtime)."""
-    res = loopback_tool("get_stats", {"days": 7})
-    if not isinstance(res, dict):
-        return None
-    projects = res.get("projects")
-    proj = projects[0] if isinstance(projects, list) and projects else None
-    p = (proj or {}).get("posts")
-    if not p:
-        return None
-    return {
-        "posts": p.get("total", 0),
-        "views": p.get("views_period_total", p.get("views", 0)),
-        "replies": p.get("comments_period_total", p.get("comments", 0)),
-    }
+    if cached is not None:
+        out = dict(cached)
+        out["_live"] = True
+    else:
+        summ = read_json("status-summary.json")
+        if isinstance(summ, dict) and "projects_total" in summ:
+            out = dict(summ)
+            out["_live"] = False
+            out["_from_summary"] = True
+        else:
+            ob = read_onboarding()
+            out = {
+                "_live": False,
+                "runtime_ready": runtime_ready(),
+                "onboarding": ob,
+                "autopilot_on": autopilot_loaded(),
+                "x_connected": False,  # unknowable offline; State derives from onboarding
+                "x_handle": None,
+                "projects_ready": 0,
+                "projects_total": 0,
+                "version": version(),
+                "update_available": False,
+                "latest_version": None,
+            }
+
+    ver = _version_overlay()
+    if ver is not None:
+        out["version"] = ver.get("version", out.get("version"))
+        out["channel"] = ver.get("channel", out.get("channel"))
+        out["latest_version"] = ver.get("latest_version", out.get("latest_version"))
+        out["latest_tag"] = ver.get("latest_tag", out.get("latest_tag"))
+        out["update_available"] = ver.get("update_available", out.get("update_available"))
+    return out
 
 
 # set_autopilot() (the launchd toggle) was removed: the autopilot is now the Claude
 # Desktop scheduled task `social-autoposter-autopilot`, managed in the Scheduled tab,
 # so the menu bar no longer toggles a launchd job (it mirrors the dashboard instead).
-
-
-def panel_url():
-    """The loopback dashboard url if reachable, else None."""
-    return _endpoint_url()
 
 
 # ---- Accessibility (TCC) permission ---------------------------------------
@@ -241,62 +550,86 @@ def accessibility_trusted() -> bool:
         return False
 
 
-def request_accessibility() -> bool:
-    """Pop the system Accessibility prompt for THIS process (registers it in the
-    list so the user can toggle it on) and open the Settings pane. Returns the
-    current trust state. Safe to call when already trusted (no prompt shown)."""
-    trusted = False
-    try:
-        import ctypes
-        import ctypes.util
-
-        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
-        ap = ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices"))
-        prompt_key = ctypes.c_void_p.in_dll(ap, "kAXTrustedCheckOptionPrompt")
-        cf_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
-        cf.CFDictionaryCreate.restype = ctypes.c_void_p
-        cf.CFDictionaryCreate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_long,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        keys = (ctypes.c_void_p * 1)(prompt_key)
-        vals = (ctypes.c_void_p * 1)(cf_true)
-        d = cf.CFDictionaryCreate(None, keys, vals, 1, None, None)
-        ap.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-        ap.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-        trusted = bool(ap.AXIsProcessTrustedWithOptions(d))
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            [
-                "open",
-                "x-apple.systempreferences:com.apple.preference.security"
-                "?Privacy_Accessibility",
-            ],
-            capture_output=True,
-            timeout=10,
-        )
-    except Exception:
-        pass
-    return trusted
-
-
 # ---- draft review (pop-up cards) ------------------------------------------
 # draft_cycle writes review-request.json when a fresh batch is ready; we read
 # the linked plan file (the /tmp/twitter_cycle_plan_<batch>.json the pipeline
 # produced), present the cards, then post the approved subset via the loopback
-# post_drafts tool. The chat-table review still works in parallel; both surfaces
+# approve_drafts tool. The chat-table review still works in parallel; both surfaces
 # de-dup on the plan's per-candidate `posted` flag.
+# How long an activity signal may go un-refreshed before the menu bar treats it
+# as idle. This is the SELF-HEAL for a frozen spinner: a writer can set a label
+# (e.g. the queue worker writing "drafting replies" on job-claim, or a kicker
+# writing "scanning") and then die WITHOUT clearing it — the leaked-worker reaper
+# SIGKILLs a draft worker before it can call `claude_job.py result`, a divergent
+# lane runs the cycle with no exit-trap clear, or a process crashes mid-phase. In
+# every such case the clear never runs and the old code showed the label forever.
+# Live work keeps `since` fresh well under this window (the queue provider's poll
+# loop heartbeats every ~10s, the kicker re-stamps "scanning" every ~30s, and the
+# poster writes per post), so a signal older than this can only be a stuck stamp.
+ACTIVITY_TTL_SECONDS = float(os.environ.get("S4L_ACTIVITY_TTL_S", "120"))
+
+
+def _activity_is_stale(act) -> bool:
+    """True when act['since'] is older than ACTIVITY_TTL_SECONDS. A missing/unparsable
+    `since` is treated as NOT stale (fail open: never hide a label we can't age)."""
+    try:
+        import datetime
+
+        since = (act or {}).get("since")
+        if not since:
+            return False
+        s = since.replace("Z", "+00:00")
+        ts = datetime.datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+        return age > ACTIVITY_TTL_SECONDS
+    except Exception:
+        return False
+
+
 def read_activity():
     """What the server is doing right now: {state, label} or None when idle.
     Written by long-running tools (scanning/drafting/posting/…); drives the
-    menu-bar loading spinner."""
-    return read_json("activity.json")
+    menu-bar loading spinner.
+
+    Stale signals are reported as idle (None): see ACTIVITY_TTL_SECONDS. This is
+    what keeps the spinner from freezing on a label whose writer died before
+    clearing it."""
+    act = read_json("activity.json")
+    if act and _activity_is_stale(act):
+        return None
+    return act
+
+
+def write_activity(state: str, label: str):
+    """Best-effort local activity update. The MCP server normally owns this file,
+    but the menu-bar posting queue knows the whole approved-card burst while the
+    server only sees one approve_drafts call at a time."""
+    try:
+        p = Path(state_dir()) / "activity.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {
+                    "state": state,
+                    "label": label,
+                    "since": time_iso(),
+                }
+            )
+            + "\n"
+        )
+    except Exception:
+        pass
+
+
+def time_iso():
+    try:
+        import datetime
+
+        return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    except Exception:
+        return ""
 
 
 def read_review_request():
@@ -319,30 +652,924 @@ def read_plan(plan_path):
         return None
 
 
-def review_drafts(plan):
-    """Flatten a plan into the card model: only candidates not already posted."""
+# ---- durable review store ---------------------------------------------------
+# The review queue is ONE candidate-keyed store: ~/.social-autoposter-mcp/
+# review-queue.json (written by merge_review_queue.py, decision-stamped here,
+# posted/our_url-stamped by the MCP server). It replaces the old split where
+# drafts lived in an EPHEMERAL /tmp plan (killed by every reboot/tmp sweep,
+# numbering restarting at 1) while decisions lived FOREVER in approved-queue
+# .json keyed by plan index — a mismatch that both lost pending drafts on
+# reboot and let stale ledger entries swallow every new card after a reset.
+#
+# /tmp/twitter_cycle_plan_review-queue.json remains as a SYMLINK to the store:
+# the MCP server (repo.ts planPath) and the locked pipeline scripts resolve
+# that path, and fs.writeFileSync / Path.write_text follow symlinks, so they
+# keep working unchanged. The link is recreated at menubar boot and on every
+# merge; a reboot only ever removes the LINK, never the data.
+
+REVIEW_STORE = "review-queue.json"
+
+
+def store_path():
+    return str(Path(state_dir()) / REVIEW_STORE)
+
+
+def ensure_store_symlink(batch="review-queue"):
+    """Recreate the /tmp compatibility symlink if a reboot swept it. A REAL file
+    at the legacy path (old code wrote it post-reboot) is left for
+    merge_review_queue.py to absorb; only a missing or wrong link is fixed."""
+    try:
+        base = os.environ.get("S4L_TMP_DIR") or "/tmp"
+        link = str(Path(base) / f"twitter_cycle_plan_{batch}.json")
+        sp = store_path()
+        if not Path(sp).exists():
+            return
+        if os.path.islink(link):
+            if os.readlink(link) == sp:
+                return
+            os.unlink(link)
+        elif os.path.exists(link):
+            return  # real legacy file: merge_review_queue absorbs it first
+        tmp_link = f"{link}.lnk.{os.getpid()}"
+        os.symlink(sp, tmp_link)
+        os.replace(tmp_link, link)
+    except Exception:
+        pass
+
+
+_store_thread_lock = threading.Lock()
+
+
+def _store_update(mutate):
+    """Locked read-modify-write of the review store. An fcntl.flock on a sidecar
+    .lock file serializes cross-process python writers; the in-process lock
+    serializes menubar threads; os.replace keeps readers atomic. The MCP
+    server's writePlan does NOT take this lock (interim race, absorbed by the
+    menubar's decision reconciliation on every timer tick). Returns mutate's
+    return value; raises nothing (returns None on failure)."""
+    import fcntl
+
+    sp = store_path()
+    try:
+        with _store_thread_lock:
+            with open(sp + ".lock", "w") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                try:
+                    try:
+                        data = json.loads(Path(sp).read_text())
+                    except Exception:
+                        data = {"candidates": []}
+                    rv = mutate(data)
+                    tmp = f"{sp}.tmp.{os.getpid()}"
+                    Path(tmp).write_text(json.dumps(data, indent=2))
+                    os.replace(tmp, sp)
+                    return rv
+                finally:
+                    fcntl.flock(lk, fcntl.LOCK_UN)
+    except Exception:
+        return None
+
+
+def _match_candidate(data, n, candidate_id):
+    """Locate a candidate by durable identity first (candidate_id), plan index
+    second. Returns the candidate dict or None."""
+    cands = data.get("candidates") or []
+    if candidate_id is not None:
+        for c in cands:
+            if c.get("candidate_id") == candidate_id:
+                return c
+    if isinstance(n, int) and 1 <= n <= len(cands):
+        return cands[n - 1]
+    return None
+
+
+def candidate_state(c):
+    """Canonical lifecycle state of ONE review-queue candidate. Use this instead
+    of ad hoc flag checks — "not posted" is NOT "awaiting review".
+
+    LOCKSTEP: mcp/src/index.ts::candidateState() is the TS mirror of this exact
+    precedence; change one and you MUST change the other. Every past divergence
+    between a hand-rolled raw-flag filter and this function became an incident
+    (post_failed drain asymmetry 2026-07-17, get_stats lane blindness).
+
+    The review queue (review-queue.json) is an APPEND-FOREVER LEDGER: handled
+    candidates are never removed, they are flag-stamped in place, so most rows
+    in an old queue are retired. States, in precedence order:
+
+      posted          — approved and successfully posted (our_url set).
+      terminal        — retired without a post; terminal_reason says why
+                        (rejected, human_rejected, human_discarded_all,
+                        duplicate_thread_pre_post, ...; None on older rows).
+      post_failed     — approved but the post attempt errored (post_error says
+                        why). Settled from the cards' point of view; the resume
+                        path retries only after a fresh approval clears it.
+      approved        — human approved, post not yet attempted/confirmed.
+      awaiting_review — none of the above. The ONLY state cards present, and
+                        the only honest "pending" count (review-request.json's
+                        .count mirrors it at merge time).
+    """
+    if c.get("posted") is True:
+        return "posted"
+    if c.get("terminal") is True:
+        return "terminal"
+    if c.get("post_failed"):
+        return "post_failed"
+    if c.get("approved") is True:
+        return "approved"
+    return "awaiting_review"
+
+
+def store_stamp_decision(batch, decision):
+    """Write a card decision INTO the store the instant the user clicks. This is
+    the durable record (the old approved-queue.json ledger is no longer
+    written): approve stamps approved=True + the decision payload (text/edits
+    ride along so a restart can resume the post); reject stamps terminal=True.
+    The MCP server later confirms posted=True/our_url via its own write.
+    Returns True when the stamp landed."""
+
+    def mutate(data):
+        c = _match_candidate(data, decision.get("n"), decision.get("candidate_id"))
+        if c is None:
+            return False
+        payload = {
+            "approved": bool(decision.get("approved")),
+            "text": decision.get("text") or "",
+            "edited": bool(decision.get("edited")),
+            "drop_link": bool(decision.get("drop_link")),
+            "loved": bool(decision.get("loved")),
+            "reject_category": decision.get("reject_category"),
+            # Two-draft pairwise record (chosen vs unchosen + hover dwell),
+            # None on single-draft cards. Durable locally so the choice
+            # survives even if the review-events flush never lands.
+            "draft_choice": decision.get("draft_choice"),
+            "decided_at": time_iso(),
+        }
+        if decision.get("approved"):
+            c["approved"] = True
+            c.pop("post_failed", None)
+            c.pop("post_error", None)
+        else:
+            c["terminal"] = True
+            c["terminal_reason"] = "human_rejected"
+        c["decision"] = payload
+        return True
+
+    return bool(_store_update(mutate))
+
+
+def discard_all_pending(drafts):
+    """Bulk-reject an entire pending set (the menu bar's "Discard all pending
+    drafts"), durably and atomically in ONE lock acquisition. Each candidate is
+    stamped terminal with NO reason (reject_category=None), same as a card's
+    "Reject, no reason" button. Deliberately distinct from store_stamp_decision:
+    this never ships a review event, by design, so a bulk "clear the backlog"
+    click never reaches the review-events/feedback-digest rail and can't
+    pollute learned_preferences with a non-judgment. Returns how many were
+    stamped."""
+
+    def mutate(data):
+        done = 0
+        for d in drafts:
+            c = _match_candidate(data, d.get("n"), d.get("candidate_id"))
+            if c is None or candidate_state(c) in ("posted", "terminal"):
+                continue
+            c["terminal"] = True
+            c["terminal_reason"] = "human_discarded_all"
+            c["decision"] = {
+                "approved": False,
+                "text": c.get("reply_text") or "",
+                "edited": False,
+                "drop_link": False,
+                "loved": False,
+                "reject_category": None,
+                "decided_at": time_iso(),
+            }
+            done += 1
+        return done
+
+    return _store_update(mutate) or 0
+
+
+def approve_all_pending(decisions):
+    """Bulk-approve an entire pending set (the canvas control card's
+    "Approve All"), durably and atomically in ONE lock acquisition --
+    mirrors discard_all_pending's shape exactly, just for the approve
+    direction. `decisions` is the same per-draft decision dict shape
+    _on_card_decision/_record already produce (n, candidate_id, text,
+    edited, drop_link, loved, draft_choice).
+
+    Doing this as N separate store_stamp_decision() calls (one full
+    lock-acquire/read/write cycle EACH) is what caused the visible UI hang
+    on a real backlog (2026-07-16 user report: "when I approved All, it
+    hung for a second"). One bulk write fixes that the same way
+    discard_all_pending already avoided it -- see _approve_all_pending in
+    s4l_menubar.py, which still does the cheap per-draft posting-queue
+    enqueue afterward (that part was never the slow one)."""
+
+    def mutate(data):
+        done = 0
+        for decision in decisions:
+            c = _match_candidate(data, decision.get("n"), decision.get("candidate_id"))
+            if c is None:
+                continue
+            c["approved"] = True
+            c.pop("post_failed", None)
+            c.pop("post_error", None)
+            c["decision"] = {
+                "approved": True,
+                "text": decision.get("text") or "",
+                "edited": bool(decision.get("edited")),
+                "drop_link": bool(decision.get("drop_link")),
+                "loved": bool(decision.get("loved")),
+                "reject_category": None,
+                "draft_choice": decision.get("draft_choice"),
+                "decided_at": time_iso(),
+            }
+            done += 1
+        return done
+
+    return _store_update(mutate) or 0
+
+
+def flip_discarded_candidates_skipped(candidate_ids):
+    """Flip each bulk-discarded candidate's twitter_candidates row to
+    status='skipped', skip_reason='human_discarded_all' — the same DB effect a
+    normal reject gets for free as a side effect of its review-events insert
+    (see review-events/route.ts). The bulk-discard path deliberately never
+    ships a review event (that's the whole point — it must not reach the
+    feedback digest), so without this direct call the row would stay
+    'pending' until the independent age-based freshness gate happens to expire
+    it, wide open to re-discovery/re-drafting of the exact draft a human just
+    discarded. One PATCH per candidate via the SAME direct-HTTP path
+    flush_review_events already uses (http_api), so this never touches
+    review_events. Best-effort: a candidate that already expired/posted by the
+    time this runs (404, no longer 'pending') is a no-op, not a failure."""
+    if not candidate_ids:
+        return
+    try:
+        from http_api import api_patch
+    except Exception as err:
+        sys.stderr.write(
+            f"[s4l-state] flip_discarded_candidates_skipped: http_api unavailable "
+            f"({type(err).__name__}: {err}); {len(candidate_ids)} candidate(s) left 'pending'\n"
+        )
+        sys.stderr.flush()
+        return
+    for cid in candidate_ids:
+        try:
+            api_patch(
+                "/api/v1/twitter-candidates/by-id",
+                {"id": cid, "action": "mark_skipped", "reason": "human_discarded_all"},
+                ok_on_404=True,
+            )
+        except Exception as err:
+            sys.stderr.write(
+                f"[s4l-state] flip_discarded_candidates_skipped: PATCH failed for "
+                f"candidate_id={cid} ({type(err).__name__}: {err})\n"
+            )
+            sys.stderr.flush()
+
+
+def store_mark_post_failed(batch, n, candidate_id=None, error=None):
+    """A decided post that FAILED surfaces via notification/dashboard, not by
+    re-presenting the card and not by endless resume retries."""
+
+    def mutate(data):
+        c = _match_candidate(data, n, candidate_id)
+        if c is None:
+            return False
+        c["post_failed"] = True
+        if error:
+            c["post_error"] = str(error)[:200]
+        return True
+
+    return bool(_store_update(mutate))
+
+
+def store_pending_posts(batch="review-queue"):
+    """Approved-but-unposted candidates, for the restart resume path. Skips
+    posted/terminal/failed rows; each entry carries everything approve_drafts
+    needs (n, final text, drop_link)."""
+    plan = read_plan(store_path())
     out = []
-    for i, c in enumerate(((plan or {}).get("candidates") or [])):
-        if c.get("posted") is True:
+    for i, c in enumerate((plan or {}).get("candidates") or []):
+        if candidate_state(c) != "approved":
             continue
+        d = c.get("decision") or {}
         out.append(
             {
-                "n": i + 1,  # 1-based, matches post_drafts numbering
-                "thread_author": c.get("thread_author"),
-                "thread_text": c.get("thread_text"),
-                "reply_text": c.get("reply_text") or "",
-                "link_url": c.get("link_url"),
+                "batch": batch,
+                "n": i + 1,
+                "candidate_id": c.get("candidate_id"),
+                "text": d.get("text") or c.get("reply_text") or "",
+                "edited": bool(d.get("edited")),
+                "drop_link": bool(d.get("drop_link")),
             }
         )
     return out
 
 
-def post_drafts(batch_id, post=None, edits=None, timeout=900):
-    """Post approved drafts via the loopback tool. `post` = 1-based numbers to
-    post as-is; `edits` = [{n, text}] to rewrite then post. Returns the parsed
-    result, or None if the loopback is unreachable (Claude Desktop closed)."""
-    return loopback_tool(
-        "post_drafts",
-        {"batch_id": batch_id, "post": post or [], "edits": edits or []},
-        timeout=timeout,
-    )
+def store_reconcile_decisions(batch, decisions):
+    """Re-stamp any of this session's decisions the store no longer shows. The
+    MCP server's approve_drafts does a whole-file read-modify-write while a batch
+    posts (minutes), so a decision stamped mid-drain can be clobbered by its
+    stale rewrite; the menubar calls this every timer tick with its in-memory
+    decision list so the store always converges back to what the user chose.
+    Returns how many had to be re-stamped."""
+    fixed = 0
+    try:
+        plan = read_plan(store_path()) or {}
+        cands = plan.get("candidates") or []
+        by_id = {c.get("candidate_id"): c for c in cands if c.get("candidate_id") is not None}
+        for d in decisions or []:
+            c = by_id.get(d.get("candidate_id"))
+            if c is None:
+                n = d.get("n")
+                c = cands[n - 1] if isinstance(n, int) and 1 <= n <= len(cands) else None
+            if c is None:
+                continue
+            settled = (
+                c.get("posted") is True
+                or c.get("terminal") is True
+                or (c.get("approved") is True if d.get("approved") else False)
+            )
+            if not settled:
+                if store_stamp_decision(batch, d):
+                    fixed += 1
+    except Exception:
+        pass
+    return fixed
+
+
+def review_queue_posted_count():
+    """Posts that have LANDED in the review-queue plan — the durable, cross-process
+    truth. Independent of the menu bar's in-memory burst queue (which dies on a
+    restart) and of WHICH process is posting (the menu bar worker, the autopilot,
+    or a host agent draining via approve_drafts). Returns the posted count, or None
+    when the plan can't be read. Drives the menu-bar posting indicator so progress
+    stays visible regardless of how the drain is driven."""
+    plan_path = None
+    req = read_review_request()
+    if req:
+        plan_path = req.get("plan_path")
+    if not plan_path or not Path(plan_path).exists():
+        plan_path = store_path()
+    if not Path(plan_path).exists():
+        plan_path = "/tmp/twitter_cycle_plan_review-queue.json"
+    plan = read_plan(plan_path)
+    cands = (plan or {}).get("candidates")
+    if not cands:
+        return None
+    return sum(1 for c in cands if candidate_state(c) == "posted")
+
+
+def review_drafts(plan, batch="review-queue"):
+    """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
+    posted, terminal (rejected/dead), or already approved is a settled decision and
+    must never be re-presented for review (approved ones proceed to post).
+
+    Decision durability lives in the store itself: approve/reject/edit each
+    write approved/terminal + the decision payload via store_stamp_decision()
+    the INSTANT the user clicks (see s4l_menubar.py::_on_card_decision), under
+    the store lock, so candidate_state() alone decides what re-presents. The
+    legacy approved-queue.json ledger cross-check that used to live here was
+    removed 2026-07-17 along with the rest of that third state store."""
+    out = []
+    for i, c in enumerate(((plan or {}).get("candidates") or [])):
+        # Only awaiting_review rows become cards. This also skips post_failed
+        # rows (decided-but-failed is settled per the docstring above).
+        if candidate_state(c) != "awaiting_review":
+            continue
+        out.append(
+            {
+                "n": i + 1,  # 1-based, matches approve_drafts numbering
+                # Platform tag (reddit cards, 2026-07-14): absent/None means
+                # twitter (every plan written before the field shipped). The
+                # card renders the platform mark and profile link from this.
+                "platform": c.get("platform"),
+                "thread_author": c.get("thread_author"),
+                "thread_text": c.get("thread_text"),
+                # Reddit selftext body (2026-07-17): the card renders the title
+                # bold with this beneath it. Absent on twitter and on plans
+                # written before merge_review_queue started stamping it.
+                "thread_selftext": c.get("thread_selftext"),
+                "reply_text": c.get("reply_text") or "",
+                # English translations stamped at draft time (prep step) when
+                # language != en. Display-only: the card shows them so the
+                # operator can understand a non-English draft; the ORIGINAL
+                # reply_text is what gets edited and posted. Absent on English
+                # drafts and on plans written before the field shipped.
+                "reply_text_en": c.get("reply_text_en"),
+                "thread_text_en": c.get("thread_text_en"),
+                "link_url": c.get("link_url"),
+                # Ride-along context for the review-events feedback rail: the
+                # card copies these onto each decision so the shipped event can
+                # be joined back to the twitter_candidates row and scoped to a
+                # project without re-reading the plan.
+                "candidate_id": c.get("candidate_id"),
+                "project": c.get("matched_project") or c.get("project"),
+                # Thread permalink + discovery-time stats (author followers,
+                # thread engagement), stamped by merge_review_queue.py from data
+                # the pipeline already captured. The card renders these as
+                # profile/thread links and a stats line; both may be absent on
+                # plans written before the enrichment shipped.
+                "thread_url": c.get("candidate_url")
+                or c.get("tweet_url")
+                or c.get("thread_url"),
+                "stats": c.get("stats") or {},
+                # Drafting metadata for the reply row's details popover: how the
+                # draft came to be (style, discovery query, link choice). All
+                # already on the plan candidate; absent on plans written before
+                # each field shipped, and the card omits what's missing.
+                "engagement_style": c.get("engagement_style"),
+                "style_description": (
+                    (c.get("new_style") or {}).get("description")
+                    if isinstance(c.get("new_style"), dict)
+                    else None
+                ),
+                "search_topic": c.get("search_topic"),
+                "language": c.get("language"),
+                "link_source": c.get("link_source"),
+                "link_keyword": c.get("link_keyword"),
+                # {name: variant} of every experiment/scenario arm active when
+                # the draft was written, stamped by merge_review_queue.py via
+                # scripts/active_experiments.py. Generic: the card renders
+                # whatever is here, so new experiments surface with no UI work.
+                "experiments": c.get("experiments") or {},
+                # Two-draft cards (2026-07-07; no-recommendation pass
+                # 2026-07-08): present only when the prep step wrote two
+                # independent drafts (fresh candidate, not a reused stale
+                # draft). The card shows both, defaulting to Draft A (slot 0,
+                # no model recommendation involved); absent on reused/legacy
+                # candidates, which fall back to the single-draft UI above.
+                "drafts": c.get("drafts"),
+            }
+        )
+    # The review queue is append-only, so the highest stable index is newest and
+    # most likely to still be live on X.
+    out.sort(key=lambda d: d["n"], reverse=True)
+    return out
+
+
+# ---- durable approved-card queue: REMOVED (2026-07-17) ---------------------
+# approved-queue.json was a second local ledger from before the review store
+# stamped decisions durably itself (store_stamp_decision, under the store
+# lock). Once decisions lived in the store, nothing appended to the ledger,
+# every status write was a no-op over a frozen item list, and its read lane
+# re-enqueued dead approvals forever. The review store is the ONLY local
+# decision record now; do not add a second one back.
+
+
+# ---- Engagement mode (2026-06-26, dual-flag 2026-06-29) -------------------
+# Two INDEPENDENT lanes the menu bar toggles separately:
+#   personal_brand (default ON)  -> link-free organic engagement for the user's
+#                                   own brand (forced persona project)
+#   promotion      (default OFF) -> the product-marketing pipeline (link replies)
+# Both can be ON; the cycle then splits per `personal_brand_share` (default
+# 0.5). State is ONE file the cycle wrapper also reads via
+# scripts/s4l_mode.py; keep the shape in lockstep with it.
+MODE_FILE = "mode.json"
+MODE_PROMOTION = "promotion"
+MODE_PERSONAL_BRAND = "personal_brand"
+_VALID_MODES = (MODE_PROMOTION, MODE_PERSONAL_BRAND)
+# 2026-06-29 default flip: personal brand on out of the box, promotion opt-in.
+_DEFAULT_FLAGS = {"personal_brand": True, "promotion": False}
+
+
+def read_flags():
+    """Current lane flags {"personal_brand": bool, "promotion": bool}.
+
+    Mirrors scripts/s4l_mode.py get_flags(): explicit flag keys win; else map a
+    legacy {"mode": ...} string; else the default (personal ON / promotion OFF).
+    """
+    d = read_json(MODE_FILE)
+    if isinstance(d, dict):
+        if "personal_brand" in d or "promotion" in d:
+            return {
+                "personal_brand": bool(d.get("personal_brand")),
+                "promotion": bool(d.get("promotion")),
+            }
+        m = str(d.get("mode") or "").strip()
+        if m == MODE_PERSONAL_BRAND:
+            return {"personal_brand": True, "promotion": False}
+        if m == MODE_PROMOTION:
+            return {"personal_brand": False, "promotion": True}
+    return dict(_DEFAULT_FLAGS)
+
+
+def write_flags(personal_brand, promotion):
+    """Persist both lane flags atomically (plus the derived legacy `mode`).
+
+    Preserves any OTHER keys already in mode.json (`draft_only`,
+    `personal_brand_share`, ...) so a lane flip can never silently reset an
+    unrelated setting — same contract as scripts/s4l_mode.py write_flags().
+    Returns the written flags. Never raises — a menu click must not crash."""
+    flags = {"personal_brand": bool(personal_brand), "promotion": bool(promotion)}
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(flags)
+        payload["mode"] = MODE_PERSONAL_BRAND if flags["personal_brand"] else MODE_PROMOTION
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return flags
+
+
+def read_split():
+    """Personal-brand share of both-lanes-on cycles (0.0-1.0, default 0.5).
+    Mirrors scripts/s4l_mode.py get_split()."""
+    d = read_json(MODE_FILE)
+    try:
+        share = float(d.get("personal_brand_share"))
+    except (TypeError, ValueError, AttributeError):
+        return 0.5
+    return min(1.0, max(0.0, share))
+
+
+def write_split(share):
+    """Persist the personal-brand share, preserving every other mode.json key.
+    Returns the written share. Never raises — a menu click must not crash."""
+    try:
+        share = min(1.0, max(0.0, float(share)))
+    except (TypeError, ValueError):
+        return read_split()
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["personal_brand_share"] = share
+        flags = read_flags()
+        payload.setdefault("personal_brand", flags["personal_brand"])
+        payload.setdefault("promotion", flags["promotion"])
+        payload["mode"] = MODE_PERSONAL_BRAND if flags["personal_brand"] else MODE_PROMOTION
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return share
+
+
+# Draft-card reveal cadence: minimum seconds between FRESH card pop-ups
+# (0 = present as soon as drafts are ready). Drafting itself is untouched;
+# drafts keep accumulating in the review store and the menubar just paces the
+# pop-up. Lives in mode.json (every writer preserves unknown keys). Presets
+# are the menubar's REVEAL_CADENCE_PRESETS; any non-negative value is valid.
+REVEAL_CADENCE_DEFAULT = 3600.0
+
+
+def read_reveal_cadence():
+    """Seconds between draft-card reveals (0 = immediately, default 1 hour,
+    -1 = "Never" — manual-only reveal via the menu's "Review N pending
+    drafts", the pending count shows in the menu bar title instead)."""
+    d = read_json(MODE_FILE)
+    try:
+        secs = float(d.get("reveal_cadence_secs"))
+    except (TypeError, ValueError, AttributeError):
+        return REVEAL_CADENCE_DEFAULT
+    return secs if secs < 0 else max(0.0, secs)
+
+
+def write_reveal_cadence(secs):
+    """Persist the reveal cadence, preserving every other mode.json key.
+    Returns the written value. Never raises (a menu click must not crash)."""
+    try:
+        secs = float(secs)
+    except (TypeError, ValueError):
+        return read_reveal_cadence()
+    secs = -1.0 if secs < 0 else max(0.0, secs)
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["reveal_cadence_secs"] = secs
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return secs
+
+
+# Review surface layout (2026-07-15): which UI presents pending drafts.
+# "cards" (default) is the one-at-a-time corner-panel carousel (s4l_card.py);
+# "canvas" is the large centered multi-select grid (s4l_card_canvas.py). Lives
+# in mode.json next to reveal_cadence_secs, same read/write shape. Additive —
+# the menu bar picks the module to call per-review based on this value, both
+# modules share the exact same drafts list and decision contract, so nothing
+# about drafting/posting/the ledger changes when this flips.
+REVIEW_LAYOUT_DEFAULT = "cards"
+REVIEW_LAYOUTS = ("cards", "canvas")
+
+
+def read_review_layout():
+    d = read_json(MODE_FILE)
+    layout = d.get("review_layout") if isinstance(d, dict) else None
+    return layout if layout in REVIEW_LAYOUTS else REVIEW_LAYOUT_DEFAULT
+
+
+def write_review_layout(layout):
+    """Persist the review layout, preserving every other mode.json key. Returns
+    the written value. Never raises (a menu click must not crash)."""
+    if layout not in REVIEW_LAYOUTS:
+        return read_review_layout()
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["review_layout"] = layout
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return layout
+
+
+# --- Posting volume mode (2026-07-13) ---------------------------------------
+# Server-side per-install throttle for the twitter cycle's virality bar:
+# high|medium|low|None (None = driver default). Source of truth is
+# installations.posting_mode via /api/v1/installations/posting-mode; unlike
+# the lane flags there is NO local mode.json copy that RESOLVES the mode,
+# because the whole point is remote adjustability (dashboard and menubar must
+# agree with the server).
+# Reads are cached so the menu rebuild tick never blocks on the network: a
+# stale/missing cache kicks one background refresh and returns the last-known
+# value. The in-memory cache is seeded from a disk copy of the last server
+# answer (scripts/s4l_posting_mode.py cache file, 2026-07-17): without it,
+# every menubar restart (updates restart the menubar) displayed the default
+# "Steady" until the first refresh landed, which read as the user's chosen
+# mode having been reset. The seed never suppresses a refresh (at stays 0.0).
+POSTING_MODE_TTL_SECS = 600
+_posting_mode_cache = {"mode": None, "known": False, "at": 0.0}
+_posting_mode_lock = threading.Lock()
+
+
+def _scripts_on_path():
+    repo = os.environ.get("S4L_REPO_DIR") or str(Path.home() / "social-autoposter")
+    scripts = os.path.join(repo, "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+
+
+def _seed_posting_mode_from_disk():
+    """Seed the in-memory cache with the last server answer that any surface
+    persisted (menubar, MCP tool, panel). at stays 0.0 so the first read still
+    kicks a real refresh; the server answer overwrites the seed when it lands."""
+    try:
+        _scripts_on_path()
+        from s4l_posting_mode import read_cached_mode
+
+        mode = read_cached_mode()
+        if mode:
+            with _posting_mode_lock:
+                _posting_mode_cache["mode"] = mode
+    except Exception:
+        pass
+
+
+_seed_posting_mode_from_disk()
+
+
+def _refresh_posting_mode():
+    try:
+        _scripts_on_path()
+        from http_api import api_get
+        from s4l_posting_mode import write_cached_mode
+
+        r = api_get("/api/v1/installations/posting-mode")
+        d = (r or {}).get("data") or {}
+        mode = d.get("mode")
+        mode = mode if mode in ("high", "medium", "low") else None
+        write_cached_mode(mode)
+        with _posting_mode_lock:
+            _posting_mode_cache.update(mode=mode, known=True, at=time.time())
+    except (Exception, SystemExit) as e:
+        # http_api raises SystemExit (not Exception) on terminal failure;
+        # catching only Exception let it kill this thread BEFORE the retry
+        # throttle below, so offline boxes hot-looped refresh attempts.
+        sys.stderr.write(f"[s4l-state] posting-mode refresh failed: {e}\n")
+        with _posting_mode_lock:
+            # Throttle retries to the TTL window; keep last-known value.
+            _posting_mode_cache["at"] = time.time()
+
+
+def read_posting_mode():
+    """Last-known posting mode ('high'|'medium'|'low') or None (default /
+    unknown). Non-blocking: kicks a background refresh when stale."""
+    with _posting_mode_lock:
+        fresh = (time.time() - _posting_mode_cache["at"]) < POSTING_MODE_TTL_SECS
+        mode = _posting_mode_cache["mode"]
+    if not fresh:
+        threading.Thread(target=_refresh_posting_mode, daemon=True).start()
+    return mode
+
+
+def write_posting_mode(mode):
+    """Set (or clear, mode=None) the server-side posting mode. Blocking POST;
+    call from a menu click, not from the rebuild tick. Returns the stored
+    mode on success; raises on network failure so the caller can notify."""
+    _scripts_on_path()
+    from http_api import api_post
+
+    r = api_post("/api/v1/installations/posting-mode", {"mode": mode})
+    d = (r or {}).get("data") or {}
+    stored = d.get("mode")
+    stored_valid = stored if stored in ("high", "medium", "low") else None
+    try:
+        from s4l_posting_mode import write_cached_mode
+
+        write_cached_mode(stored_valid)
+    except Exception:
+        pass
+    with _posting_mode_lock:
+        _posting_mode_cache.update(mode=stored_valid, known=True, at=time.time())
+    return stored
+
+
+def toggle_lane(lane):
+    """Flip ONE lane (personal_brand|promotion) and return the new flags."""
+    if lane not in _VALID_MODES:
+        return read_flags()
+    f = read_flags()
+    f[lane] = not f.get(lane)
+    return write_flags(f["personal_brand"], f["promotion"])
+
+
+# approved_queue_set_status() / approved_queue_pending() REMOVED (2026-07-17):
+# the legacy approved-queue.json ledger is gone entirely — see the removal note
+# above read-approved-queue's old location. The store lane (store_stamp_decision
+# + store_pending_posts) is the only decision record and resume source now.
+
+
+def approve_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
+    """Post / reject drafts via the loopback tool. `post` = 1-based numbers to post
+    as-is; `edits` = [{n, text}] to rewrite then post; `reject` = numbers to mark
+    DONE so they're never shown for review again (not posted); `clear_link` =
+    numbers whose link the user removed while editing, so the poster clears
+    link_url and does NOT re-append it. Returns the parsed result, or None if the
+    loopback is unreachable (Claude Desktop closed)."""
+    args = {"batch_id": batch_id, "post": post or [], "edits": edits or [], "reject": reject or [], "clear_link": clear_link or []}
+    if activity_label:
+        args["__s4l_activity_label"] = activity_label
+    return loopback_tool("approve_drafts", args, timeout=timeout)
+
+
+# ---- review-events outbox (2026-07-02) --------------------------------------
+# Every card decision (approve/reject, with reason chips, link-click
+# interactions, and dwell time) ships to POST /api/v1/review-events so the
+# feedback-digest job can distill human rejections into each project's
+# learned_preferences config block. The outbox JSONL is the durability layer:
+# append locally first, flush to the API in the background with retry. Events
+# carry a client-generated event_uuid and the server upserts ON CONFLICT DO
+# NOTHING, so a crash between POST and truncate only produces duplicates the
+# server drops — never lost events, never double rows.
+REVIEW_EVENTS_OUTBOX = "review-events-outbox.jsonl"
+_outbox_lock = threading.Lock()
+_outbox_flush_lock = threading.Lock()
+
+
+def _outbox_path():
+    return Path(state_dir()) / REVIEW_EVENTS_OUTBOX
+
+
+def review_event_add(event):
+    """Append one decision event to the durable outbox and kick an async flush.
+    Never raises — a telemetry failure must not break the card flow."""
+    import uuid
+
+    ev = dict(event or {})
+    ev.setdefault("event_uuid", str(uuid.uuid4()))
+    ev.setdefault("client_ts", time_iso())
+    try:
+        with _outbox_lock:
+            p = _outbox_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a") as f:
+                f.write(json.dumps(ev) + "\n")
+    except Exception as err:
+        # Was a silent `pass` — a card's approve/reject decision could vanish
+        # with zero trace anywhere (2026-07-08: two approved-and-posted cards
+        # had no review_events row at all, and this was one of the candidate
+        # causes with nothing to confirm or rule it out). Never never write to
+        # the outbox again for THIS event, so it's worth saying loudly.
+        sys.stderr.write(
+            f"[s4l-state] review_event_add: failed to append to outbox ({type(err).__name__}: {err}); "
+            f"event DROPPED event_uuid={ev.get('event_uuid')} decision={ev.get('decision')} "
+            f"candidate_id={ev.get('candidate_id')}\n"
+        )
+        sys.stderr.flush()
+    flush_review_events_async()
+
+
+def flush_review_events_async():
+    threading.Thread(target=flush_review_events, daemon=True).start()
+
+
+def flush_review_events():
+    """Flush the outbox to /api/v1/review-events in batches. Failed batches stay
+    in the outbox for the next kick (next decision, review close, or menubar
+    start). Serialized: a second concurrent flush returns immediately."""
+    if not _outbox_flush_lock.acquire(blocking=False):
+        return
+    try:
+        try:
+            with _outbox_lock:
+                p = _outbox_path()
+                if not p.exists():
+                    return
+                lines = [ln for ln in p.read_text().splitlines() if ln.strip()]
+        except Exception as err:
+            sys.stderr.write(f"[s4l-state] flush_review_events: failed to read outbox: {type(err).__name__}: {err}\n")
+            sys.stderr.flush()
+            return
+        events = []
+        for ln in lines:
+            try:
+                ev = json.loads(ln)
+            except Exception as err:
+                sys.stderr.write(
+                    f"[s4l-state] flush_review_events: dropping unparseable outbox line "
+                    f"({type(err).__name__}: {err}): {ln[:200]!r}\n"
+                )
+                sys.stderr.flush()
+                continue  # corrupt line: dropped on the next rewrite
+            if isinstance(ev, dict) and ev.get("event_uuid"):
+                events.append(ev)
+            else:
+                sys.stderr.write(
+                    f"[s4l-state] flush_review_events: dropping malformed outbox line "
+                    f"(not a dict, or missing event_uuid): {ln[:200]!r}\n"
+                )
+                sys.stderr.flush()
+        if not events:
+            if lines:  # only corrupt lines left — clear the file
+                _outbox_remove(set())
+            return
+        # scripts/ is on sys.path (S4L_REPO_DIR insertion at menubar boot);
+        # import lazily so a missing pipeline repo degrades to buffer-only.
+        try:
+            from http_api import api_post
+        except Exception as err:
+            sys.stderr.write(
+                f"[s4l-state] flush_review_events: http_api unavailable ({type(err).__name__}: {err}); "
+                f"{len(events)} event(s) staying buffered in the outbox\n"
+            )
+            sys.stderr.flush()
+            return
+        shipped = set()
+        for i in range(0, len(events), 100):
+            batch = events[i : i + 100]
+            try:
+                api_post("/api/v1/review-events", {"events": batch})
+                shipped.update(e["event_uuid"] for e in batch)
+            except Exception as err:
+                sys.stderr.write(
+                    f"[s4l-state] flush_review_events: POST failed ({type(err).__name__}: {err}); "
+                    f"{len(batch)} event(s) in this batch (and any after it) staying buffered for the next kick\n"
+                )
+                sys.stderr.flush()
+                break  # network/API down: keep the rest for the next kick
+        _outbox_remove(shipped, keep_only_valid=True)
+    finally:
+        _outbox_flush_lock.release()
+
+
+def _outbox_remove(shipped_uuids, keep_only_valid=False):
+    """Rewrite the outbox dropping shipped (and, optionally, corrupt) lines.
+    Runs under _outbox_lock so appends that landed mid-flush are preserved."""
+    try:
+        with _outbox_lock:
+            p = _outbox_path()
+            if not p.exists():
+                return
+            remaining = []
+            for ln in p.read_text().splitlines():
+                if not ln.strip():
+                    continue
+                try:
+                    ev = json.loads(ln)
+                except Exception:
+                    if not keep_only_valid:
+                        remaining.append(ln)
+                    continue
+                if not isinstance(ev, dict) or ev.get("event_uuid") in shipped_uuids:
+                    continue
+                remaining.append(json.dumps(ev))
+            tmp = p.with_suffix(".jsonl.tmp")
+            tmp.write_text("\n".join(remaining) + ("\n" if remaining else ""))
+            os.replace(str(tmp), str(p))
+    except Exception:
+        pass

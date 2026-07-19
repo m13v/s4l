@@ -1,8 +1,8 @@
 # social-autoposter Python deps.
-# Installed by bin/cli.js on init/update into the SAPS_PYTHON interpreter
-# (Homebrew python), via `<saps_python> -m pip install -r requirements.txt`.
+# Installed by bin/cli.js on init/update into the S4L_PYTHON interpreter
+# (Homebrew python), via `<s4l_python> -m pip install -r requirements.txt`.
 # Playwright browser binaries are downloaded separately (same interpreter:
-# `<saps_python> -m playwright install chromium`).
+# `<s4l_python> -m playwright install chromium`).
 
 playwright
 # CDP client used by scripts/restore_twitter_session.py and the cookie-grab/

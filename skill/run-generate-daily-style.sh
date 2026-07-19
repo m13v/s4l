@@ -36,7 +36,7 @@ if [ -f "$REPO_DIR/.env" ]; then
   set +a
 fi
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 log "starting daily human-style synthesizer"
 

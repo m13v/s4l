@@ -22,7 +22,13 @@ from http_api import api_get  # noqa: E402
 from project_slugs import get_client_slug, get_booking_table  # noqa: E402
 
 ENV_PATH = os.path.expanduser("~/social-autoposter/.env")
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 
 
 def load_env():
@@ -35,9 +41,6 @@ def load_env():
                     os.environ.setdefault(k.strip(), v.strip())
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def posthog_query(api_key, project_id, event, host_filter, after_date):

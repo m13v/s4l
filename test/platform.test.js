@@ -22,16 +22,16 @@ test('scheduler maps darwin -> launchd', () => {
   assert.strictEqual(platform.scheduler('darwin'), 'launchd');
 });
 
-test('scheduler maps linux -> systemd', () => {
-  assert.strictEqual(platform.scheduler('linux'), 'systemd');
+test('scheduler rejects unsupported platforms', () => {
+  assert.strictEqual(platform.scheduler('linux'), null);
 });
 
 test('statMtimeCmd darwin uses -f %m', () => {
   assert.deepStrictEqual(platform.statMtimeCmd('darwin'), ['stat', '-f', '%m']);
 });
 
-test('statMtimeCmd linux uses -c %Y', () => {
-  assert.deepStrictEqual(platform.statMtimeCmd('linux'), ['stat', '-c', '%Y']);
+test('statMtimeCmd rejects unsupported platforms', () => {
+  assert.strictEqual(platform.statMtimeCmd('linux'), null);
 });
 
 test('agentsDir darwin -> ~/Library/LaunchAgents', () => {
@@ -39,17 +39,16 @@ test('agentsDir darwin -> ~/Library/LaunchAgents', () => {
   assert.strictEqual(d, '/Users/t/Library/LaunchAgents');
 });
 
-test('agentsDir linux -> ~/.config/systemd/user', () => {
-  const d = platform.agentsDir('linux', '/home/t');
-  assert.strictEqual(d, '/home/t/.config/systemd/user');
+test('agentsDir rejects unsupported platforms', () => {
+  assert.strictEqual(platform.agentsDir('linux', '/home/t'), null);
 });
 
 test('notifier darwin -> osascript', () => {
   assert.strictEqual(platform.notifier('darwin'), 'osascript');
 });
 
-test('notifier linux -> notify-send', () => {
-  assert.strictEqual(platform.notifier('linux'), 'notify-send');
+test('notifier rejects unsupported platforms', () => {
+  assert.strictEqual(platform.notifier('linux'), null);
 });
 
 test('launchdPath includes nodeBin first', () => {

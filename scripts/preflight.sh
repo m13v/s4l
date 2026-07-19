@@ -1,7 +1,7 @@
 #!/bin/bash
 # preflight.sh — sourced helper for launchd-fired run-*.sh wrappers.
 #
-# Three checks, each emits a `[skipped: <reason>]` stderr line and exits 0
+# Four checks, each emits a `[skipped: <reason>]` stderr line and exits 0
 # (so launchd treats the slot as cleanly consumed and fires the next one
 # on schedule, rather than thinking the job is broken):
 #
@@ -28,7 +28,16 @@
 #        still recovering automatically within 10 min of the underlying
 #        cap being lifted.
 #
-#   3. preflight_acquire_slot_or_skip <pool_name> [max_slots=4]
+#   3. preflight_skip_if_paused
+#        Reads <state>/paused.flag (S4L Pause: written by mcp/src/index.ts
+#        pauseS4L and the menubar's pause button). Pause boots the pipeline
+#        launchd jobs out, but that only covers jobs loaded at pause time —
+#        this guard is the shared runtime backstop every pipeline wrapper
+#        calls, so a job that was mid-flight, re-loaded by a Claude boot,
+#        or added later can never draft/post while paused. One guard, all
+#        pipelines: add a new run-*.sh wrapper and call this, done.
+#
+#   4. preflight_acquire_slot_or_skip <pool_name> [max_slots=4]
 #        Slot-pool admission control via mkdir on
 #        /tmp/sa-${pool_name}-slot-{1..max_slots}.lock. If all slots are
 #        held by live PIDs, skips. Stale slots (PID dead) are GC'd before
@@ -146,7 +155,18 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# 3. Slot-pool admission (parallel-cycle cap)
+# 3. S4L Pause preflight
+# ---------------------------------------------------------------------------
+preflight_skip_if_paused() {
+    local flag="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/paused.flag"
+    [ -e "$flag" ] || return 0
+    local script_tag="${SA_PREFLIGHT_SCRIPT:-${SCRIPT_TAG:-$(basename "$0")}}"
+    echo "[skipped: paused flag=$flag script=$script_tag] $(date)" >&2
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# 4. Slot-pool admission (parallel-cycle cap)
 # ---------------------------------------------------------------------------
 preflight_acquire_slot_or_skip() {
     local pool_name="$1"

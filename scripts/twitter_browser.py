@@ -33,6 +33,7 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -40,27 +41,60 @@ import time
 
 LOCK_FILE = os.path.expanduser("~/.claude/twitter-browser-lock.json")
 LOCK_EXPIRY = 300  # process-level mutex TTL; refreshed during long ops
+# Posting-specific silence ceiling, DECOUPLED from the fleet-wide LOCK_EXPIRY.
+# A role:"post" holder (an approved batch, or a single reply) is reclaimed by a
+# peer once its lock has gone unrefreshed this long; a role:"scan" holder keeps
+# the 300s LOCK_EXPIRY untouched. Posting refreshes the lock at every candidate
+# boundary (twitter_post_plan holds it across the whole batch), so a healthy
+# poster never goes silent this long -- only a genuinely hung poster (e.g.
+# link_tail's `claude -p` wedged) trips it. Kept as its own knob so tuning the
+# scan TTL never moves the poster's hang ceiling and vice-versa. Must exceed the
+# worst-case single candidate step (one reply + the link_tail AI call), and stay
+# well under any value that would let a hung poster block the browser for long.
+POST_LOCK_EXPIRY = 180  # seconds; applies ONLY to a role:"post" holder
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
 LOCK_POLL_INTERVAL = 2
+PREEMPT_KILL_WAIT = 5  # secs to wait for a preempted scan holder to die before SIGKILL
+
+# Lock role priority. A "post" holder is user-initiated (an approved reply) and
+# outranks any "scan" holder (the scan/draft cycle, autopilot or plugin). When a
+# poster finds a LIVE lower-priority holder it PREEMPTS it (SIGTERM + reclaim)
+# instead of waiting LOCK_WAIT_MAX and giving up. This is what makes "posting
+# takes priority over scanning" hold CROSS-PROCESS: the old in-process
+# preemptScanForPost only killed the plugin's own scan, never a scan spawned by a
+# separate autopilot agent / launchd cron, so an approved post kept losing the
+# 45s race to a live scan that held the browser. Default "scan" so any unmarked
+# browser op is preemptable; only the poster path sets S4L_LOCK_ROLE=post.
+LOCK_ROLE = (os.environ.get("S4L_LOCK_ROLE") or "scan").strip() or "scan"
 VIEWPORT = {"width": 911, "height": 1016}
+
+# CDP connect ceiling. Playwright's connect_over_cdp default is 180s; a wedged
+# harness Chrome (process alive, /json/version answering, websocket upgrade
+# completing, but the browser loop never servicing the CDP handshake) made
+# every reply attempt eat the full 3 minutes WHILE HOLDING the browser lock
+# (S4L-4H, Karol 2026-07-11; identical wedge locally 2026-07-09). A localhost
+# socket either completes the handshake in milliseconds or is wedged; 15s is
+# generous headroom for a loaded box without feeding the lock-contention family.
+CDP_CONNECT_TIMEOUT_MS = int(os.environ.get("S4L_CDP_CONNECT_TIMEOUT_MS") or "15000")
 
 # Posting handle. Resolved at call time from AUTOPOSTER_TWITTER_HANDLE env
 # var (set by per-account launchd/systemd units) or config.json
-# accounts.twitter.handle. The "m13v_" fallback keeps the Mac default working
-# when neither source is set, but on the VMs the env var MUST be set so the
-# DOM scrape + CDP URL build target the right profile.
-_DEFAULT_HANDLE = "m13v_"
-
+# accounts.twitter.handle. Returns None when neither source is set.
+#
+# There is intentionally NO hardcoded fallback handle. The old "m13v_"
+# default meant any install with an unset handle silently posted under the
+# repo owner's identity: it stamped posts.our_account = m13v_ and built reply
+# permalinks as x.com/m13v_/status/<id> for tweets that actually belonged to a
+# different account, corrupting attribution in the shared DB. Callers that
+# build a URL or post under this identity MUST treat None as "account not
+# configured" and refuse, rather than impersonate someone.
 def our_handle():
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import account_resolver
-        h = account_resolver.resolve("twitter")
-        if h:
-            return h
+        return account_resolver.resolve("twitter")
     except Exception:
-        pass
-    return _DEFAULT_HANDLE
+        return None
 
 # DM encryption passcode from .env
 DM_PASSCODE = os.environ.get("TWITTER_DM_PASSCODE", "")
@@ -152,22 +186,32 @@ def find_twitter_cdp_port():
     returns the first port whose /json index lists at least one x.com or
     twitter.com tab (preferring logged-in tabs over login pages). Used only
     as a fallback when TWITTER_CDP_URL isn't exported by the caller.
+
+    Since the park-on-exit mitigation (2026-07-14) the harness tab sits on
+    x.com/robots.txt between runs, which still matches the x.com scan above.
+    A responding port whose cmdline carries the browser-harness profile dir
+    is kept as a last-resort fallback for the tab-somehow-closed case (never
+    a different platform's harness Chrome).
     """
     try:
         ps_out = subprocess.check_output(
             ["ps", "aux"], text=True, stderr=subprocess.DEVNULL
         )
         ports = set()
+        harness_ports = set()
         for line in ps_out.splitlines():
             if "chromium" not in line.lower() and "chrome" not in line.lower():
                 continue
             m = re.search(r"remote-debugging-port=(\d+)", line)
             if m:
                 ports.add(int(m.group(1)))
+                if "browser-profiles/browser-harness" in line:
+                    harness_ports.add(int(m.group(1)))
 
         import urllib.request
 
         best_port = None
+        harness_fallback = None
         for port in sorted(ports):
             try:
                 resp = urllib.request.urlopen(
@@ -180,6 +224,11 @@ def find_twitter_cdp_port():
                     if "x.com" in p.get("url", "") or "twitter.com" in p.get("url", "")
                 ]
                 if not twitter_urls:
+                    # Responding harness Chrome with its tab parked on
+                    # about:blank: usable, but only if nothing shows a live
+                    # x.com tab.
+                    if port in harness_ports and harness_fallback is None:
+                        harness_fallback = port
                     continue
                 # Prefer ports with logged-in pages (home, chat, notifications)
                 logged_in = any(
@@ -193,252 +242,240 @@ def find_twitter_cdp_port():
                     best_port = port
             except Exception:
                 continue
-        return best_port
+        return best_port if best_port is not None else harness_fallback
     except Exception:
         pass
     return None
 
 
-_LOCK_SESSION_ID = f"python:{os.getpid()}"
-_LOCK_INHERITED = False
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# ---- browser-session mutex (2026-07-14: shared implementation) -------------
+# The ~250-line battle-hardened mutex that lived here (O_EXCL claim, dead-PID
+# reclaim, role-aware post-preempts-scan, batch inherit via S4L_LOCK_OWNER,
+# UUID-session inherit, POST_LOCK_EXPIRY decoupling) moved VERBATIM to
+# scripts/browser_mutex.py so reddit_browser.py stops running a weaker copy.
+# Same lockfile, same JSON shape, same timers, same log/error strings —
+# behavior is unchanged. Incident history: docs/twitter_browser_lock.md.
+from browser_mutex import BrowserMutex
+
+_MUTEX = BrowserMutex(
+    lock_file=LOCK_FILE,
+    label="Twitter browser",
+    lock_expiry=LOCK_EXPIRY,
+    post_lock_expiry=POST_LOCK_EXPIRY,
+    wait_max=LOCK_WAIT_MAX,
+    poll_interval=LOCK_POLL_INTERVAL,
+    preempt_kill_wait=PREEMPT_KILL_WAIT,
+    role=LOCK_ROLE,
+)
+
+
+def _acquire_browser_lock():
+    _MUTEX.acquire()
+
+
+def _refresh_browser_lock():
+    _MUTEX.refresh()
 
 
 def _release_browser_lock():
-    """Release the lock if we hold it.
-
-    If we inherited the lock from a Claude session (UUID holder), leave it for
-    the hook/session-end handler to release — don't clobber the parent's lock.
-    """
-    if _LOCK_INHERITED:
-        return
-    try:
-        if os.path.exists(LOCK_FILE):
-            with open(LOCK_FILE) as f:
-                lock = json.load(f)
-            if lock.get("session_id") == _LOCK_SESSION_ID:
-                os.remove(LOCK_FILE)
-    except (json.JSONDecodeError, OSError):
-        pass
+    _MUTEX.release()
 
 
 atexit.register(_release_browser_lock)
 
 
-def _is_holder_alive(holder: str) -> bool:
-    """Check whether a Claude session UUID lock holder is still running.
+def _cdp_diagnostics(cdp_url):
+    """Cheap post-mortem probe after a failed CDP attach.
 
-    A live Claude session puts its UUID on the cmdline as
-    `claude --session-id <UUID>`. pgrep matches it; absence means the
-    holder is dead and the lock is stale, even if its JSONL transcript
-    is still tail-flushing. Legacy semantics from the retired
-    twitter-agent-lock.sh PreToolUse hook; only python:PID holders are
-    written to the lock file today, so this code path is dormant unless
-    a Claude session still inherits an in-flight UUID lock.
+    Distinguishes "Chrome down" (HTTP dead) from "Chrome wedged" (HTTP still
+    answering /json/version but the CDP session handshake never completing) in
+    the error JSON itself, so the Sentry event carries the diagnosis instead of
+    requiring log archaeology on the customer box (S4L-4H took exactly that).
     """
-    if not holder:
-        return False
+    import urllib.request
+    diag = {"http_alive": False}
+    base = cdp_url if "://" in cdp_url else f"http://{cdp_url}"
     try:
-        return (
-            subprocess.run(
-                ["pgrep", "-f", f"claude.*--session-id {holder}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            ).returncode
-            == 0
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return True  # err on the side of NOT stealing
-
-
-def _is_python_holder_alive(holder: str) -> bool:
-    """Liveness probe for a `python:PID` lock holder.
-
-    Holders written today are `python:<pid>` (see _LOCK_SESSION_ID). Before this
-    check existed (defect a, 2026-06-16), a holder whose process died WITHOUT
-    running its atexit _release_browser_lock (SIGKILL, OOM, watchdog SIGTERM,
-    hard hang) left the lockfile behind, and _acquire_browser_lock had no way to
-    tell it was dead -- so every peer waited the full LOCK_WAIT_MAX and gave up,
-    and the lock only cleared after LOCK_EXPIRY (300s). os.kill(pid, 0) sends no
-    signal; it just probes existence. Returns True (treat as held, do NOT steal)
-    for anything we cannot prove dead, so the worst case degrades to the old
-    LOCK_EXPIRY failsafe rather than stealing a live peer's lock.
-    """
-    if not holder.startswith("python:"):
-        return True  # not a python holder; this probe makes no claim
+        with urllib.request.urlopen(f"{base}/json/version", timeout=3) as r:
+            v = json.loads(r.read().decode())
+        diag["http_alive"] = True
+        diag["browser"] = v.get("Browser")
+    except Exception as e:
+        diag["version_error"] = str(e)[:120]
+        return diag
     try:
-        pid = int(holder.split(":", 1)[1])
-    except (ValueError, IndexError):
-        return True  # unparseable holder -> don't steal on this basis
+        with urllib.request.urlopen(f"{base}/json/list", timeout=3) as r:
+            diag["targets"] = len(json.loads(r.read().decode()))
+    except Exception as e:
+        diag["list_error"] = str(e)[:120]
+    return diag
+
+
+# --- L1/L2 browser-hang guards (2026-07-13) ----------------------------------
+# L1: no single Playwright operation may block forever. Until today NO script
+# set a default timeout, so any page op could hang indefinitely — a twitter
+# cycle wedged 60+ min in Phase 2b-prep media capture during a network flap
+# (2026-07-13 08:02, pid 1380) while holding the twitter-browser lock, blocking
+# every peer pipeline until the 180-min watchdog cap. Healthy ops here finish
+# in <10s; navigation on the x.com SPA gets extra slack. Callers all have
+# retry layers above, so failing fast is strictly better than hanging.
+BROWSER_OP_TIMEOUT_MS = 30_000
+BROWSER_NAV_TIMEOUT_MS = 60_000
+# L2: liveness heartbeat for the SHELL browser lock (the cross-pipeline mutex,
+# /tmp/social-autoposter-twitter-browser.lock). Touched on attach and on every
+# page network request (throttled), so "lock held + heartbeat stale" means the
+# holder is wedged, not just slow — a healthy 65-min phase2b-gen hold shows
+# constant traffic. watchdog_hung_runs.py reads this to TERM wedged holders in
+# ~30 min instead of the 180-min age cap. Best-effort: never fails the caller.
+_BROWSER_LOCK_HEARTBEAT = "/tmp/social-autoposter-twitter-browser.lock/heartbeat"
+_HB_THROTTLE_S = 5
+_hb_last_touch = 0.0
+
+
+def _touch_browser_heartbeat(*_args):
+    global _hb_last_touch
+    now = time.time()
+    if now - _hb_last_touch < _HB_THROTTLE_S:
+        return
+    _hb_last_touch = now
     try:
-        os.kill(pid, 0)
-        return True            # process exists -> alive
-    except ProcessLookupError:
-        return False           # no such process -> dead, reclaimable
-    except PermissionError:
-        return True            # exists but another owner -> alive
-    except OSError:
-        return True            # ambiguous -> err toward NOT stealing
-
-
-def _try_take_lock() -> bool:
-    """Atomically claim LOCK_FILE for this process. Returns True iff we created
-    it. O_CREAT|O_EXCL makes "is it free? then take it" a single syscall, so two
-    cold-start acquirers can't both win the way the old os.path.exists +
-    open(w) check-then-act allowed (defect c, 2026-06-16). A False return means a
-    peer beat us to it; the caller re-loops and re-evaluates the holder.
-    """
-    try:
-        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        return False
-    except OSError:
-        return False
-    try:
-        os.write(fd, json.dumps(
-            {"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}
-        ).encode())
-    finally:
-        os.close(fd)
-    return True
-
-
-def _acquire_browser_lock():
-    """Acquire the Twitter browser session mutex (~/.claude/twitter-browser-lock.json).
-
-    This file-mutex is the UNIVERSAL serializer for every twitter_browser.py
-    browser op (all of them route through get_browser_and_page below). The shell
-    FIFO lock in skill/lock.sh only serializes the pipelines that bother to take
-    it; this one catches everything, including cross-pipeline handoff races and
-    MCP-driven posts.
-
-    Holders today are python:PID. UUID-style holders are a legacy artifact of the
-    retired PreToolUse hook (twitter-agent-lock.sh); a live UUID holder is a
-    parent Claude session still in flight, so we INHERIT rather than fight it.
-
-    Reclaim priority (a holder we can PROVE is dead is taken immediately, so a
-    crashed peer can never starve the fleet for LOCK_WAIT_MAX/LOCK_EXPIRY):
-      1. holder == us            -> re-entrant; we already hold it.
-      2. UUID holder, pid gone   -> stale legacy lock, reclaim.
-      3. python:PID, pid gone    -> dead peer (defect a fix), reclaim.
-      4. age >= LOCK_EXPIRY      -> failsafe for holders we cannot probe.
-      5. live UUID holder        -> inherit (parent session).
-      6. live python:PID holder  -> real peer; wait, then give up after
-                                    LOCK_WAIT_MAX with a structured error.
-
-    Acquisition itself is atomic (_try_take_lock / O_EXCL), so the moment we
-    decide the lock is free, no concurrent acquirer can also claim it.
-
-    NOTE for future maintainers: do NOT "simplify" this by having the shell
-    pipelines `rm -f` the lockfile around release_lock. That blind rm deleted
-    LIVE peers' locks (defect b) and was removed 2026-06-16. Dead holders are
-    reclaimed here instead. See docs/twitter_browser_lock.md.
-    """
-    global _LOCK_SESSION_ID, _LOCK_INHERITED
-    deadline = time.time() + LOCK_WAIT_MAX
-    # Guarantee the lock dir exists so _try_take_lock's O_EXCL create can't fail
-    # for a missing-parent reason (which would otherwise spin the no-file path).
-    try:
-        os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
-    except OSError:
+        if os.path.isdir(os.path.dirname(_BROWSER_LOCK_HEARTBEAT)):
+            with open(_BROWSER_LOCK_HEARTBEAT, "w") as f:
+                f.write(str(int(now)))
+    except Exception:
         pass
-    while True:
-        if not os.path.exists(LOCK_FILE):
-            if _try_take_lock():
-                break
-            # Lost the create race to a peer (or a persistent create failure).
-            # Bound by `deadline` so this path can never spin forever.
-            if time.time() >= deadline:
-                print(json.dumps({
-                    "success": False,
-                    "error": f"Twitter browser lock contended on create; waited {LOCK_WAIT_MAX}s, giving up."
-                }))
-                sys.exit(1)
-            time.sleep(LOCK_POLL_INTERVAL)
-            continue
-        try:
-            with open(LOCK_FILE) as f:
-                lock = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            # Corrupt / half-written / vanished between exists() and open().
-            # Try to claim atomically; if a peer holds a valid lock our O_EXCL
-            # create fails and we re-loop. Bounded by `deadline` so a persistently
-            # unreadable lockfile gives up instead of hanging the pipeline.
-            if _try_take_lock():
-                break
-            if time.time() >= deadline:
-                print(json.dumps({
-                    "success": False,
-                    "error": f"Twitter browser lock unreadable; waited {LOCK_WAIT_MAX}s, giving up."
-                }))
-                sys.exit(1)
-            time.sleep(LOCK_POLL_INTERVAL)
-            continue
-        age = time.time() - lock.get("timestamp", 0)
-        holder = lock.get("session_id", "")
-
-        # 1. Re-entrant: the lock is already ours (same process, or a stale lock
-        # left by a previous process whose PID we have since reused). Refresh the
-        # timestamp so a peer's LOCK_EXPIRY failsafe can't reclaim it under us.
-        if holder == _LOCK_SESSION_ID and not _LOCK_INHERITED:
-            _refresh_browser_lock()
-            break
-
-        # 2-4. Reclaim a holder we can prove is dead/expired. Remove-then-take so
-        # the O_EXCL claim wins; if a peer reclaims at the same instant exactly
-        # one of us creates the file and the other re-loops (never both).
-        reclaim_reason = ""
-        if _UUID_RE.match(holder or "") and not _is_holder_alive(holder):
-            reclaim_reason = "dead_uuid"
-        elif holder.startswith("python:") and not _is_python_holder_alive(holder):
-            reclaim_reason = "dead_python"
-        elif age >= LOCK_EXPIRY:
-            reclaim_reason = "expired"
-        if reclaim_reason:
-            try:
-                os.remove(LOCK_FILE)
-            except OSError:
-                pass
-            if _try_take_lock():
-                # Verifiable signal that defect-a starvation was prevented.
-                print(f"[browser_lock] reclaimed holder={holder or '<none>'} "
-                      f"reason={reclaim_reason} age={int(age)}s -> pid={os.getpid()}",
-                      file=sys.stderr)
-                break
-            time.sleep(LOCK_POLL_INTERVAL)
-            continue
-
-        # 5. Live UUID holder = parent Claude session still in flight -> inherit.
-        if _UUID_RE.match(holder or ""):
-            _LOCK_SESSION_ID = holder
-            _LOCK_INHERITED = True
-            break
-
-        # 6. Live python:PID peer. Wait, then give up. Reaching the deadline now
-        # means the holder is a genuinely LIVE peer (dead ones were reclaimed
-        # above), i.e. real contention -- NOT the defect-a starvation. The
-        # "locked by session" substring is preserved for downstream parsers.
-        if time.time() >= deadline:
-            print(json.dumps({
-                "success": False,
-                "error": f"Twitter browser locked by session {holder} ({int(age)}s, peer alive); waited {LOCK_WAIT_MAX}s, giving up."
-            }))
-            sys.exit(1)
-        time.sleep(LOCK_POLL_INTERVAL)
-        continue
 
 
-def _refresh_browser_lock():
-    """Refresh the lock timestamp to prevent expiry during long operations."""
-    try:
-        with open(LOCK_FILE, "w") as f:
-            json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
-    except OSError:
-        pass
+# L3: CHOKE-POINT self-liveness watchdog (2026-07-14). The per-call-site
+# stall_guard wrappers proved to be coverage-by-enumeration: the batch media
+# path (scrape_many_thread_media) was missed and hung 31+ min on a crashed
+# renderer with only the external watchdog's 90-min net under it. This layer
+# is enforcement at the ONE entry every Playwright browser op flows through:
+# if THIS process has produced zero browser activity (no heartbeat touches —
+# no attach, no page network traffic) for the deadline while holding the
+# browser, it is hung; print a marker, stamp the wedge strike, and self-abort
+# so the lock and cycle slot free up. Applies to every current and FUTURE
+# call site automatically. Write path excluded by ROLE (S4L_LOCK_ROLE=post):
+# aborting mid-post risks a posted-but-unrecorded reply (double-post on
+# retry), so posting keeps its own timeouts + the external nets.
+_SELF_WATCHDOG_ARMED = False
+
+
+def _arm_self_liveness_watchdog():
+    global _SELF_WATCHDOG_ARMED
+    if _SELF_WATCHDOG_ARMED or LOCK_ROLE == "post":
+        return
+    _SELF_WATCHDOG_ARMED = True
+    import threading
+
+    deadline = float(os.environ.get("S4L_BROWSER_OP_DEADLINE_S", "240")) + 60.0
+    interval = max(5.0, min(20.0, deadline / 4.0))
+
+    def _loop():
+        while True:
+            time.sleep(interval)
+            if not _hb_last_touch:
+                continue
+            idle = time.time() - _hb_last_touch
+            if idle > deadline:
+                print(
+                    f"[twitter_browser] SELF_LIVENESS_ABORT role={LOCK_ROLE} "
+                    f"idle={idle:.0f}s deadline={deadline:.0f}s — browser held "
+                    "with zero activity (hung op); stamping wedge strike and "
+                    "aborting so the lock frees",
+                    file=sys.stderr,
+                )
+                try:
+                    # Matches the two-strike gate in skill/lib/twitter-backend.sh.
+                    with open("/tmp/s4l_cdp_wedge_strike_9555", "w") as f:
+                        f.write(str(int(time.time())))
+                except OSError:
+                    pass
+                os._exit(75)  # EX_TEMPFAIL
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+# PARK-ON-EXIT (2026-07-14, Chrome 150 crash-storm mitigation). Root cause of
+# the 07-12..07-14 stalls: Chrome 150 (live at the 07-12 reboot) crashes the
+# x.com renderer with a deliberate internal CHECK abort roughly hourly while
+# the tab sits unthrottled on x.com between pipeline runs, and a crashed
+# renderer precedes most whole-browser CDP wedges by minutes (see Crashpad
+# dump ↔ cdp_wedge correlation, memory
+# insights_chrome150_renderer_crash_wedge_2026_07_14). Parking every
+# x.com/twitter.com tab when the last browser-using python process exits
+# removes the heavy SPA from the idle window entirely. Raw CDP over
+# HTTP+websocket with hard 3s timeouts, NEVER Playwright: at atexit the
+# Playwright loop may be gone, and against an already-wedged browser this
+# must fail fast, not hang the exit.
+#
+# PARK TARGET IS x.com/robots.txt, NOT about:blank (user rule 2026-07-14:
+# always REUSE the tab; creating tabs risks focus steal). The bh harness's
+# list_tabs() treats "about:" as INTERNAL and hides it, so an about:blank
+# park made twitter_scan._navigate see zero real tabs and open a NEW tab
+# every cycle. robots.txt is a static ~100-byte text document (no SPA, no
+# JS, nothing to leak or crash) whose URL still matches every reuse
+# heuristic: harness list_tabs (plain https), the x.com-tab preference in
+# _get_browser_and_page_raw, and find_twitter_cdp_port discovery. The
+# harness-profile discovery fallback stays as a belt for a closed tab.
+_PARK_URL = "https://x.com/robots.txt"
+
+
+def _park_twitter_tabs():
+    # Thin alias kept for callers/tests; ONE implementation lives in
+    # scripts/browser_lifecycle.py (shared with reddit_browser.py — user
+    # directive 2026-07-17: share the machinery, don't fork failure points).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from browser_lifecycle import park_tabs
+
+    base = (
+        os.environ.get("TWITTER_CDP_URL", "").strip()
+        or "http://127.0.0.1:9555"
+    ).rstrip("/")
+    park_tabs(base, ("x.com", "twitter.com"), _PARK_URL, "twitter_browser")
+
+
+def _register_park_on_exit():
+    """Arm parking once per process, only for processes that actually used the
+    browser. Registered AFTER the module-level _release_browser_lock atexit,
+    so it runs BEFORE it (LIFO): park while still holding the python lock,
+    then release. S4L_NO_TAB_PARK=1 is the escape hatch (honored inside
+    browser_lifecycle)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from browser_lifecycle import register_park_on_exit
+
+    base = (
+        os.environ.get("TWITTER_CDP_URL", "").strip()
+        or "http://127.0.0.1:9555"
+    ).rstrip("/")
+    register_park_on_exit(
+        base, ("x.com", "twitter.com"), _PARK_URL, "twitter_browser"
+    )
 
 
 def get_browser_and_page(playwright):
+    """Instrumented entry point: attach via _get_browser_and_page_raw, then
+    (L1) set default per-op/navigation timeouts so no page call can hang
+    forever, (L2) wire the browser-lock liveness heartbeat, and (L3) arm the
+    self-liveness watchdog so a hung op in ANY caller self-aborts. All new
+    code should use THIS, never the raw variant."""
+    browser, page, is_cdp = _get_browser_and_page_raw(playwright)
+    try:
+        page.set_default_timeout(BROWSER_OP_TIMEOUT_MS)
+        page.set_default_navigation_timeout(BROWSER_NAV_TIMEOUT_MS)
+    except Exception:
+        pass
+    _touch_browser_heartbeat()
+    try:
+        page.on("request", _touch_browser_heartbeat)
+    except Exception:
+        pass
+    _arm_self_liveness_watchdog()
+    _register_park_on_exit()
+    return browser, page, is_cdp
+
+
+def _get_browser_and_page_raw(playwright):
     """Connect to the running twitter-harness Chrome via CDP.
 
     Returns (browser, page, is_cdp=True). `page` is a reused existing Twitter
@@ -460,8 +497,11 @@ def get_browser_and_page(playwright):
 
     cdp_url_override = os.environ.get("TWITTER_CDP_URL", "").strip()
     if cdp_url_override:
+        _t0 = time.time()
         try:
-            browser = playwright.chromium.connect_over_cdp(cdp_url_override)
+            browser = playwright.chromium.connect_over_cdp(
+                cdp_url_override, timeout=CDP_CONNECT_TIMEOUT_MS
+            )
             contexts = browser.contexts
             if contexts:
                 context = contexts[0]
@@ -480,16 +520,19 @@ def get_browser_and_page(playwright):
             _release_browser_lock()
             print(json.dumps({
                 "success": False,
-                "error": f"TWITTER_CDP_URL connect failed ({cdp_url_override}): {e}"
+                "error": f"TWITTER_CDP_URL connect failed ({cdp_url_override}): {e}",
+                "connect_elapsed_s": round(time.time() - _t0, 1),
+                "cdp_diag": _cdp_diagnostics(cdp_url_override),
             }))
             sys.exit(1)
 
     cdp_port = find_twitter_cdp_port()
 
     if cdp_port:
+        _t0 = time.time()
         try:
             browser = playwright.chromium.connect_over_cdp(
-                f"http://localhost:{cdp_port}"
+                f"http://localhost:{cdp_port}", timeout=CDP_CONNECT_TIMEOUT_MS
             )
             contexts = browser.contexts
             if contexts:
@@ -504,7 +547,9 @@ def get_browser_and_page(playwright):
             _release_browser_lock()
             print(json.dumps({
                 "success": False,
-                "error": f"harness CDP attach failed (port {cdp_port}): {e}"
+                "error": f"harness CDP attach failed (port {cdp_port}): {e}",
+                "connect_elapsed_s": round(time.time() - _t0, 1),
+                "cdp_diag": _cdp_diagnostics(f"http://localhost:{cdp_port}"),
             }))
             sys.exit(1)
 
@@ -660,6 +705,57 @@ def _wait_for_reply_textbox(page, total_timeout_ms=45000):
     return None
 
 
+# Author-block detection (2026-07-06). Since X's late-2024 block change, a
+# blocked account can still VIEW the blocker's public posts, so the tweet page
+# renders normally — article present, reply icon present, logged in, no
+# restriction banner — but the inline composer never mounts. That passive
+# signature is byte-identical to a transient React composer-mount miss, so the
+# blocked case used to fall through to reply_box_not_found (transient) and got
+# retried every cycle forever. The only deterministic discriminator (verified
+# live against a real blocked thread, candidate 345441): CLICK the parent
+# article's reply icon. Blocked -> X paints "This author has blocked you, so
+# you can't perform this action" into anonymous spans (NO [data-testid="toast"],
+# NO [role="alert"] — text match is the only stable hook). Not blocked -> the
+# click opens the compose modal, which doubles as a free recovery of the
+# transient-miss case.
+_BLOCKED_BY_AUTHOR_RE = r"has blocked you"
+
+
+def _probe_author_block(page):
+    """Click the parent tweet's reply icon to distinguish blocked-by-author
+    from a transient composer-mount failure. Only call when the tweet rendered
+    but no reply textbox was found.
+
+    Returns ("blocked", None) when the author has blocked us,
+    ("recovered", locator) when the click opened the compose modal (the
+    transient miss healed itself — caller can proceed with the reply), or
+    ("unknown", None) when neither signal appeared. Never raises.
+    """
+    try:
+        reply_btn = page.locator(
+            'article[data-testid="tweet"]').first.locator('[data-testid="reply"]')
+        if reply_btn.count() == 0:
+            return ("unknown", None)
+        reply_btn.first.click(timeout=5000)
+        page.wait_for_timeout(2000)
+        blocked = page.evaluate(
+            "() => /" + _BLOCKED_BY_AUTHOR_RE + "/i.test(document.body.innerText)"
+        )
+        if blocked:
+            print("[reply_to_tweet] author-block probe: blocked-by-author "
+                  "message present after reply-icon click", file=sys.stderr)
+            return ("blocked", None)
+        box = _wait_for_reply_textbox(page, total_timeout_ms=8000)
+        if box:
+            print("[reply_to_tweet] author-block probe: compose modal opened; "
+                  "recovered from transient composer miss", file=sys.stderr)
+            return ("recovered", box)
+    except Exception as e:
+        print(f"[reply_to_tweet] author-block probe failed (non-fatal): "
+              f"{str(e).splitlines()[0]}", file=sys.stderr)
+    return ("unknown", None)
+
+
 # Post-action interstitials X shows AFTER a successful reply (e.g. the
 # "Unlock more on X" graduated-access sheet). They don't block the post that
 # triggered them, but the sheet stays up on screen and would overlay the
@@ -690,6 +786,37 @@ def _dismiss_known_overlays(page) -> bool:
     return False
 
 
+_STATUS_URL_RE = re.compile(
+    r"^https?://(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d+)", re.I)
+
+
+def _same_author_status_url(old_url, new_url):
+    """True when new_url is a plain /status/<id> permalink by the SAME author
+    as old_url (and a different status id). Guards the edited-tweet redirect
+    so we only ever follow X's own latest-version link, never an arbitrary
+    anchor scraped off the page."""
+    mo = _STATUS_URL_RE.match(old_url or "")
+    mn = _STATUS_URL_RE.match(new_url or "")
+    return bool(mo and mn and mo.group(1).lower() == mn.group(1).lower()
+                and mn.group(2) != mo.group(2))
+
+
+def _find_latest_version_url(page):
+    """On an edited tweet's STALE permalink, X strips the composer and renders
+    "There's a new version of this post. See the latest post." with the link
+    pointing at the newest status id. Return that href, or None."""
+    try:
+        return page.evaluate(
+            """() => {
+              const a = [...document.querySelectorAll('a[href*="/status/"]')]
+                .find(el => /see the latest post/i.test(el.textContent || ''));
+              return a ? a.href : null;
+            }"""
+        )
+    except Exception:
+        return None
+
+
 def _dump_reply_failure_diag(page, tweet_url):
     """Dump screenshot + DOM state on reply_box_not_found. Returns a diag dict."""
     import time as _t
@@ -708,6 +835,18 @@ def _dump_reply_failure_diag(page, tweet_url):
     try:
         diag["dom"] = page.evaluate("""() => {
             const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
+            const body = (document.body && document.body.innerText || '');
+            const tweetRendered = !!document.querySelector('article[data-testid="tweet"]');
+            // Reply-audience restriction: X renders one of these phrasings when the
+            // author limits who can reply. "Only some accounts can reply" is the
+            // confirmed live string; the others cover the documented variants.
+            const RESTRICT = /Only some accounts can reply|People who follow .{0,40} can reply|Accounts .{0,40} (follows?|mentioned) can reply|People .{0,40} mentioned can reply|Verified accounts can reply|Subscribers can reply|You can.?t reply to this/i;
+            const m = body.match(RESTRICT);
+            // The audience control aria-label ("Everyone can reply" vs a restricted label).
+            const audLabel = (Array.from(document.querySelectorAll('[aria-label]'))
+                .map(e => e.getAttribute('aria-label') || '')
+                .find(s => /can reply$/i.test(s)) || '');
+            const restrictedByAud = !!audLabel && !/everyone can reply/i.test(audLabel);
             return {
                 title: (document.title || '').slice(0, 120),
                 textbox_count: tbs.length,
@@ -715,7 +854,10 @@ def _dump_reply_failure_diag(page, tweet_url):
                 has_tweetTextarea_0: !!document.querySelector('[data-testid="tweetTextarea_0"]'),
                 has_login_modal: !!document.querySelector('[data-testid="loginButton"]'),
                 has_age_gate: !!document.querySelector('[data-testid="sensitive-media-button"]'),
-                page_text_snippet: (document.body && document.body.innerText || '').slice(0, 300),
+                tweet_rendered: tweetRendered,
+                reply_restricted: !!(m || restrictedByAud),
+                restriction_label: (m ? m[0] : (restrictedByAud ? audLabel : '')).slice(0, 80),
+                page_text_snippet: body.slice(0, 300),
             };
         }""")
     except Exception as _e:
@@ -763,8 +905,8 @@ def _like_first_tweet_on_page(page):
         print("[like] clicked like but unlike state not confirmed", file=sys.stderr)
         return {"ok": False, "liked": False, "error": "like_unconfirmed"}
     except Exception as e:
-        print(f"[like] error liking parent tweet: {e}", file=sys.stderr)
-        return {"ok": False, "error": str(e)}
+        print(f"[like] parent tweet not liked (non-fatal): {str(e).splitlines()[0]}", file=sys.stderr)
+        return {"ok": False, "error": str(e).splitlines()[0]}
 
 
 def like_tweet(tweet_url):
@@ -819,6 +961,18 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
               or {"ok": false, "error": "..."}
     """
     print(f"[twitter_browser] reply_to_tweet called: {tweet_url}", file=sys.stderr)
+
+    # Identity gate: refuse to post when no account is configured. Without a
+    # resolved handle we cannot attribute the post or build a correct reply
+    # permalink, and the old behaviour silently impersonated the repo owner
+    # (handle "m13v_"). Fail fast and loud so the misconfiguration surfaces
+    # instead of polluting the shared DB under someone else's identity.
+    _handle = our_handle()
+    if not _handle:
+        print("[twitter_browser] no twitter account configured "
+              "(set AUTOPOSTER_TWITTER_HANDLE or accounts.twitter.handle in "
+              "config.json); refusing to post.", file=sys.stderr)
+        return {"ok": False, "error": "no_account_configured"}
 
     applied_campaigns = []
     if apply_campaigns:
@@ -932,13 +1086,26 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             except Exception:
                 pass
 
-            # Navigate + locate reply box. Composer mount is flaky on E2B
-            # sandbox egress (~1-in-5 misses on first attempt). Strategy:
-            # up to 2 navigation attempts; on miss, scroll-nudge once before
-            # re-navigating. On final miss, dump diagnostics for triage.
+            # Navigate + locate reply box. Single pass only (2026-07-06:
+            # removed the same-URL nudge+re-navigate retry — it doubled the
+            # composer-mount wait for no measurable recovery benefit, and on
+            # a genuine author-block it just delayed the block-probe below by
+            # another ~68s for nothing). On miss, dump diagnostics for triage;
+            # the block-probe (see _probe_author_block) doubles as the
+            # transient-miss recovery path now.
             reply_box = None
             tweet_not_found = False
-            for nav_attempt in (1, 2):
+            # Edited-tweet redirect (2026-07-06): when the author edits a
+            # tweet, the OLD permalink keeps rendering but X strips the
+            # composer and shows "There's a new version of this post." Follow
+            # X's own latest-version link (same-author /status/<id> only) and
+            # reply to the LATEST version instead — this re-navigates to a
+            # DIFFERENT url, not a retry of the same one. Hops are bounded so
+            # a pathological edit chain can't loop. The reassigned tweet_url
+            # flows into the success payload's tweet_url, so the caller logs
+            # the thread we actually replied to.
+            edit_hops = 0
+            while True:
                 try:
                     page.goto(tweet_url, wait_until="load", timeout=60000)
                 except Exception:
@@ -946,7 +1113,17 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
                     except Exception:
                         pass
-                page.wait_for_timeout(15000 if nav_attempt == 1 else 8000)
+                # Was a blind 15s/8s settle here -> pure dead latency. SPA
+                # readiness is ALREADY gated actively below by
+                # wait_for_selector("main") (up to 20s) and
+                # _wait_for_reply_textbox (polls every 500ms up to 45s); both
+                # return the instant the composer mounts, so the blind sleep
+                # only delayed the start of that polling. Keep a short floor so
+                # the initial JS kicks off (and the deleted-tweet text check
+                # below has content to read), then let the active gates do the
+                # real waiting. Cuts ~12s off every happy-path reply.
+                # (optimized 2026-06-22: 15000/8000 -> 2500)
+                page.wait_for_timeout(2500)
 
                 # `wait_until="load"` fires before Twitter's SPA mounts the
                 # <main> app shell, so "loaded" != "rendered". Explicitly gate
@@ -955,8 +1132,8 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 # DO NOT let text_content("main") raise a bare TimeoutError that
                 # crashes the whole script with no_reply_json and no diagnostics.
                 # Swallow it, log the actual URL (rate-limit vs logout triage),
-                # and fall through to the nudge + re-nav; on the final miss the
-                # reply_box-None path reaches _dump_reply_failure_diag below.
+                # and fall through; the reply_box-None path below reaches
+                # _dump_reply_failure_diag and the block-probe.
                 try:
                     page.wait_for_selector("main", state="attached", timeout=20000)
                     page_text = page.text_content("main", timeout=5000) or ""
@@ -966,28 +1143,28 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         cur_url = page.url
                     except Exception:
                         cur_url = "<unknown>"
-                    print(f"[reply_to_tweet] <main> not rendered on "
-                          f"nav_attempt={nav_attempt} (url={cur_url!r}); "
-                          f"nudging + re-navigating", file=sys.stderr)
-                if "this page doesn't exist" in page_text.lower():
+                    print(f"[reply_to_tweet] <main> not rendered "
+                          f"(url={cur_url!r})", file=sys.stderr)
+                # X renders the 404 copy with a CURLY apostrophe
+                # ("Hmm...this page doesn’t exist"), so normalize before
+                # matching — the plain-ASCII check silently never fired and
+                # dead tweets fell through to tweet_unavailable instead.
+                if "this page doesn't exist" in page_text.lower().replace("’", "'"):
                     tweet_not_found = True
                     break
 
-                reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
-                if reply_box:
-                    break
+                if "new version of this post" in page_text.lower() and edit_hops < 2:
+                    latest_url = _find_latest_version_url(page)
+                    if latest_url and _same_author_status_url(tweet_url, latest_url):
+                        edit_hops += 1
+                        print(f"[reply_to_tweet] edited-tweet banner on {tweet_url}; "
+                              f"following latest version {latest_url} "
+                              f"(hop {edit_hops})", file=sys.stderr)
+                        tweet_url = latest_url
+                        continue
 
-                # Nudge: small scroll + scroll back; sometimes coaxes the
-                # composer to attach when React stalled on the initial mount.
-                print(f"[reply_to_tweet] reply_box missing on nav_attempt={nav_attempt}; "
-                      f"nudging + re-navigating", file=sys.stderr)
-                try:
-                    page.evaluate("window.scrollBy(0, 400)")
-                    page.wait_for_timeout(1500)
-                    page.evaluate("window.scrollTo(0, 0)")
-                    page.wait_for_timeout(1500)
-                except Exception:
-                    pass
+                reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
+                break
 
             if tweet_not_found:
                 return {"ok": False, "error": "tweet_not_found"}
@@ -996,7 +1173,35 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 diag = _dump_reply_failure_diag(page, tweet_url)
                 print(f"[reply_to_tweet] reply_box_not_found diag: "
                       f"{json.dumps(diag, default=str)}", file=sys.stderr)
-                return {"ok": False, "error": "reply_box_not_found", "diag": diag}
+                dom = diag.get("dom") or {}
+                # Classify WHY the composer is missing so the poster can suppress
+                # PERMANENT conditions (never re-attempt) vs retry TRANSIENT ones:
+                #  - reply_restricted: author limits who can reply -> permanent,
+                #    suppress thread + author.
+                #  - tweet_unavailable: tweet deleted/suspended (nothing rendered)
+                #    -> permanent, suppress thread. A login modal is OUR session
+                #    problem, not the tweet's, so it stays transient.
+                #  - else: composer just didn't mount -> transient, retry as before.
+                if dom.get("reply_restricted"):
+                    return {"ok": False, "error": "reply_restricted",
+                            "restriction_label": dom.get("restriction_label") or "",
+                            "diag": diag}
+                if not dom.get("tweet_rendered") and not dom.get("has_login_modal"):
+                    return {"ok": False, "error": "tweet_unavailable", "diag": diag}
+                #  - blocked_by_author: tweet rendered, we're logged in, yet no
+                #    composer — either the author blocked us or the composer
+                #    mount transiently failed. The reply-icon click probe tells
+                #    them apart (see _probe_author_block) and, when it turns out
+                #    to be the transient case, hands back the modal composer so
+                #    this attempt can still land instead of burning a cycle.
+                if dom.get("tweet_rendered") and not dom.get("has_login_modal"):
+                    verdict, probe_box = _probe_author_block(page)
+                    if verdict == "blocked":
+                        return {"ok": False, "error": "blocked_by_author", "diag": diag}
+                    if verdict == "recovered":
+                        reply_box = probe_box
+                if not reply_box:
+                    return {"ok": False, "error": "reply_box_not_found", "diag": diag}
 
             # Snapshot our reply links right before posting (to detect the new one)
             links_before = _collect_our_reply_links(page)
@@ -1021,7 +1226,12 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             except Exception:
                 page.keyboard.press("Meta+Enter")
 
-            page.wait_for_timeout(4000)
+            # Post-submit settle: lets the CDP network response (which carries
+            # the new tweet id -> reply_url, captured below) and the success
+            # interstitial arrive. Trimmed from 4000ms 2026-06-22; the DOM-diff
+            # fallback (3x2s, below) still covers a slow CDP response, so the
+            # reply_url is not lost if 2000ms is short on a given run.
+            page.wait_for_timeout(2000)
 
             # Verify: check if the reply box is empty (cleared after posting)
             try:
@@ -1050,7 +1260,7 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
 
             # Method 1: CDP network interception (most reliable)
             if _created_tweet_ids:
-                reply_url = f"https://x.com/{our_handle()}/status/{_created_tweet_ids[-1]}"
+                reply_url = f"https://x.com/{_handle}/status/{_created_tweet_ids[-1]}"
                 print(f"[reply_url] captured via CDP+response-listener: {reply_url}", file=sys.stderr)
 
             # Method 2: DOM diff (check if new reply links appeared)
@@ -1749,7 +1959,7 @@ def read_conversation(thread_url, max_messages=20):
                 browser.close()
 
 
-def send_dm(thread_url, message, dm_id=None):
+def send_dm(thread_url, message, dm_id=None, apply_campaigns=True):
     """Send a message in a Twitter/X DM conversation.
 
     Navigates to the thread URL, types the message in the compose box,
@@ -1787,8 +1997,16 @@ def send_dm(thread_url, message, dm_id=None):
         message = wrap_res["text"]
         minted_link_codes = wrap_res.get("minted_codes", [])
 
+    # apply_campaigns=False (via S4L_SKIP_CAMPAIGN_SUFFIX on the send-dm CLI)
+    # opts this DM out of active-campaign suffixes. Set ONLY when delivering a
+    # HUMAN-drafted escalation reply (engage-dm-replies Phase 0): a human
+    # answering an escalation — often an AI-callout — must not get a bot tell
+    # coin-flipped onto their words (2026-07-13: the ' written with ai' suffix
+    # landing on a hand-approved recovery DM to ngeloxyz helped burn the lead).
+    # The autopilot never sets it, so the A/B experiment continues everywhere
+    # else. Mirrors reply_to_tweet's apply_campaigns plumbing.
     applied_campaigns = []
-    for cid, suffix, sample_rate in _load_active_twitter_campaigns():
+    for cid, suffix, sample_rate in (_load_active_twitter_campaigns() if apply_campaigns else []):
         if random.random() < sample_rate:
             # Wrap any URLs in the suffix through dm_short_links (DM rail) so
             # clicks attribute to this DM. Falls back to raw suffix if dm_id
@@ -2325,6 +2543,19 @@ def _anchor_repost_from_tweets(tweets, anchor_tweet_id):
 
 
 def scrape_thread_media(thread_url, scroll_count=1):
+    """Deadline wrapper: media capture relays CDP to the harness Chrome, and
+    against a half-wedged browser or dead renderer a single evaluate can hang
+    FOREVER (2026-07-13: hung 34+ min at candidate 24/92 holding the browser
+    lock; only the watchdog's 90-min lock-liveness net would have reaped it).
+    stall_guard aborts the process fast, stamps the wedge strike, and lets the
+    cycle-entry heal chain converge. Shared implementation — see
+    scripts/stall_guard.py; do NOT re-implement per step."""
+    from stall_guard import stall_guard
+    with stall_guard("thread_media", thread_url):
+        return _scrape_thread_media_inner(thread_url, scroll_count)
+
+
+def _scrape_thread_media_inner(thread_url, scroll_count=1):
     """Navigate to a tweet's permalink and return the media of the anchor tweet.
 
     Deterministic, model-free media capture for the MAIN posting cycle: the
@@ -2390,6 +2621,14 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
     """
     from playwright.sync_api import sync_playwright
 
+    # Per-URL stall guard: THIS batch function is the cycle's LIVE media path
+    # (capture_thread_media.py calls it) — not the singular scrape_thread_media
+    # above, which is why guarding only that one missed the 2026-07-14 hang
+    # (31+ min stuck on a crashed renderer at one URL, holding the browser
+    # lock, only the watchdog's 90-min net ahead). Shared implementation —
+    # scripts/stall_guard.py; every URL gets its own deadline.
+    from stall_guard import stall_guard
+
     results = []
     with sync_playwright() as p:
         browser, page, is_cdp = get_browser_and_page(p)
@@ -2397,6 +2636,8 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
             for url in thread_urls:
                 anchor_match = re.search(r"/status/(\d+)", url or "")
                 anchor_tweet_id = anchor_match.group(1) if anchor_match else ""
+                _g = stall_guard("thread_media_batch", url)
+                _g.__enter__()
                 try:
                     page.goto(url, wait_until="domcontentloaded")
                     page.wait_for_timeout(3000)
@@ -2429,6 +2670,8 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
                 except Exception as e:
                     print(f"[thread_media] error on {url}: {e}", file=sys.stderr)
                     results.append({"thread_url": url, "anchor_tweet_id": anchor_tweet_id, "error": str(e), "media": [], "is_repost": False, "reposted_by": ""})
+                finally:
+                    _g.__exit__(None, None, None)
                 page.wait_for_timeout(per_url_delay_ms)
             return {"results": results, "urls_visited": len(thread_urls)}
         finally:
@@ -2451,13 +2694,13 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-        # SAPS_SKIP_CAMPAIGN_SUFFIX=1 opts this reply out of active-campaign
+        # S4L_SKIP_CAMPAIGN_SUFFIX=1 opts this reply out of active-campaign
         # suffixes (e.g. " written with ai"). Set ONLY by the MCP draft_cycle
         # post path (mcp/src/index.ts::postApproved) so manual/reviewed posts
         # land clean; the cron pipeline never sets it, so the A/B experiment
         # keeps running there and on Reddit. Reuses the existing apply_campaigns
         # plumbing (same flag the self-reply path uses below).
-        _skip_camp = os.environ.get("SAPS_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        _skip_camp = os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
         result = reply_to_tweet(sys.argv[2], sys.argv[3], apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
@@ -2528,7 +2771,11 @@ def main():
             except ValueError:
                 print(f"send-dm: dm_id must be int, got {sys.argv[4]!r}", file=sys.stderr)
                 sys.exit(1)
-        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg)
+        # S4L_SKIP_CAMPAIGN_SUFFIX=1 opts this DM out of campaign suffixes.
+        # Set ONLY by engage-dm-replies Phase 0 when delivering a human-drafted
+        # escalation reply — see send_dm's apply_campaigns comment.
+        _skip_camp = os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg, apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
     elif cmd == "notifications":

@@ -17,8 +17,50 @@ from pathlib import Path
 
 REPO = Path("/Users/matthewdi/social-autoposter")
 LOG_RUN_PY = REPO / "scripts" / "log_run.py"
-SKILL_PATH_MARKER = "/social-autoposter/skill/"
+# Both homes of skill/*.sh: the operator repo AND the installed-app package.
+# The single operator-repo marker left every kicker-driven cycle (which runs
+# from ~/.social-autoposter-mcp/repo/package/skill/) invisible to this
+# watchdog — a scan stuck on a half-wedged Chrome sat 23+ minutes at zero
+# progress with nothing entitled to kill it (2026-07-13).
+SKILL_PATH_MARKERS = (
+    "/social-autoposter/skill/",
+    "/.social-autoposter-mcp/repo/package/skill/",
+)
 MAX_AGE_SEC = 45 * 60
+
+# --- L2: browser-lock liveness (2026-07-13) ----------------------------------
+# The age caps below are backstops sized ABOVE the worst-case duration of a
+# HEALTHY run, so they can't tell "90 min in and progressing" from "wedged
+# since minute 4". This check can: the shared browser libs (twitter_browser.py
+# / reddit_browser.py get_browser_and_page) touch <lock_dir>/heartbeat on every
+# attach and page network event, so a *-browser lock held by a LIVE process
+# whose heartbeat has gone stale means the holder is wedged mid-browser-work
+# (2026-07-13: pid 1380 hung 60+ min in Phase 2b-prep media capture during a
+# network flap, blocking every peer pipeline until the 180-min age cap).
+# Thresholds: WARN at 10 min stale (log-only). KILL at 15 min stale, and ONLY
+# when peers are actually queued waiting (an unwanted lock harms nobody).
+# Retuned 2026-07-14 from 30/90 min: the original 90 was sized around a
+# "documented 60-min gen phase ceiling" that run logs disprove (media capture
+# is ~2 min; the long pole is lock WAIT, which doesn't hold the lock), and
+# during the Chrome 150 crash-storm the 90-min heal lost the race against a
+# roughly-hourly wedge cadence, leaving the pipeline down all night
+# (2026-07-13). Heartbeat is touched on attach and every page network event,
+# so any healthy browser hold stays fresh; 15 min of zero activity while
+# peers queue is a wedge. The 2026-07-12 lock.sh signal fix makes the TERM
+# safe: the holder releases its locks and exits instead of continuing
+# lock-protected work.
+# ONLY the heartbeat-instrumented platforms. linkedin-browser holders write no
+# heartbeat (the linkedin pipeline drives Chrome via the bh harness, not a
+# shared python lib), so on pid-file age alone a healthy long linkedin run
+# would be indistinguishable from a wedge — add it here only once its driver
+# touches <lock_dir>/heartbeat too.
+BROWSER_LOCKS_WATCHED = (
+    "/tmp/social-autoposter-twitter-browser.lock",
+    "/tmp/social-autoposter-reddit-browser.lock",
+)
+HB_WARN_SEC = 10 * 60
+HB_KILL_SEC = 15 * 60
+HB_REWARN_SEC = 10 * 60  # re-log the warning at most this often per holder
 # Per-script cap overrides for pipelines that legitimately run longer than
 # the 45 min global (stats.py over ~4-5k posts + rate-limit sleeps).
 # Key is (script_file, platform_or_None). Lookup order: (script, platform),
@@ -75,15 +117,15 @@ PER_SCRIPT_CAP_SEC = {
     # MAX_AB_HITS_PER_CYCLE cap (4), gen phase now has a 60min worst-case
     # ceiling, leaving 120min for scan + T1 sleep + prep + post.
     ("run-twitter-cycle.sh", None): 180 * 60,
-    # 2026-05-28: launchd spawns the singleton WRAPPER, not the inner cycle, so
-    # the wrapper is the ppid==1 process main() matches; the inner cycle is its
-    # child (ppid != 1) and gets skipped. Without this entry the wrapper fell back
-    # to the 45 min global and killed healthy Variant-A cycles (20 min ripen sleep
-    # + scan + draft + gen + post routinely exceed 45 min) mid-Phase-2b, stamped
-    # phase2b_silent. Mirror the inner cycle's 180 min cap. The
-    # ("run-twitter-cycle.sh", None) entry above is now effectively unreachable but
-    # kept for clarity / in case the wrapper is ever bypassed.
-    ("run-twitter-cycle-singleton.sh", None): 180 * 60,
+    # 2026-07-06: launchd now spawns run-draft-and-publish.sh (the queue-lane
+    # driver) as the ppid==1 process main() matches; the inner run-twitter-cycle.sh
+    # is its child (ppid != 1) and gets skipped. Without an entry for the wrapper it
+    # falls back to the 45 min global and can SIGKILL a healthy cycle (scan + draft
+    # + post routinely exceed 45 min) mid-run. Mirror the inner cycle's 180 min cap.
+    # Replaces the retired run-twitter-cycle-singleton.sh entry (that old launchd
+    # wrapper + its run-cycle-update-guard.sh were deleted 2026-07-06). The
+    # ("run-twitter-cycle.sh", None) entry above stays as a clarity fallback.
+    ("run-draft-and-publish.sh", None): 180 * 60,
     ("run-linkedin.sh", None): 120 * 60,
     ("run-moltbook.sh", None): 120 * 60,
     ("run-github.sh", None): 120 * 60,
@@ -115,9 +157,9 @@ SHARED_SCRIPT_PREFIX = {
 
 SCRIPT_LABELS = {
     "run-twitter-cycle.sh": "post_twitter",
-    # 2026-05-28: wrapper is the launchd-parented process now; label its kills
-    # under the same post_twitter dashboard row as a normal cycle.
-    "run-twitter-cycle-singleton.sh": "post_twitter",
+    # wrapper is the launchd-parented process now; label its kills under the same
+    # post_twitter dashboard row as a normal cycle.
+    "run-draft-and-publish.sh": "post_twitter",
     "run-linkedin.sh": "post_linkedin",
     "run-moltbook.sh": "post_moltbook",
     "run-reddit-threads.sh": "post_reddit",
@@ -184,12 +226,12 @@ def list_skill_shell_processes():
             ppid = int(ppid_s)
         except ValueError:
             continue
-        if SKILL_PATH_MARKER not in command:
+        if not any(m in command for m in SKILL_PATH_MARKERS):
             continue
         script_name = None
         tokens = command.split()
         for tok in tokens:
-            if tok.endswith(".sh") and SKILL_PATH_MARKER in tok:
+            if tok.endswith(".sh") and any(m in tok for m in SKILL_PATH_MARKERS):
                 script_name = os.path.basename(tok)
                 break
         if not script_name:
@@ -317,6 +359,83 @@ def emit_job_log(label, elapsed_sec):
     )
 
 
+def _holder_cmdline(pid: int) -> str:
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        return out[:200]
+    except Exception:
+        return ""
+
+
+def check_browser_lock_liveness() -> None:
+    """L2: TERM a live *-browser lock holder whose liveness heartbeat has gone
+    stale for HB_KILL_SEC while peers wait. See the constants block up top."""
+    now = time.time()
+    for lock_dir in BROWSER_LOCKS_WATCHED:
+        if not os.path.isdir(lock_dir):
+            continue
+        try:
+            with open(os.path.join(lock_dir, "pid")) as f:
+                holder = int((f.read().strip() or "0"))
+        except (OSError, ValueError):
+            continue
+        if holder <= 0:
+            continue
+        try:
+            os.kill(holder, 0)  # liveness probe only
+        except ProcessLookupError:
+            continue  # dead holder: acquire_lock's dead_pid reclaim owns this
+        except OSError:
+            continue
+        # Last liveness = freshest of the heartbeat (browser libs) and the pid
+        # file (stamped at acquire), so a just-acquired lock is never "stale".
+        marks = []
+        for name in ("heartbeat", "pid"):
+            try:
+                marks.append(os.path.getmtime(os.path.join(lock_dir, name)))
+            except OSError:
+                pass
+        if not marks:
+            continue
+        stale = now - max(marks)
+        if stale < HB_WARN_SEC:
+            continue
+        try:
+            waiters = len(os.listdir(f"{lock_dir}.queue"))
+        except OSError:
+            waiters = 0
+        lock_name = os.path.basename(lock_dir)
+        if stale >= HB_KILL_SEC and waiters >= 1:
+            cmd = _holder_cmdline(holder)
+            watchdog_log(
+                f"KILL-STALE-HOLDER {lock_name} pid={holder} heartbeat_stale={int(stale)}s "
+                f"waiters={waiters} cmd={cmd!r}"
+            )
+            killed = kill_tree(holder)
+            watchdog_log(f"  killed pids: {killed}")
+            continue
+        # Warn tier: log-only, rate-limited via a marker inside the lock dir
+        # (dies with the lock, so each hold re-warns independently).
+        marker = os.path.join(lock_dir, "hb-warned")
+        try:
+            if now - os.path.getmtime(marker) < HB_REWARN_SEC:
+                continue
+        except OSError:
+            pass
+        try:
+            with open(marker, "w") as f:
+                f.write(str(int(now)))
+        except OSError:
+            pass
+        watchdog_log(
+            f"WARN-STALE-HOLDER {lock_name} pid={holder} heartbeat_stale={int(stale)}s "
+            f"waiters={waiters} cmd={_holder_cmdline(holder)!r}"
+        )
+
+
 def main() -> None:
     procs = list_skill_shell_processes()
     for pid, ppid, etimes, script_file, platform in procs:
@@ -337,6 +456,7 @@ def main() -> None:
             watchdog_log(f"  script trap already logged {label} — skipping watchdog emit")
         else:
             emit_job_log(label, etimes)
+    check_browser_lock_liveness()
 
 
 if __name__ == "__main__":

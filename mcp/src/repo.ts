@@ -2,7 +2,7 @@
 // This MCP is a THIN client: it shells out to the existing pipeline scripts in
 // the social-autoposter repo and never reimplements pipeline logic.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 // The pipeline repo the wrapper shells out to. Resolved DYNAMICALLY per call (a
 // getter, not a load-time const) because a bare .mcpb double-click materializes
 // the repo AFTER the server boots; the very next shell-out must pick it up
-// without a restart. resolveRepoDir() prefers a real SAPS_REPO_DIR clone, then
+// without a restart. resolveRepoDir() prefers a real S4L_REPO_DIR clone, then
 // the materialized repo recorded in runtime.json, then a dev fallback.
 export function repoDir(): string {
   return resolveRepoDir();
@@ -24,7 +24,7 @@ export function repoDir(): string {
 // const) because the owned uv runtime can be provisioned AFTER the server boots
 // — the first-run installer writes runtime.json and the very next runPython
 // call must pick up the owned interpreter without a server restart.
-// resolvePython() prefers the owned runtime, then SAPS_PYTHON, then python3.
+// resolvePython() prefers the owned runtime, then S4L_PYTHON, then python3.
 
 // The locked pipeline script (run-twitter-cycle.sh) writes the draft plan to a
 // HARDCODED /tmp path (`PLAN_FILE="/tmp/twitter_cycle_plan_<batch>.json"`), and the
@@ -34,12 +34,47 @@ export function repoDir(): string {
 // which silently stranded every draft and made draft_cycle always report
 // "No drafts in batch ...". Default to /tmp to match the script; allow an explicit
 // override for non-standard installs.
-export const TMP_DIR = process.env.SAPS_TMP_DIR || "/tmp";
+export const TMP_DIR = process.env.S4L_TMP_DIR || "/tmp";
 
 export interface RunResult {
   code: number;
   stdout: string;
   stderr: string;
+}
+
+// ---- Raw-line telemetry sink -----------------------------------------------
+// Every subprocess (locked pipeline scripts included) flows through run(), so
+// this is the ONE boundary where we can tee the verbatim stdout/stderr stream
+// off-box for troubleshooting. telemetry.ts registers a sink here at boot; when
+// none is registered (default, dev, or S4L_LOG_STREAM=0) the tee is a no-op.
+// The sink must never throw and must never block the child's I/O — it only
+// buffers a line in memory.
+export type LineSink = (
+  line: string,
+  stream: "stdout" | "stderr",
+  context: string
+) => void;
+
+let lineSink: LineSink | null = null;
+
+export function setLineSink(fn: LineSink | null): void {
+  lineSink = fn;
+}
+
+// Derive a short, stable context label for a spawned command so log lines can
+// be grouped by which script produced them (e.g. "scripts/seed_search_topics.py",
+// "skill/run-twitter-cycle.sh"). Best-effort; never throws.
+function deriveContext(cmd: string, args: string[]): string {
+  try {
+    const base = cmd.split("/").pop() || cmd;
+    if (/python/i.test(base) || base === "bash" || base === "sh" || base === "node") {
+      const first = args.find((a) => !a.startsWith("-"));
+      if (first) return first;
+    }
+    return [base, args[0] ?? ""].join(" ").trim();
+  } catch {
+    return cmd;
+  }
 }
 
 // Spawn a process inside the repo, inheriting the repo env (API base + keys
@@ -57,7 +92,20 @@ export function run(
     cwd?: string;
     timeoutMs?: number;
     env?: NodeJS.ProcessEnv;
+    // Optional override for the telemetry context label (defaults to a value
+    // derived from cmd/args). Callers can set a friendlier name (e.g. the tool
+    // that invoked the run) without changing the line stream itself.
+    logContext?: string;
+    // Suppress teeing this command's stdout/stderr to the Cloud Logging relay.
+    // For high-volume status probes (e.g. `launchctl list`) whose output is a
+    // big useless dump — they still return stdout to the caller in-memory, they
+    // just don't flood Cloud Logging. Buffered stdout/stderr are unaffected.
+    noTee?: boolean;
     onLine?: (line: string, stream: "stdout" | "stderr") => void;
+    // Hands the spawned child to the caller so a long-running job (e.g. a scan)
+    // can be aborted out-of-band — used to preempt an in-flight scan when the
+    // user approves a post (posting takes the browser immediately).
+    onSpawn?: (child: ChildProcess) => void;
   } = {}
 ): Promise<RunResult> {
   return new Promise((resolve) => {
@@ -65,6 +113,11 @@ export function run(
       cwd: opts.cwd || repoDir(),
       env: { ...process.env, ...(opts.env || {}) },
     });
+    try {
+      opts.onSpawn?.(child);
+    } catch {
+      /* a spawn observer must never break the run */
+    }
     let stdout = "";
     let stderr = "";
     // Per-stream partial-line buffers so onLine fires on whole lines only,
@@ -86,6 +139,27 @@ export function run(
       }
       return buf;
     };
+    // Parallel whole-line splitter that tees to the telemetry sink (if any),
+    // kept separate from the onLine pump so neither path can affect the other.
+    const logCtx = opts.logContext || deriveContext(cmd, args);
+    let sinkOutBuf = "";
+    let sinkErrBuf = "";
+    const sinkPump = (chunk: string, which: "stdout" | "stderr", buf: string): string => {
+      const sink = opts.noTee ? null : lineSink;
+      if (!sink) return buf;
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        try {
+          sink(line, which, logCtx);
+        } catch {
+          /* the telemetry sink must never break the wrapped command */
+        }
+      }
+      return buf;
+    };
     let timer: NodeJS.Timeout | undefined;
     if (opts.timeoutMs) {
       timer = setTimeout(() => {
@@ -96,11 +170,13 @@ export function run(
       const s = d.toString();
       stdout += s;
       outBuf = pump(s, "stdout", outBuf);
+      sinkOutBuf = sinkPump(s, "stdout", sinkOutBuf);
     });
     child.stderr.on("data", (d) => {
       const s = d.toString();
       stderr += s;
       errBuf = pump(s, "stderr", errBuf);
+      sinkErrBuf = sinkPump(s, "stderr", sinkErrBuf);
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
@@ -119,6 +195,21 @@ export function run(
             /* ignore */
           }
       }
+      const sink = opts.noTee ? null : lineSink;
+      if (sink) {
+        if (sinkOutBuf)
+          try {
+            sink(sinkOutBuf, "stdout", logCtx);
+          } catch {
+            /* ignore */
+          }
+        if (sinkErrBuf)
+          try {
+            sink(sinkErrBuf, "stderr", logCtx);
+          } catch {
+            /* ignore */
+          }
+      }
       resolve({ code: code ?? -1, stdout, stderr });
     });
     child.on("error", (err) => {
@@ -131,7 +222,15 @@ export function run(
 export function runPython(
   scriptRelPath: string,
   args: string[],
-  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}
+  opts: {
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+    // Pass-throughs to run(): onLine lets callers stream a python script's output
+    // live (e.g. the poster, so handled failures surface in main.log + telemetry
+    // instead of staying buffered); onSpawn hands back the child for preemption.
+    onLine?: (line: string, stream: "stdout" | "stderr") => void;
+    onSpawn?: (child: ChildProcess) => void;
+  } = {}
 ): Promise<RunResult> {
   return run(resolvePython(), [scriptRelPath, ...args], opts);
 }
@@ -150,12 +249,46 @@ export interface PlanCandidate {
   engagement_style?: string;
   link_url?: string;
   link_keyword?: string;
+  matched_project?: string;
   search_topic?: string;
   language?: string;
   approved?: boolean;
   // Set true once this candidate has actually been posted, so the two review
   // surfaces (chat + menu-bar pop-ups) can't post the same draft twice.
   posted?: boolean;
+  // Set once the poster reached a terminal non-post outcome (dedup, deleted
+  // tweet, no reply URL captured, etc.). Kept separate from posted so reporting
+  // can stay honest while review cards stop re-offering dead drafts.
+  terminal?: boolean;
+  terminal_reason?: string;
+  // Approved but the post attempt errored (post_error says why). Stamped by the
+  // menubar (store_mark_post_failed) and cleared by a fresh approval or a posted
+  // outcome. Read through candidateState() in index.ts — never raw.
+  post_failed?: boolean;
+  post_error?: string;
+  // Count of post attempts that ended in a transient "failed" outcome. Sticky
+  // approved cards retry across drains; when this reaches the give-up bound
+  // (see MAX_POST_ATTEMPTS in index.ts) the card flips terminal instead of
+  // retrying forever (2026-07-17: unbounded stickiness is how a single card
+  // retried 438 times over 5 days on the Nhat install).
+  post_attempts?: number;
+  our_url?: string;
+  // Two-draft cards (2026-07-07; no-recommendation pass 2026-07-08): a
+  // fresh candidate carries both drafts (one per assigned engagement style
+  // this cycle). The model doesn't rank them, the card defaults to Draft A
+  // (index 0) and the reviewer's own click can switch to Draft B. Absent on
+  // reused/stale-draft candidates and legacy plans, the card then falls
+  // back to the single-draft UI driven by reply_text/engagement_style
+  // above. assigned_style/assigned_mode per draft feed twitter_post_plan.py's
+  // per-candidate drift-coercion override.
+  drafts?: Array<{
+    variant: "a" | "b";
+    text: string;
+    style?: string;
+    text_en?: string | null;
+    assigned_style?: string | null;
+    assigned_mode?: string | null;
+  }>;
   [k: string]: unknown;
 }
 
@@ -203,36 +336,4 @@ export function latestBatchId(): string | null {
     }))
     .sort((a, b) => b.mtime - a.mtime);
   return matches.length ? matches[0].batchId : null;
-}
-
-// ---- Scan/draft split helpers (Desktop-session autopilot) ------------------
-// scan_candidates runs the pipeline in SCAN_ONLY mode (scan -> score -> select)
-// and the cycle writes the chosen candidates as JSON to scanResultPath(batchId).
-// A Claude Desktop scheduled-task session reads them, drafts replies ITSELF (on
-// the user's plan — no `claude -p`), then hands them back via submit_drafts,
-// which writes the SAME plan file draft_cycle / post_drafts / the menu bar use.
-
-export interface ScanCandidate {
-  id: number;
-  tweet_url: string;
-  author_handle: string;
-  tweet_text: string;
-  virality_score: number;
-  delta_score: number;
-  matched_project: string;
-  search_topic: string;
-  likes: number;
-  retweets: number;
-  replies: number;
-  views: number;
-  author_followers: number;
-  age_hours: number;
-  existing_draft?: string;
-  existing_draft_style?: string;
-}
-
-// Hardcoded under TMP_DIR to mirror the cycle script's SCAN_ONLY writer (same
-// coupling planPath has: run-twitter-cycle.sh writes the file to /tmp directly).
-export function scanResultPath(batchId: string): string {
-  return path.join(TMP_DIR, `saps_scan_candidates_${batchId}.json`);
 }

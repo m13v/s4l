@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>S4L — Add your product</title>
+  </head>
+  <body>
+    <main class="pl-wrap">
+      <header class="pl-head">
+        <h1 class="pl-title">Add your product</h1>
+        <p class="pl-sub" id="pl-sub">Paste the link to your product so S4L knows what to post about.</p>
+      </header>
+
+      <form class="pl-form" id="pl-form" novalidate>
+        <label class="pl-label" for="pl-url">Product website</label>
+        <input
+          class="pl-input"
+          id="pl-url"
+          type="url"
+          inputmode="url"
+          autocomplete="url"
+          spellcheck="false"
+          placeholder="https://yourproduct.com"
+        />
+
+        <button class="pl-btn primary" id="pl-submit" type="submit">Save product</button>
+      </form>
+
+      <div class="pl-status" id="pl-status" hidden></div>
+      <div class="pl-log" id="pl-log"></div>
+    </main>
+    <script type="module" src="./product-link.ts"></script>
+  </body>
+</html>

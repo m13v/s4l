@@ -33,32 +33,36 @@ if not DATABASE_URL:
 # (email, admin, projects, name, notes)
 # Project names MUST match config.json casing exactly. The auth layer matches
 # claim values against posts.project_name via SQL IN, which is case-sensitive.
-SEED = [
+#
+# The real client roster contains customer PII (names, emails, retainer terms),
+# so it is NOT committed. It lives in the gitignored file
+# `scripts/dashboard_users_seed.local.json` as a JSON array of
+# [email, admin, projects, name, notes] rows. The placeholder below only
+# documents the shape; populate the local JSON to seed real users.
+import json
+
+_SEED_LOCAL = Path(__file__).resolve().parent / "dashboard_users_seed.local.json"
+
+_PLACEHOLDER_SEED = [
     (
-        "i@m13v.com", True, [], "Matthew Diakonov",
-        "Operator account (admin). Sees all projects, receives unscoped master daily report.",
+        "admin@example.com", True, [], "Operator Name",
+        "Admin account. Sees all projects, receives unscoped master daily report.",
     ),
     (
-        "ethan@piastech.com", False, ["fde10x", "Assrt"], "Ethan",
-        "Pre-existing client (provisioned 2026-04-21).",
-    ),
-    (
-        "liam.collins@proxis.ai", False, ["c0nsl"], "Liam Collins",
-        "Pre-existing client (provisioned 2026-04-21). uid 5Vf0uLKuDya3zS79u59EnUz9Pjw2.",
-    ),
-    (
-        "kent@runner.now", False, ["Runner", "Agora", "Podlog"], "Kent Fenwick",
-        "Founder of Runner/Agora/Podlog. Owns all three; one login, three projects.",
-    ),
-    (
-        "gurbaz@getpieline.com", False, ["PieLine"], "Gurbaz Dhillon",
-        "PieLine founder.",
-    ),
-    (
-        "medewanouleonce@gmail.com", False, ["NightOwl"], "Leonce Medewanou",
-        "NightOwl founder (github lemed99).",
+        "client@example.com", False, ["ProjectName"], "Client Name",
+        "Example client row. Real roster lives in dashboard_users_seed.local.json.",
     ),
 ]
+
+if _SEED_LOCAL.exists():
+    SEED = [tuple(row) for row in json.loads(_SEED_LOCAL.read_text())]
+else:
+    print(
+        f"WARNING: {_SEED_LOCAL.name} not found; using placeholder rows only. "
+        "Create it (JSON array of [email, admin, projects, name, notes]) to seed real users.",
+        file=sys.stderr,
+    )
+    SEED = _PLACEHOLDER_SEED
 
 
 def main():

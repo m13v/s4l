@@ -145,6 +145,10 @@ VALID_SIGNALS = {
     "session_invalid_marker",
     "captcha_detected",
     "manual",
+    # Deliberate pause from scripts/linkedin_cadence.py (4-active-days /
+    # 2-day-break schedule). Not an incident: recover-check must never try to
+    # auto-recover it, and engage() should never email on it.
+    "scheduled_break",
 }
 
 
@@ -853,12 +857,12 @@ def _cmd_detect_gate(args):
         print("detect-gate: inconclusive ({}), proceeding".format(detail), file=sys.stderr)
         sys.exit(0)
     # Conclusively logged out. Trip the killswitch for the whole fleet.
-    run_log_path = os.environ.get("SAPS_RUN_LOG_PATH", "")
+    run_log_path = os.environ.get("S4L_RUN_LOG_PATH", "")
     engage(
         signal="login_redirect",
         detail="detect-gate: {}".format(detail),
         run_log_path=run_log_path,
-        extra={"detected_by": os.environ.get("SAPS_PIPELINE_NAME", "?"), "probe": "feed_only"},
+        extra={"detected_by": os.environ.get("S4L_PIPELINE_NAME", "?"), "probe": "feed_only"},
         send_email=not args.no_email,
     )
     print(
@@ -880,6 +884,29 @@ def _hold_check_due_seconds():
     return (datetime.now(timezone.utc) - due).total_seconds()
 
 
+def _cadence_break_active():
+    """True while scripts/linkedin_cadence.py has us in a scheduled break.
+
+    Reads the cadence state file directly (no import of linkedin_cadence, to
+    avoid a circular import — linkedin_cadence imports this module). Recovery
+    must never attempt a real login or hold-check re-probe during a break,
+    REGARDLESS of which signal put the killswitch file in place: an
+    already-active real block (e.g. login_redirect) at the moment a break
+    starts must NOT get its 24h auto-recovery clock honored mid-break. The
+    2026-07-12 incident (a real hard_block login attempt fired during an
+    active cadence break) is exactly what this guards against."""
+    path = os.path.expanduser(
+        os.environ.get(
+            "LINKEDIN_CADENCE_FILE", os.path.join(STATE_DIR, "linkedin_cadence.json")
+        )
+    )
+    try:
+        with open(path, "r") as f:
+            return json.load(f).get("phase") == "break"
+    except Exception:
+        return False
+
+
 def _cmd_recover_check(args):
     """Gate for the hourly recovery job. Exits 0 when there is work to do and
     prints the MODE on stdout so the shell knows which path to drive:
@@ -893,6 +920,22 @@ def _cmd_recover_check(args):
     terminal, too young, or still inside an unelapsed hold window)."""
     if not is_active():
         print("recover-check: killswitch not active, nothing to recover", file=sys.stderr)
+        sys.exit(1)
+    if _cadence_break_active():
+        print(
+            "recover-check: cadence break active (scripts/linkedin_cadence.py); "
+            "suppressing ALL real recovery action (login/hold) regardless of "
+            "signal until the break ends, per 'stop all activity for 2 days'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    payload = read() or {}
+    if payload.get("signal") == "scheduled_break":
+        print(
+            "recover-check: scheduled_break active (cadence pause, not a real "
+            "incident); deferring to scripts/linkedin_cadence.py, not probing",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if is_terminal():
         print(

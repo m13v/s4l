@@ -33,7 +33,7 @@ RUN_START_EPOCH=$(date +%s)
 # calls added in 5e41d96 (2026-05-10) fall through to macOS /usr/bin/log,
 # which barfs `Unknown subcommand` and ERR-traps the run at exit=64 before
 # the browser lease is ever acquired (silent kill since 2026-05-10).
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 # Diagnostic: log the failing line and command before set -e kills the script.
 # Without this, silent deaths (e.g., Claude exits non-zero inside the $() below)
@@ -51,18 +51,18 @@ acquire_lock "reddit-threads" 600
 
 # Load engagement styles.
 # 2026-05-25: switched from generate_styles_block (which throws away the
-# picker assignment) to the explicit saps_pick_style + saps_render_style_block
+# picker assignment) to the explicit s4l_pick_style + s4l_render_style_block
 # pair. PICKED_STYLE/PICK_MODE flow into the DB-insert heredoc below as env
 # vars so validate_or_register can coerce USE-mode drift back to the assigned
 # style, matching post_reddit.py / twitter_post_plan.py / post_github.py
 # semantics. Without this, the prompt's "pick from the list" instruction is
 # unenforced and any drifted/invented name silently lands in posts.engagement_style.
 source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_reddit_threads_style_XXXXXX.json)
-saps_pick_style reddit posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_reddit_threads_style_XXXXXX.json)
+s4l_pick_style reddit posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
 PICKED_STYLE=$(/usr/bin/python3 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('style') or '')" 2>/dev/null || echo "")
 PICK_MODE=$(/usr/bin/python3 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('mode','')) " 2>/dev/null || echo "")
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" reddit posting)
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" reddit posting)
 echo "engagement_style: picked='${PICKED_STYLE}' mode='${PICK_MODE}'" | tee -a "$LOG_FILE"
 
 # RETRY-FROM-PENDING (added 2026-05-01 after r/AutoHotkey MCP-crash incident):
@@ -225,6 +225,15 @@ RECENT_STYLES=$(python3 "$RT_HELPER" recent-styles --project "$PROJECT" --limit 
 # Top performers (tone calibration)
 TOP_POSTS=$(python3 "$RT_HELPER" top-posts --project "$PROJECT" --min-score 5 --limit 10 2>/dev/null || echo "(api error)")
 
+# Past moderation verdicts for THIS sub (strike feedback loop, 2026-07-19).
+# Pulls platform_removed/platform_banned events from the review_events ledger,
+# including the mod team's stated removal reasons captured at strike time by
+# platform_strike_events.py. Injected into the prompt so the rules-check step
+# is calibrated by what these mods ACTUALLY removed, not just the rules page.
+# Critical after a 30-day quarantine expires: the retry must not repeat the
+# removed pattern. Empty when the sub has no history (helper prints nothing).
+MOD_HISTORY=$(python3 "$REPO_DIR/scripts/sub_moderation_history.py" "$SUB_SLUG" --max 6 2>/dev/null || true)
+
 if [ "$IS_OWN" = "True" ]; then
   CADENCE_NOTE="This is our OWNED subreddit. Daily cadence (1-day floor). Be yourself, no product pitches."
 else
@@ -256,8 +265,11 @@ export CLAUDE_SESSION_ID=$(uuidgen | tr 'A-Z' 'a-z')
 log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
-if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
-    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    log "WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 
@@ -376,6 +388,8 @@ ${RECENT_STYLES}
 ## Top performing ${PROJECT} posts (match tone/style)
 ${TOP_POSTS}
 
+${MOD_HISTORY}
+
 ## Workflow
 
 1. RESEARCH (required): Read the product source paths listed in the context block. Specifically:
@@ -411,6 +425,7 @@ ${TOP_POSTS}
 
 5. SUBREDDIT RULES CHECK (bh_run: goto_url to https://old.reddit.com/${SUBREDDIT}/about/rules + wait_for_load)
    - If strict no-self-promo and our post would read promotional, ABORT. Set abort_reason and permalink=null.
+   - If a PAST MODERATION VERDICTS section appears above: those are this sub's mods rejecting our actual posts. Their stated reasons define off-topic for this sub and OVERRIDE your own reading of the rules page. If your draft fits a removed pattern, ABORT rather than post a variation.
    - Note whether flair is required.
 
    PERMANENT_BLOCK DECISION (always set this field):
@@ -556,7 +571,7 @@ account   = os.environ.get("POST_ACCOUNT", "")
 pending_id_str = os.environ.get("PENDING_ID_ENV", "")
 
 # 2026-05-25: validate_or_register pass. The picker assignment (PICKED_STYLE +
-# PICK_MODE) is sourced from the shell-level saps_pick_style call near the top
+# PICK_MODE) is sourced from the shell-level s4l_pick_style call near the top
 # of this script. USE mode coerces drift back to the assigned style; INVENT
 # mode registers the new_style block (if the model shipped one) into
 # engagement_styles_registry via /api/v1/engagement-styles/registry. Without

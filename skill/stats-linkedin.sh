@@ -55,7 +55,7 @@ set -euo pipefail
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -81,11 +81,11 @@ SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
 MAX_SCROLLS=400           # 2026-05-28 set to 400 per user direction; natural stagnant>=8 bail should fire well before this (~tick 150). Safety ceiling, not target. Previous: 300 (auto-commit) <- 1000 (runaway 2026-05-27).
-SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via SAPS_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
+SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via S4L_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/stats-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== LinkedIn Stats Run (unified): $(date) ==="
@@ -137,7 +137,17 @@ acquire_lock "linkedin-browser" 1800
 # Probe + launch harness Chrome idempotently if it's down. Safe to call under
 # the linkedin-browser lock; harness CDP supports concurrent clients on the
 # same profile so no SingletonLock fight.
-ensure_linkedin_browser_for_backend
+# rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+# Chrome); convert to clean exit 0 here in the parent shell.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 
 # 2. Run the headed-Chromium scraper (single scrape, shared between writers).
 log "Launching headed Chromium scraper..."

@@ -33,10 +33,88 @@ import sys
 import time
 from urllib.parse import urlparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from browser_mutex import BrowserMutex
+
 
 def _default_cdp_url():
     return os.environ.get("REDDIT_CDP_URL", "http://127.0.0.1:9557").strip() \
         or "http://127.0.0.1:9557"
+
+
+_POSTING_FLAG = os.path.join(
+    os.path.expanduser(os.environ.get("S4L_STATE_DIR") or "~/.social-autoposter-mcp"),
+    "reddit-posting-active.json",
+)
+_POSTING_FRESH_S = 120
+_POSTING_YIELD_MAX_S = 300
+
+
+def _yield_to_poster():
+    """Posting owns the ONE shared harness tab (2026-07-14). Every reader
+    fetch navigates the tab to the reddit host root, which is exactly what
+    yanked the tab out from under mid-post drains (the tab_contention /
+    false account_blocked_in_sub family). A fresh reddit-posting-active.json
+    (heartbeated per row by post_reddit.py) means a poster is mid-drain:
+    WAIT for it instead of navigating, bounded so a stale flag can never
+    starve discovery/stats (they just run a few minutes later)."""
+    deadline = time.time() + _POSTING_YIELD_MAX_S
+    waited = False
+    while time.time() < deadline:
+        try:
+            age = time.time() - os.path.getmtime(_POSTING_FLAG)
+        except OSError:
+            break  # no flag -> no poster
+        if age >= _POSTING_FRESH_S:
+            break  # stale flag -> dead poster; never blocks readers
+        waited = True
+        time.sleep(5)
+    if waited:
+        sys.stderr.write("[reddit_browser_fetch] yielded to active poster\n")
+
+
+# ---- browser-session mutex (2026-07-15) -------------------------------------
+# Overlapping run-reddit-search.sh cycles are BY DESIGN (the "double-fork
+# wrapper" in that script deliberately lets cycles stack when one runs longer
+# than the 15-min launchd interval, which is routine — cycles regularly take
+# 20-40 min). Every one of those cycles' discover-phase fetches calls
+# browser_get_json, and until now nothing serialized them: two concurrent
+# calls both reuse the SAME harness tab (see the tab-reuse comment below), so
+# one call's page.goto() destroys the other's in-flight page.evaluate()
+# execution context ("Execution context was destroyed, most likely because
+# of a navigation" / "TypeError: Failed to fetch"). That failure returns
+# (None, 0), the caller falls back to urllib, and urllib has been 403'd by
+# Reddit's bot wall since 2026-05-28 — so what looks like "Reddit blocked us"
+# is actually two of our own readers racing each other.
+#
+# reddit_browser.py (posting) already fixed this class of bug for itself via
+# scripts/browser_mutex.py (twitter's proven mutex, parameterized) — same
+# lock_file, same JSON shape, so this shares that lock domain rather than
+# adding a fourth divergent one. Role defaults to "scan" (a read), matching
+# every other reader; BrowserMutex's own env read means an actual role="post"
+# caller would still inherit posting priority automatically.
+_LOCK_FILE = os.path.expanduser("~/.claude/reddit-agent-lock.json")
+_MUTEX = BrowserMutex(
+    lock_file=_LOCK_FILE,
+    label="Reddit browser",
+    lock_expiry=300,
+    wait_max=45,
+    poll_interval=2,
+)
+
+
+def _acquire_fetch_lock() -> bool:
+    """True if the tab is ours. BrowserMutex.acquire() prints a JSON error and
+    sys.exit(1)s on contention timeout — correct for a CLI entrypoint like
+    reddit_browser.py's own callers, but browser_get_json is a library call
+    nested inside reddit_tools.py/post_reddit.py and must degrade to its
+    documented (None, 0) contract instead of killing the caller process."""
+    try:
+        _MUTEX.acquire()
+        return True
+    except SystemExit:
+        sys.stderr.write("[reddit_browser_fetch] tab lock contended; skipping this fetch\n")
+        return False
 
 
 def browser_get_json(url, cdp_url=None, timeout_ms=25000):
@@ -45,6 +123,7 @@ def browser_get_json(url, cdp_url=None, timeout_ms=25000):
     Returns (body_str_or_None, http_status_int). On any transport/connect
     failure returns (None, 0) so the caller can fall back to urllib.
     """
+    _yield_to_poster()
     cdp_url = (cdp_url or _default_cdp_url())
     try:
         from playwright.sync_api import sync_playwright
@@ -56,73 +135,81 @@ def browser_get_json(url, cdp_url=None, timeout_ms=25000):
     host = parsed.netloc or "www.reddit.com"
     host_root = f"{parsed.scheme or 'https'}://{host}/"
 
-    with sync_playwright() as p:
-        browser = None
-        page = None
-        try:
-            browser = p.chromium.connect_over_cdp(cdp_url)
-            if not browser.contexts:
-                sys.stderr.write("[reddit_browser_fetch] no CDP contexts on harness\n")
-                return None, 0
-            ctx = browser.contexts[0]
-            # Reuse an existing tab instead of new_page() on every fetch. new_page()
-            # steals OS focus each call (there are many discovery fetches per cycle,
-            # so this churned the user's focus constantly); navigating a background
-            # tab does not. Prefer a tab already on reddit.com; else pages[0]; else
-            # create one. Mirrors reddit_browser / twitter_browser tab reuse. The
-            # page is left OPEN for the next fetch (cleanup_harness_tabs trims to one
-            # at cycle start).
+    # Tab access is mutex-protected (2026-07-15, see _MUTEX above): everything
+    # from tab selection through the evaluate retries must be atomic relative
+    # to every other concurrent fetch, since they all share the ONE reused tab.
+    if not _acquire_fetch_lock():
+        return None, 0
+    try:
+        with sync_playwright() as p:
+            browser = None
             page = None
-            for pg in ctx.pages:
-                if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
-                    page = pg
-                    break
-            if page is None and ctx.pages:
-                page = ctx.pages[0]
-            if page is None:
-                page = ctx.new_page()
-            # Load the matching host root so the subsequent fetch() is same-origin
-            # (no CORS between www/old) and carries the logged-in session.
             try:
-                page.goto(host_root, wait_until="load", timeout=timeout_ms)
-            except Exception:
-                pass  # partial load is fine; we just need an active reddit origin
-            # Same-origin fetch with a couple retries — reddit.com sometimes does a
-            # client redirect on first load that destroys the execution context.
-            js = (
-                "async (u) => {"
-                "  const r = await fetch(u, {credentials:'include',"
-                "                            headers:{'Accept':'application/json'}});"
-                "  const t = await r.text();"
-                "  return {status: r.status, body: t};"
-                "}"
-            )
-            last_err = None
-            for attempt in range(3):
+                browser = p.chromium.connect_over_cdp(cdp_url)
+                if not browser.contexts:
+                    sys.stderr.write("[reddit_browser_fetch] no CDP contexts on harness\n")
+                    return None, 0
+                ctx = browser.contexts[0]
+                # Reuse an existing tab instead of new_page() on every fetch. new_page()
+                # steals OS focus each call (there are many discovery fetches per cycle,
+                # so this churned the user's focus constantly); navigating a background
+                # tab does not. Prefer a tab already on reddit.com; else pages[0]; else
+                # create one. Mirrors reddit_browser / twitter_browser tab reuse. The
+                # page is left OPEN for the next fetch (cleanup_harness_tabs trims to one
+                # at cycle start).
+                page = None
+                for pg in ctx.pages:
+                    if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
+                        page = pg
+                        break
+                if page is None and ctx.pages:
+                    page = ctx.pages[0]
+                if page is None:
+                    page = ctx.new_page()
+                # Load the matching host root so the subsequent fetch() is same-origin
+                # (no CORS between www/old) and carries the logged-in session.
                 try:
-                    res = page.evaluate(js, url)
-                    status = int(res.get("status", 0))
-                    body = res.get("body") or ""
-                    if status != 200:
-                        return None, status
-                    return body, status
-                except Exception as e:
-                    last_err = e
-                    time.sleep(2.0)  # let a redirect settle, then retry
-            sys.stderr.write(f"[reddit_browser_fetch] evaluate failed after retries: {last_err}\n")
-            return None, 0
-        except Exception as e:
-            sys.stderr.write(f"[reddit_browser_fetch] error: {e}\n")
-            return None, 0
-        finally:
-            # Do NOT close the page: it is a REUSED tab, and closing it forces the
-            # next fetch to new_page() which steals OS focus. Leaving it open lets
-            # the next fetch reuse it (cleanup_harness_tabs trims to one at cycle
-            # start). Also never close the connect_over_cdp browser/context: that can
-            # terminate the real harness Chrome (see reddit_browser.py warning). The
-            # sync_playwright() context exit disconnects the CDP client cleanly
-            # without killing the remote browser.
-            pass
+                    page.goto(host_root, wait_until="load", timeout=timeout_ms)
+                except Exception:
+                    pass  # partial load is fine; we just need an active reddit origin
+                # Same-origin fetch with a couple retries — reddit.com sometimes does a
+                # client redirect on first load that destroys the execution context.
+                js = (
+                    "async (u) => {"
+                    "  const r = await fetch(u, {credentials:'include',"
+                    "                            headers:{'Accept':'application/json'}});"
+                    "  const t = await r.text();"
+                    "  return {status: r.status, body: t};"
+                    "}"
+                )
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        res = page.evaluate(js, url)
+                        status = int(res.get("status", 0))
+                        body = res.get("body") or ""
+                        if status != 200:
+                            return None, status
+                        return body, status
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(2.0)  # let a redirect settle, then retry
+                sys.stderr.write(f"[reddit_browser_fetch] evaluate failed after retries: {last_err}\n")
+                return None, 0
+            except Exception as e:
+                sys.stderr.write(f"[reddit_browser_fetch] error: {e}\n")
+                return None, 0
+            finally:
+                # Do NOT close the page: it is a REUSED tab, and closing it forces the
+                # next fetch to new_page() which steals OS focus. Leaving it open lets
+                # the next fetch reuse it (cleanup_harness_tabs trims to one at cycle
+                # start). Also never close the connect_over_cdp browser/context: that can
+                # terminate the real harness Chrome (see reddit_browser.py warning). The
+                # sync_playwright() context exit disconnects the CDP client cleanly
+                # without killing the remote browser.
+                pass
+    finally:
+        _MUTEX.release()
 
 
 def main(argv):

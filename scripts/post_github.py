@@ -85,20 +85,43 @@ def _emit_run_summary_oneshot():
         return
     _RUN_STATE["emitted"] = True
     elapsed = int(time.time() - _RUN_STATE["run_start"])
+    signaled = _RUN_STATE.get("signaled")
+    if signaled:
+        # A signal ended the run; surface it the same way run-github.sh's
+        # trap used to (failed>=1 + sigterm reason) so the dashboard still
+        # sees signal-killed cycles, now with accurate counters attached.
+        _RUN_STATE["failed"] = max(int(_RUN_STATE["failed"]), 1)
+    # Print the same "=== SUMMARY: elapsed=" marker main()'s happy path emits.
+    # run-github.sh's EXIT trap greps the cycle log for this marker to decide
+    # whether Python already wrote its own run_monitor row; before 2026-07-18
+    # every early exit (no candidates, cap=0, Claude failure) lacked the
+    # marker, so the trap double-logged each of those cycles as a spurious
+    # "failed=1 sigterm:1" row + a "possible silent failure" warning. With
+    # the marker printed here, the bash trap only fires when Python died
+    # without running atexit at all (SIGKILL, interpreter crash).
     try:
-        subprocess.run(
-            [
-                "python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
-                "--script", "post_github",
-                "--posted", str(_RUN_STATE["posted"]),
-                "--skipped", str(_RUN_STATE["skipped"]),
-                "--failed", str(_RUN_STATE["failed"]),
-                "--cost", f"{_RUN_STATE['cost']:.4f}",
-                "--elapsed", str(elapsed),
-            ],
-            timeout=15,
-            check=False,
+        suffix = f"(signal {signaled})" if signaled else "(safety-net)"
+        print(
+            f"=== SUMMARY: elapsed={elapsed}s "
+            f"posted={_RUN_STATE['posted']} failed={_RUN_STATE['failed']} "
+            f"=== {suffix}",
+            flush=True,
         )
+    except Exception:
+        pass
+    cmd = [
+        PYTHON, os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
+        "--script", "post_github",
+        "--posted", str(_RUN_STATE["posted"]),
+        "--skipped", str(_RUN_STATE["skipped"]),
+        "--failed", str(_RUN_STATE["failed"]),
+        "--cost", f"{_RUN_STATE['cost']:.4f}",
+        "--elapsed", str(elapsed),
+    ]
+    if signaled:
+        cmd.extend(["--failure-reasons", "sigterm:1"])
+    try:
+        subprocess.run(cmd, timeout=15, check=False)
     except Exception:
         # Trap context: never raise from the safety net. Better to lose this
         # one summary line than to crash a shutdown sequence that might be
@@ -107,7 +130,9 @@ def _emit_run_summary_oneshot():
 
 
 def _signal_to_exit(signum, _frame):
-    # Convert the signal into a normal-looking exit so atexit fires.
+    # Record which signal ended us so the atexit summary can tag the run,
+    # then convert the signal into a normal-looking exit so atexit fires.
+    _RUN_STATE["signaled"] = signum
     sys.exit(128 + signum)
 
 
@@ -135,13 +160,41 @@ from audience_pages import (
     prompt_block as _audience_prompt_block,
     classify_url_as_audience_page as _audience_classify_url,
 )
+# Learned preferences (2026-07-03): human review feedback distilled by
+# feedback_digest.py into the project's learned_preferences config block.
+# Rendered as an explicit prompt section; empty string when absent.
+try:
+    from learned_preferences import prompt_block as _learned_prefs_block
+except Exception:  # never let a missing module break the poster
+    def _learned_prefs_block(_project_cfg):
+        return ""
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 SCRIPTS = os.path.join(REPO_DIR, "scripts")
-CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 SKILL_FILE = os.path.join(REPO_DIR, "SKILL.md")
 GITHUB_TOOLS = os.path.join(SCRIPTS, "github_tools.py")
 RUN_CLAUDE = os.path.join(SCRIPTS, "run_claude.sh")
+
+# Repo-state lookup (stars, gone, has_issues) with github_tools' shared
+# two-tier cache; feeds the tiny-repo audience floor in phase 1.
+from github_tools import _fetch_repo_state as _repo_state
+
+# Interpreter every child subprocess must run under. A bare PYTHON resolved
+# to the user's system python, which lacks the pipeline deps that live only in
+# the owned uv runtime — the same fresh-box failure class that broke the Twitter
+# poster (Karol, 2026-06-22). The GitHub rail posts via the REST API (no browser,
+# so no Playwright dep), but its util/DB children still need the owned venv, so
+# pin the interpreter here too. Honor S4L_PYTHON (set by the launchd plist),
+# else sys.executable; never the literal PYTHON.
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 
 # Momentum tunables. Edit here, not at call sites.
 DELTA_THRESHOLD = 1.0
@@ -163,14 +216,124 @@ MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 # help here." 0/1 = off-domain. Tunable.
 MIN_RELEVANCE = 2
 
+# Zero-audience gate (2026-07-17). Root cause of the vestlang #554 spam
+# minimization (post #46421): the issue was the repo owner's self-authored work
+# ticket with zero other commenters, so our comment's only audience was the
+# owner, who hid it as spam within the hour. Require at least one non-bot
+# commenter besides the issue author before we engage, and skip tiny-audience
+# repos (fewer than STAR_FLOOR stars) unless a real multi-person discussion
+# (2+ outside participants) is underway.
+MIN_OUTSIDE_PARTICIPANTS = 1
+STAR_FLOOR = 5
+
+# Bot detection for `gh issue view` comment authors. GraphQL strips the
+# "[bot]" suffix REST shows (github-actions[bot] arrives as plain
+# "github-actions"), so we combine a known-login set with suffix heuristics.
+# A missed bot only weakens the participant/momentum signal marginally.
+KNOWN_BOT_LOGINS = {
+    "github-actions", "dependabot", "dependabot-preview", "renovate",
+    "renovate-bot", "codecov", "codecov-commenter", "vercel", "netlify",
+    "stale", "snyk-bot", "greenkeeper", "coderabbitai", "copilot",
+    "sonarcloud", "cypress", "changeset-bot", "allcontributors",
+    "google-cla", "cla-assistant", "codesandbox-ci", "circleci",
+}
+
+
+def _is_bot_login(login):
+    # gh's GraphQL surfaces GitHub App actors with an "app/" prefix
+    # (app/github-actions, app/renovate, sometimes bare "app/"); seen live in
+    # the 2026-07-18 phase-1 logs. Match the prefix, the known-login set, and
+    # the [bot]/-bot suffixes.
+    l = (login or "").lower()
+    return bool(l) and (
+        l.startswith("app/") or l in KNOWN_BOT_LOGINS or l.endswith("[bot]")
+        or l.endswith("-bot") or l.endswith("bot]")
+    )
+
+
+def _our_github_handle(_memo={}):
+    """Our own posting handle, lowercased ('' if unresolvable). Excluded from
+    outside_participants so a thread we already commented in doesn't count us
+    as its audience."""
+    if "h" not in _memo:
+        try:
+            from account_resolver import resolve as _resolve
+            _memo["h"] = (_resolve("github") or "").lower()
+        except Exception:
+            _memo["h"] = ""
+    return _memo["h"]
+
+
+# ---------- github_candidates history (2026-07-18) ---------------------------
+# Per-candidate history mirroring the twitter/reddit candidates principle:
+# every discovered issue becomes a github_candidates row via /api/v1 (never
+# direct SQL), and every decision flips status with skip_stage + skip_reason.
+# Stages: gate_maintainer | gate_no_audience | gate_tiny_repo |
+# gate_maintainer_t1 | momentum_cut | claude | post_failed; posted rows get
+# status='posted' + post_id. All calls are best-effort: a candidates-API
+# outage must never block or slow the posting rail.
+
+def _cand_upsert(row):
+    try:
+        from http_api import api_post
+        api_post("/api/v1/github-candidates", {
+            "thread_url": row.get("url"),
+            "repo": row.get("repo"),
+            "issue_number": row.get("number"),
+            "thread_title": (row.get("title") or "")[:500],
+            "thread_author": row.get("author"),
+            "author_is_owner": bool(row.get("author_is_owner")),
+            "outside_participants": row.get("outside_participants"),
+            "repo_stars": row.get("repo_stars"),
+            "comment_count_t0": row.get("comment_count_t0"),
+            "reaction_count_t0": row.get("reaction_count_t0"),
+            "matched_project": row.get("matched_project"),
+            "search_topic": row.get("search_topic"),
+            "batch_id": os.environ.get("SA_CYCLE_ID"),
+        })
+    except Exception as e:
+        log(f"  WARNING: candidate upsert failed for {row.get('url')}: {e}")
+
+
+def _cand_mark_skipped(url, stage, reason=""):
+    try:
+        from http_api import api_patch
+        api_patch("/api/v1/github-candidates/by-thread-url", {
+            "thread_url": url, "action": "mark_skipped",
+            "skip_stage": stage, "skip_reason": str(reason or "")[:1000],
+        }, ok_on_404=True)
+    except Exception as e:
+        log(f"  WARNING: candidate mark_skipped failed for {url}: {e}")
+
+
+def _cand_set_t1(url, comment_count_t1, reaction_count_t1, delta):
+    try:
+        from http_api import api_patch
+        api_patch("/api/v1/github-candidates/by-thread-url", {
+            "thread_url": url, "action": "set_t1",
+            "comment_count_t1": comment_count_t1,
+            "reaction_count_t1": reaction_count_t1,
+            "delta_score": delta,
+        }, ok_on_404=True)
+    except Exception as e:
+        log(f"  WARNING: candidate set_t1 failed for {url}: {e}")
+
+
+def _cand_mark_posted(url, post_id=None):
+    try:
+        from http_api import api_patch
+        body = {"thread_url": url, "action": "mark_posted"}
+        if isinstance(post_id, int):
+            body["post_id"] = post_id
+        api_patch("/api/v1/github-candidates/by-thread-url", body, ok_on_404=True)
+    except Exception as e:
+        log(f"  WARNING: candidate mark_posted failed for {url}: {e}")
+
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [post_github] {msg}", flush=True)
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 # ---------- Project picking & context ---------------------------------------
@@ -178,7 +341,7 @@ def load_config():
 def get_top_performers(project_name, platform="github"):
     try:
         result = subprocess.run(
-            ["python3", os.path.join(SCRIPTS, "top_performers.py"),
+            [PYTHON, os.path.join(SCRIPTS, "top_performers.py"),
              "--platform", platform, "--project", project_name],
             capture_output=True, text=True, timeout=15,
         )
@@ -194,7 +357,7 @@ def get_top_search_topics(project_name, platform="github", limit=8, window_days=
     Empty string if no data yet. Mirrors post_reddit.get_top_search_topics."""
     try:
         result = subprocess.run(
-            ["python3", os.path.join(SCRIPTS, "top_search_topics.py"),
+            [PYTHON, os.path.join(SCRIPTS, "top_search_topics.py"),
              "--project", project_name, "--platform", platform,
              "--window-days", str(window_days), "--limit", str(limit)],
             capture_output=True, text=True, timeout=15,
@@ -287,7 +450,7 @@ def build_content_angle(project, config):
 def gh_search(query, limit=SEARCH_PER_TOPIC):
     try:
         out = subprocess.check_output(
-            ["python3", GITHUB_TOOLS, "search", query, "--limit", str(limit)],
+            [PYTHON, GITHUB_TOOLS, "search", query, "--limit", str(limit)],
             text=True, timeout=45,
         )
         items = json.loads(out)
@@ -299,13 +462,21 @@ def gh_search(query, limit=SEARCH_PER_TOPIC):
 
 def gh_view_counts(repo, number):
     """Return dict{comment_count, reaction_count, title, body, author, url,
-    maintainer_last_speaker, last_commenter, last_comment_assoc} or None if the
-    issue is no longer open / unfetchable.
+    maintainer_last_speaker, last_commenter, last_comment_assoc,
+    outside_participants, author_is_owner} or None if the issue is no longer
+    open / unfetchable.
 
     `gh issue view --json comments` returns each comment with `authorAssociation`
     (OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR/NONE/...) and `createdAt`. We use the
     most recent comment to detect "maintainer just spoke" so phase 1 can drop
-    those candidates without an extra API call."""
+    those candidates without an extra API call.
+
+    Bot comments (github-actions, dependabot, etc.) are excluded from
+    comment_count (so CI chatter can't inflate delta_score momentum), from the
+    maintainer-last-speaker check (a bot posting after a maintainer shouldn't
+    shadow the maintainer's word), and from outside_participants (the count of
+    distinct non-bot commenters other than the issue author, which feeds the
+    zero-audience gate)."""
     try:
         out = subprocess.check_output(
             ["gh", "issue", "view", str(number), "-R", repo,
@@ -324,18 +495,30 @@ def gh_view_counts(repo, number):
             (g.get("users") or {}).get("totalCount", 0) or g.get("totalCount", 0) or 0
         )
 
-    # Maintainer-just-spoke gate. Sort comments by createdAt desc, look at the
-    # most recent one (regardless of timing). If the issue's last word came from
-    # someone with push access, the thread is being driven and we shouldn't pile
-    # on. The OP's authorAssociation is checked separately (issue.author isn't
-    # included in `comments`, only in the top-level `author` field).
+    issue_author = ((data.get("author") or {}).get("login", "") or "").lower()
+    repo_owner = (repo.split("/", 1)[0] or "").lower()
+    human_comments = [
+        c for c in comments
+        if not _is_bot_login(((c.get("author") or {}).get("login", "")))
+    ]
+    outside_participants = {
+        ((c.get("author") or {}).get("login", "") or "").lower()
+        for c in human_comments
+    } - {issue_author, _our_github_handle(), ""}
+
+    # Maintainer-just-spoke gate. Sort non-bot comments by createdAt desc, look
+    # at the most recent one (regardless of timing). If the issue's last human
+    # word came from someone with push access, the thread is being driven and we
+    # shouldn't pile on. The OP's authorAssociation is checked separately
+    # (issue.author isn't included in `comments`, only in the top-level `author`
+    # field).
     maintainer_last_speaker = False
     last_commenter = ""
     last_comment_assoc = ""
-    if comments:
+    if human_comments:
         try:
             sorted_c = sorted(
-                comments,
+                human_comments,
                 key=lambda c: c.get("createdAt", "") or "",
                 reverse=True,
             )
@@ -348,7 +531,7 @@ def gh_view_counts(repo, number):
             pass
 
     return {
-        "comment_count": len(comments),
+        "comment_count": len(human_comments),
         "reaction_count": reaction_count,
         "title": data.get("title", ""),
         "body": (data.get("body") or ""),
@@ -357,6 +540,8 @@ def gh_view_counts(repo, number):
         "maintainer_last_speaker": maintainer_last_speaker,
         "last_commenter": last_commenter,
         "last_comment_assoc": last_comment_assoc,
+        "outside_participants": len(outside_participants),
+        "author_is_owner": bool(issue_author) and issue_author == repo_owner,
     }
 
 
@@ -416,6 +601,12 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
                 f"last_commenter: {c['last_commenter']} "
                 f"({c.get('last_comment_assoc') or 'NONE'})\n"
             )
+        audience_line = (
+            f"outside_participants: {c.get('outside_participants', '?')}"
+        )
+        if c.get("author_is_owner"):
+            audience_line += " | author_is_owner: true"
+        audience_line += "\n"
         history_block = ""
         try:
             _hb = _render_author_history(
@@ -431,6 +622,7 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
             f"rx {c['reaction_count_t0']}->{c['reaction_count_t1']}) ---\n"
             f"{seed_line}"
             f"{last_speaker_line}"
+            f"{audience_line}"
             f"title: {c['title']}\n"
             f"author: {c['author']}\n"
             f"url: {c['url']}\n"
@@ -513,6 +705,7 @@ shown is the search_topic that surfaced the issue, echo it back verbatim in
 {recent_ctx}{top_ctx}{top_topics_ctx}
 {get_styles_prompt("github", context="posting", assignment=style_assignment)}
 
+{_learned_prefs_block(project)}
 ## Targeting
 - Best topics: Agents, Accessibility, Voice/ASR, Tool Use. Prioritize when present.
 - Exclusions are already filtered, but for reference:
@@ -568,6 +761,19 @@ takes that ignored what the maintainer just said. Skip when:
     grouped with them by the maintainer.
   - You'd cite a precedent you can't actually link to (Apple ?ppid, Stripe X,
     Shopify Y, etc.). Hand-wavy precedent name-drops read as fake-expert.
+  - The point you'd make is already stated in the issue body or an existing
+    comment. Re-deriving the author's own caveats in your voice reads as an
+    LLM paraphrasing them back at themselves; that exact pattern got our
+    vestlang comment hidden as spam within the hour. If you can't add
+    something the thread doesn't already contain, skip.
+  - `author_is_owner: true` and the issue reads like the owner's internal
+    work ticket (committed scope, acceptance criteria, "design decision to
+    settle", self-addressed spec). The owner's notification inbox is the
+    only audience, and they didn't ask for outside input.
+  - `outside_participants` is 1 and your comment doesn't offer that one
+    other person something genuinely new. Thin threads reach you already
+    filtered (zero-participant threads are dropped upstream), but 1 is
+    still thin; treat it as a high bar, not a green light.
 
 ## YOUR JOB
 
@@ -606,8 +812,17 @@ Return ONLY a single JSON object. No prose, no markdown fencing, no Bash calls:
     }}
   ],
   "skipped": [
-    {{ "url": "<issue url>", "reason": "<short reason; use 'low_relevance' when relevance < {min_relevance}>" }}
+    {{ "url": "<issue url>", "reason": "<code>: <one-line why>" }}
   ]
+
+For skip reasons, start with one snake_case code so the dashboard can
+aggregate, then a colon and a one-line specific why. Codes: low_relevance
+(relevance < {min_relevance}), restates_thread (your point is already in the
+issue/comments), owner_spec_ticket (owner's self-addressed work ticket),
+maintainer_direction (maintainer set direction), thin_audience (1 outside
+participant, nothing new to add), manufactured_expertise (would need fake
+experience), pitch_pileup (other commenters pitching tools), off_domain
+(would have to pivot topics), other (anything else).
 }}
 
 If, and ONLY if, none of the listed styles fits, you may invent one. Set
@@ -691,6 +906,14 @@ def parse_claude_json(output):
 # ---------- Posting + logging ------------------------------------------------
 
 def post_comment(owner, repo, number, body):
+    # Identity gate (mirrors twitter_browser.reply_to_tweet /
+    # reddit_browser.post_comment): the gh CLI would happily post as whatever
+    # account it is authed as, but with no resolved accounts.github.username
+    # the row's attribution is blank and self-filtering breaks. Refuse loudly.
+    from account_resolver import resolve as _resolve_gh
+    if not _resolve_gh("github"):
+        return False, ("no_account_configured (set accounts.github.username in "
+                       "config.json or AUTOPOSTER_GITHUB_USERNAME)")
     try:
         out = subprocess.check_output(
             ["gh", "issue", "comment", str(number), "-R", f"{owner}/{repo}", "--body", body],
@@ -727,7 +950,7 @@ def log_post(thread_url, our_url, text, project_name, thread_author, thread_titl
     curated landing-page hits from generic homepage links.
     """
     try:
-        cmd = ["python3", GITHUB_TOOLS, "log-post",
+        cmd = [PYTHON, GITHUB_TOOLS, "log-post",
                thread_url, our_url or "", text, project_name,
                thread_author or "unknown", thread_title or "",
                "--account", github_username]
@@ -784,7 +1007,8 @@ def main():
     log(f"=== GitHub run: sleep={args.sleep}s ===")
 
     config = load_config()
-    github_username = config.get("accounts", {}).get("github", {}).get("username", "m13v")
+    from account_resolver import resolve as _resolve_account
+    github_username = _resolve_account("github") or ""
 
     # ---- Pick project ------------------------------------------------------
     if args.project:
@@ -841,6 +1065,8 @@ def main():
 
     candidates = []
     skipped_maintainer = 0
+    skipped_no_audience = 0
+    skipped_small_repo = 0
     for item in raw[:CLAUDE_CANDIDATE_LIMIT * 3]:
         repo, number = parse_repo_number(item.get("url"))
         if not repo:
@@ -848,6 +1074,26 @@ def main():
         counts = gh_view_counts(repo, number)
         if not counts:
             continue
+        _owner, _name = repo.split("/", 1)
+        _stars = _repo_state(_owner, _name).get("stars")
+        # Record the sighting BEFORE the gates so gate skips become queryable
+        # history (github_candidates), not just log lines. Gate branches then
+        # flip the row to skipped with their stage.
+        _cand_url = counts["url"] or item.get("url")
+        _cand_upsert({
+            "url": _cand_url,
+            "repo": repo,
+            "number": number,
+            "title": counts["title"],
+            "author": counts["author"],
+            "author_is_owner": counts.get("author_is_owner"),
+            "outside_participants": counts.get("outside_participants"),
+            "repo_stars": _stars,
+            "comment_count_t0": counts["comment_count"],
+            "reaction_count_t0": counts["reaction_count"],
+            "matched_project": project_name,
+            "search_topic": item.get("search_topic"),
+        })
         # Maintainer-just-spoke gate. If the most recent comment is from someone
         # with push access (OWNER/MEMBER/COLLABORATOR), they are driving the
         # thread, so piling on reads as noise and risks LOW_QUALITY hide.
@@ -858,6 +1104,44 @@ def main():
                 f"(last={counts.get('last_commenter')}/"
                 f"{counts.get('last_comment_assoc')})"
             )
+            _cand_mark_skipped(
+                _cand_url, "gate_maintainer",
+                f"last={counts.get('last_commenter')}/"
+                f"{counts.get('last_comment_assoc')}")
+            continue
+        # Zero-audience gate. Nobody but the issue author (and bots) has ever
+        # touched this thread, so a comment's only reader is the author's
+        # notification inbox. Worst case is the author being the repo owner
+        # writing their own work ticket (vestlang #554, post #46421): the one
+        # person notified is the one person who can hide us as spam.
+        if counts.get("outside_participants", 0) < MIN_OUTSIDE_PARTICIPANTS:
+            skipped_no_audience += 1
+            log(
+                f"  skip {repo}#{number}: no outside participants "
+                f"(author={counts.get('author')}, "
+                f"owner_authored={counts.get('author_is_owner')})"
+            )
+            _cand_mark_skipped(
+                _cand_url, "gate_no_audience",
+                f"author={counts.get('author')}, "
+                f"owner_authored={counts.get('author_is_owner')}")
+            continue
+        # Tiny-repo audience floor. A repo with almost no stars has no
+        # bystander audience reading its issues; require a real multi-person
+        # discussion before engaging there. stars=None (fetch failed) passes:
+        # fail open, the participant gate above already ran.
+        if (_stars is not None and _stars < STAR_FLOOR
+                and counts.get("outside_participants", 0) < 2):
+            skipped_small_repo += 1
+            log(
+                f"  skip {repo}#{number}: {_stars} stars < {STAR_FLOOR} "
+                f"and thin discussion "
+                f"({counts.get('outside_participants')} outside participants)"
+            )
+            _cand_mark_skipped(
+                _cand_url, "gate_tiny_repo",
+                f"{_stars} stars < {STAR_FLOOR}, "
+                f"{counts.get('outside_participants')} outside participants")
             continue
         candidates.append({
             "repo": repo,
@@ -868,11 +1152,15 @@ def main():
             "author": counts["author"],
             "comment_count_t0": counts["comment_count"],
             "reaction_count_t0": counts["reaction_count"],
+            "outside_participants": counts.get("outside_participants", 0),
+            "author_is_owner": bool(counts.get("author_is_owner")),
             "search_topic": item.get("search_topic"),
         })
     log(
         f"Phase 1: {len(candidates)} candidates with T0 snapshot "
-        f"(skipped {skipped_maintainer} for maintainer-just-spoke)"
+        f"(skipped {skipped_maintainer} maintainer-just-spoke, "
+        f"{skipped_no_audience} no-outside-participants, "
+        f"{skipped_small_repo} tiny-repo)"
     )
     if not candidates:
         log("No live open issues to re-poll. Exiting.")
@@ -903,13 +1191,24 @@ def main():
                 f"during sleep (last={counts.get('last_commenter')}/"
                 f"{counts.get('last_comment_assoc')})"
             )
+            _cand_mark_skipped(
+                c["url"], "gate_maintainer_t1",
+                f"maintainer arrived during sleep: "
+                f"{counts.get('last_commenter')}/"
+                f"{counts.get('last_comment_assoc')}")
             continue
         c["comment_count_t1"] = counts["comment_count"]
         c["reaction_count_t1"] = counts["reaction_count"]
+        # Participants only grow, so no re-skip needed; refresh so the prompt
+        # shows the T1 value.
+        c["outside_participants"] = counts.get(
+            "outside_participants", c.get("outside_participants", 0))
         c["delta_score"] = delta_score(
             c["comment_count_t0"], c["reaction_count_t0"],
             c["comment_count_t1"], c["reaction_count_t1"],
         )
+        _cand_set_t1(c["url"], c["comment_count_t1"], c["reaction_count_t1"],
+                     c["delta_score"])
         survivors.append(c)
     if skipped_maintainer_phase2:
         log(
@@ -931,6 +1230,11 @@ def main():
     candidates.sort(key=lambda c: c["delta_score"], reverse=True)
     top = candidates[:CLAUDE_CANDIDATE_LIMIT]
     log(f"Phase 2b: showing Claude top {len(top)} by delta, cap = {cap}")
+    # Candidates below the top-N cut never reach Claude; record why.
+    for c in candidates[CLAUDE_CANDIDATE_LIMIT:]:
+        _cand_mark_skipped(
+            c["url"], "momentum_cut",
+            f"delta={c['delta_score']:.1f} below top {CLAUDE_CANDIDATE_LIMIT}")
 
     if cap <= 0:
         log("cap=0, nothing to post. Exiting.")
@@ -1017,8 +1321,13 @@ def main():
     if not ok:
         log(f"Claude FAILED: {output[:300]}")
         _RUN_STATE["failed"] = 1
+        # Marker line for run-github.sh's EXIT trap (see
+        # _emit_run_summary_oneshot): without it this branch was double-logged
+        # by the trap as a spurious sigterm:1 row.
+        log(f"=== SUMMARY: elapsed={int(time.time() - run_start)}s "
+            f"posted=0 failed=1 === (claude-failure)")
         subprocess.run([
-            "python3", os.path.join(SCRIPTS, "log_run.py"),
+            PYTHON, os.path.join(SCRIPTS, "log_run.py"),
             "--script", "post_github",
             "--posted", "0", "--skipped", "0", "--failed", "1",
             "--cost", f"{usage['cost_usd']:.4f}",
@@ -1033,6 +1342,18 @@ def main():
     posts = decisions.get("posts", []) or []
     skipped = decisions.get("skipped", []) or []
     log(f"Claude picked {len(posts)}, skipped {len(skipped)}")
+    # Full-funnel visibility (2026-07-18): phase-1 gate skips already log one
+    # line each; do the same for Claude's judgment-level skips so the cycle
+    # log answers "why didn't we post" end to end. Mirrors the twitter
+    # principle (twitter_candidates.skip_reason) at log level; GitHub has no
+    # candidates table, so the cycle log is the system of record here.
+    for _s in skipped:
+        if isinstance(_s, dict):
+            _s_url = _s.get("url") or _s.get("thread_url") or "?"
+            _s_reason = str(_s.get("reason") or "(no reason given)")
+            log(f"  claude-skip {_s_url}: {_s_reason[:220]}")
+            if _s_url != "?":
+                _cand_mark_skipped(_s_url, "claude", _s_reason)
 
     # Relevance gate. Anything Claude scored below MIN_RELEVANCE goes to the
     # skipped bucket, NOT posted, regardless of how confident the comment_text
@@ -1048,8 +1369,8 @@ def main():
             relevance_dropped.append({
                 "url": d.get("thread_url", ""),
                 "reason": (
-                    f"low_relevance (relevance={rel}, "
-                    f"rationale={(d.get('relevance_rationale') or '').strip()[:120]})"
+                    f"low_relevance: relevance={rel}, "
+                    f"rationale={(d.get('relevance_rationale') or '').strip()[:120]}"
                 ),
             })
         else:
@@ -1061,6 +1382,8 @@ def main():
         )
         for r in relevance_dropped:
             log(f"  drop {r['url']}: {r['reason']}")
+            if r.get("url"):
+                _cand_mark_skipped(r["url"], "claude", r["reason"])
     skipped.extend(relevance_dropped)
     posts = kept_posts
 
@@ -1099,6 +1422,9 @@ def main():
             log(f"SKIP: bad URL or empty text: {thread_url}")
             failed += 1
             _RUN_STATE["failed"] = failed
+            if thread_url:
+                _cand_mark_skipped(thread_url, "post_failed",
+                                   "bad URL or empty text")
             continue
 
         # URL-wrap before sending to GitHub. project for wrapping is the
@@ -1152,6 +1478,8 @@ def main():
             log(f"POST FAILED: {url_or_err}")
             failed += 1
             _RUN_STATE["failed"] = failed
+            _cand_mark_skipped(thread_url, "post_failed",
+                               str(url_or_err)[:300])
             time.sleep(3)
             continue
 
@@ -1185,6 +1513,7 @@ def main():
         _RUN_STATE["failed"] = failed
         _RUN_STATE["skipped"] = len(skipped)
         log(f"POSTED: {url_or_err or 'ok'}")
+        _cand_mark_posted(thread_url, new_post_id)
 
         # ---- Optional self-reply with ONE github blob URL ------------------
         # Restored 2026-05-17 after the April 13 over-correction stripped
@@ -1265,6 +1594,18 @@ def main():
 
         time.sleep(3)
 
+    # Any candidate shown to Claude but absent from BOTH posts and skipped is
+    # an undocumented drop (the prompt asks for every candidate to appear in
+    # one bucket, but models drift); close its row so nothing stays pending.
+    _decided_urls = {(d.get("thread_url") or "").strip() for d in posts}
+    _decided_urls |= {
+        (s.get("url") or s.get("thread_url") or "").strip()
+        for s in skipped if isinstance(s, dict)
+    }
+    for c in top:
+        if (c.get("url") or "").strip() not in _decided_urls:
+            _cand_mark_skipped(c["url"], "claude", "not_mentioned_in_decisions")
+
     # Clean up the generation_trace temp file. By this point every post
     # that landed has its trace persisted to posts.generation_trace JSONB,
     # so the on-disk JSON is redundant. macOS would eventually purge
@@ -1285,15 +1626,34 @@ def main():
     _RUN_STATE["failed"] = failed
     _RUN_STATE["skipped"] = len(skipped)
     _RUN_STATE["cost"] = usage["cost_usd"]
-    subprocess.run([
-        "python3", os.path.join(SCRIPTS, "log_run.py"),
+    # Aggregate Claude's skip codes into the same `skip_reasons=code:count`
+    # segment run-twitter-cycle.sh ships, so the dashboard's yellow
+    # "skipped: <reason>" pills work for github runs too. The code is the
+    # snake_case token before the first ':' in each skip reason (see the
+    # prompt's skip-code list); free-form text degrades to a slug.
+    _skip_counts = {}
+    for _s in skipped:
+        _r = (_s.get("reason") if isinstance(_s, dict) else str(_s)) or "unspecified"
+        _code = re.sub(r"[^a-z0-9_]+", "_",
+                       str(_r).split(":", 1)[0].strip().lower()).strip("_")[:40]
+        _code = _code or "unspecified"
+        _skip_counts[_code] = _skip_counts.get(_code, 0) + 1
+    _skip_arg = ",".join(
+        f"{k}:{v}" for k, v in
+        sorted(_skip_counts.items(), key=lambda kv: -kv[1])[:8]
+    )
+    _cmd = [
+        PYTHON, os.path.join(SCRIPTS, "log_run.py"),
         "--script", "post_github",
         "--posted", str(posted),
         "--skipped", str(len(skipped)),
         "--failed", str(failed),
         "--cost", f"{usage['cost_usd']:.4f}",
         "--elapsed", f"{int(total_elapsed)}",
-    ])
+    ]
+    if _skip_arg:
+        _cmd.extend(["--skip-reasons", _skip_arg])
+    subprocess.run(_cmd)
     _RUN_STATE["emitted"] = True
 
 

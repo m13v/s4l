@@ -11,6 +11,7 @@
 // for Keychain-decrypt + CDP inject). Reusing them keeps this MCP a thin client.
 
 import { runPython } from "./repo.js";
+import { captureError } from "./telemetry.js";
 
 export interface XAuthResult {
   ok: boolean;
@@ -68,7 +69,7 @@ export async function xConnect(source?: string, manualLogin?: boolean): Promise<
   const res = await runPython("scripts/setup_twitter_auth.py", args, {
     // import opens a real Chrome and may pop a macOS Keychain auth dialog the
     // user has to find + click ("Always Allow"). Keep this above the Python
-    // cookie-copy timeout (SAPS_COOKIE_COPY_TIMEOUT, default 600s) so the
+    // cookie-copy timeout (S4L_COOKIE_COPY_TIMEOUT, default 600s) so the
     // wrapper never kills the dialog before the human can.
     timeoutMs: 660_000,
   });
@@ -97,7 +98,40 @@ export interface XProfileScan {
     pinned?: string;
   };
   posts?: Array<{ text: string; url?: string; id?: string; likes?: number }>;
-  comments?: Array<{ text: string; url?: string; id?: string; reply_to?: string }>;
+  comments?: Array<{
+    text: string;
+    url?: string;
+    id?: string;
+    reply_to?: string;
+    likes?: number;
+    retweets?: number;
+    replies?: number;
+    // The tweet this reply answered (best-effort DOM pairing on /with_replies).
+    parent?: { author?: string; text?: string; url?: string } | null;
+  }>;
+  // Ranked by real engagement (likes*3 + retweets*5 + replies*2), rank 1 first.
+  // top_posts entries may carry `thread` (the user's own thread continuation,
+  // expanded from the permalink) and untruncated text.
+  top_posts?: Array<{
+    text: string;
+    url?: string;
+    rank?: number;
+    engagement_score?: number;
+    likes?: number;
+    retweets?: number;
+    replies?: number;
+    thread?: string[];
+  }>;
+  top_replies?: Array<{
+    text: string;
+    url?: string;
+    rank?: number;
+    engagement_score?: number;
+    likes?: number;
+    retweets?: number;
+    replies?: number;
+    parent?: { author?: string; text?: string; url?: string } | null;
+  }>;
   counts?: { posts: number; comments: number };
   grounding_instructions?: string;
   error?: string;
@@ -112,11 +146,20 @@ export async function xScanProfile(opts?: {
   if (opts?.handle) args.push("--handle", opts.handle);
   args.push("--posts", String(opts?.posts ?? 20));
   args.push("--comments", String(opts?.comments ?? 50));
-  // The scan scrolls two timelines; give it room but keep it bounded.
-  const res = await runPython("scripts/scan_x_profile.py", args, { timeoutMs: 180_000 });
+  // The scan scrolls two timelines plus visits the top posts' permalinks for
+  // thread expansion; give it room but keep it bounded.
+  const res = await runPython("scripts/scan_x_profile.py", args, { timeoutMs: 240_000 });
   try {
     return JSON.parse(res.stdout.trim().split("\n").slice(-1).join("\n")) as XProfileScan;
-  } catch {
+  } catch (e) {
+    // The X profile scan feeds handle detection + grounding for the draft lane; a
+    // silent no-JSON failure here means we scrape the wrong handle (or none) and
+    // never know. Surface it so we can see fleet-wide how often the scan breaks.
+    captureError(e, {
+      component: "twitter_auth",
+      phase: "scan_x_profile",
+      exit: String(res.code),
+    });
     return {
       ok: false,
       state: "error",
@@ -151,7 +194,14 @@ export async function xDetectSources(): Promise<XSourcesResult> {
   });
   try {
     return JSON.parse(res.stdout.trim().split("\n").slice(-200).join("\n")) as XSourcesResult;
-  } catch {
+  } catch (e) {
+    // detect-sources populates the panel's "import from" dropdown; a no-JSON failure
+    // leaves the user unable to connect X during setup with no server-side trace.
+    captureError(e, {
+      component: "twitter_auth",
+      phase: "detect_sources",
+      exit: String(res.code),
+    });
     return {
       ok: false,
       sources: [],

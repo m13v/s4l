@@ -570,24 +570,29 @@ def pick_topic_for_project(project_name, platform="twitter",
         for i in range(min(REFERENCE_TOP_N, len(pool)))
     ]
 
-    # 2026-05-28 dedicated explore branch for freshly-invented topics.
-    # 10% of the time, if there's any source='invented' + attempts_n==0
-    # topic in the pool, pick one of those uniformly. Gives invent_topics.py
-    # outputs a guaranteed sampling cadence (~1 sample every other day per
-    # project at default 5 picks/day) instead of languishing at the
-    # COLD_TOPIC_WEIGHT floor for weeks. Falls through to the normal
-    # weighted-random branch when (a) no eligible invented-untried topics
-    # exist OR (b) the random roll lands outside the explore rate.
+    # 2026-05-28 dedicated explore branch for never-tried topics.
+    # 10% of the time, if there's any attempts_n==0 topic in the pool
+    # (regardless of source: invented by invent_topics.py OR freshly
+    # seeded/appended into config.json by a human or agent), pick one of
+    # those uniformly. Gives every brand-new topic a guaranteed sampling
+    # cadence (~1 sample every other day per project at default 5 picks/day)
+    # instead of languishing at the COLD_TOPIC_WEIGHT floor for weeks.
+    # 2026-07-04: widened from source=='invented' to any attempts_n==0 so a
+    # topic added to config after bootstrap (behaviorally identical to an
+    # invention: new, untried, needs its first shot) gets the same first-shot
+    # lane and proves itself on real click/supply signal from there. Falls
+    # through to the normal weighted-random branch when (a) no eligible
+    # untried topics exist OR (b) the random roll lands outside the rate.
     invented_untried_idxs = [
         i for i, r in enumerate(pool)
-        if r.get("source") == "invented"
-        and int(r.get("attempts_n") or 0) == 0
+        if int(r.get("attempts_n") or 0) == 0
     ]
     if invented_untried_idxs and rnd.random() < INVENTED_UNTRIED_EXPLORE_RATE:
         chosen_idx = rnd.choice(invented_untried_idxs)
         sys.stderr.write(
-            f"[pick_search_topic] invented_untried_explore "
+            f"[pick_search_topic] untried_explore "
             f"project={project_name!r} pool_size={len(invented_untried_idxs)} "
+            f"source={pool[chosen_idx].get('source')!r} "
             f"chosen={pool[chosen_idx]['search_topic']!r}\n"
         )
         chosen = pool[chosen_idx]

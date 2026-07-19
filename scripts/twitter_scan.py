@@ -55,6 +55,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
 import urllib.parse
 
@@ -230,19 +231,93 @@ def _write_scan_tweets_record(rec: dict) -> None:
         pass  # fail-open; shell falls back to structured_output if file is missing
 
 
+def _revive_current_tab(url: str) -> bool:
+    """Side-door revive of a wedged tab: attach a FRESH CDP session to the
+    SAME target and stop+navigate it there, so the one-tab-reused-forever
+    invariant survives a hung renderer.
+
+    When goto_url times out, what died is (almost always) the tab session or
+    the renderer, not the daemon's browser-level connection — the daemon just
+    REPORTED the timeout over that very connection. Page.stopLoading and
+    Page.navigate are handled by the BROWSER process, and navigate is allowed
+    to replace a crashed/hung renderer, so a fresh session to the same target
+    recovers the tab in place. Finish by re-pointing the daemon at the fresh
+    session (set_session, deliberately WITHOUT Target.activateTarget — that
+    call raises/focuses the Chrome window). Returns True when the navigate
+    was acknowledged; False routes the caller to the new-tab last resort
+    (only justified when the browser's handling of the target itself is
+    dead). Outcome is logged either way: every real wedge doubles as an
+    experiment on which recovery door works."""
+    from browser_harness import helpers as _bh
+
+    try:
+        tid = None
+        try:
+            tid = (_bh.current_tab() or {}).get("targetId")
+        except Exception:
+            pass
+        if not tid:
+            infos = _bh.cdp("Target.getTargets").get("targetInfos", [])
+            pages = [t for t in infos if t.get("type") == "page"]
+            pref = [t for t in pages if (t.get("url") or "").startswith("http")]
+            tid = ((pref or pages) or [{}])[0].get("targetId")
+        if not tid:
+            print("[twitter_scan] revive: no page target found", file=sys.stderr)
+            return False
+        sid = _bh.cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
+        try:
+            _bh.cdp("Page.stopLoading", session_id=sid)
+        except Exception:
+            pass  # stop is best-effort; navigate is the recovery
+        _bh.cdp("Page.navigate", session_id=sid, url=url)
+        _bh._send({"meta": "set_session", "session_id": sid, "target_id": tid})
+        print(
+            f"[twitter_scan] revived wedged tab in place (target={tid[:12]})",
+            file=sys.stderr,
+        )
+        return True
+    except Exception as e:
+        print(f"[twitter_scan] revive failed ({e})", file=sys.stderr)
+        return False
+
+
 def _navigate(url: str) -> None:
-    """Reuse the existing real tab if there is one (typical cycle behavior),
-    otherwise open one. The MCP-managed Chrome always has at least an
-    about:blank tab from launch, but be defensive: a hung tab close between
-    cycles can leave us with only chrome:// tabs."""
-    real = [
-        t for t in list_tabs(include_chrome=False)
-        if (t.get("url") or "").startswith(("http", "about:"))
-    ]
-    if real:
+    """ALWAYS reuse the daemon's current tab; escalate through revive; create
+    a tab only when both fail — and then in background, so it cannot pop.
+
+    Recovery ladder (2026-07-15, after the Chrome 150 wedge storm):
+      1. goto_url — plain reuse; also revives an "Aw, Snap" tab whose session
+         still answers. The only path 99% of navigations take.
+      2. _revive_current_tab — fresh CDP session to the SAME target
+         (stop+navigate); recovers a wedged session/renderer in place.
+      3. new_tab(background=True) — last resort for a dead target.
+         Target.createTarget/activateTarget are PROVEN to focus-steal (7/7
+         same-second harness_browser_foregrounded correlation), hence
+         background; the TypeError fallback covers customer boxes whose
+         installed harness predates the background parameter."""
+    try:
         goto_url(url)
-    else:
+        return
+    except Exception as e:
+        print(
+            f"[twitter_scan] goto_url failed ({e}); trying in-place revive",
+            file=sys.stderr,
+        )
+    if _revive_current_tab(url):
+        return
+    try:
+        new_tab(url, background=True)
+    except TypeError:
         new_tab(url)
+
+
+# Per-query stall guard: shared implementation (scripts/stall_guard.py) used
+# by every browser-touching pipeline step — do NOT re-implement per step.
+# S4L_SCAN_QUERY_DEADLINE_S kept as a scan-specific override for continuity
+# with rc.36-38; unset, the shared default applies.
+from stall_guard import stall_guard  # noqa: E402
+
+_SCAN_DEADLINE_OVERRIDE = os.environ.get("S4L_SCAN_QUERY_DEADLINE_S")
 
 
 def scan(
@@ -257,6 +332,22 @@ def scan(
     ###TWEETS_BEGIN###/###TWEETS_END### sentinels for the scan model to relay
     into StructuredOutput; also returns the kept list so direct callers (tests,
     future shell-driven invocations) can consume it without parsing stdout."""
+    with stall_guard(
+        "scan_query",
+        query,
+        deadline_s=float(_SCAN_DEADLINE_OVERRIDE) if _SCAN_DEADLINE_OVERRIDE else None,
+    ):
+        return _scan_inner(query, project, search_topic, freshness_hours, skip_ids, settle_seconds)
+
+
+def _scan_inner(
+    query: str,
+    project: str,
+    search_topic: str,
+    freshness_hours: int = 6,
+    skip_ids=None,
+    settle_seconds: float = 4.0,
+) -> list:
     skip = {str(s) for s in (skip_ids or [])}
     url = _build_url(query, int(freshness_hours))
     _navigate(url)

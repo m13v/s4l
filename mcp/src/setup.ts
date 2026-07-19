@@ -13,18 +13,103 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { repoDir } from "./repo.js";
+import { sendStateSnapshot } from "./telemetry.js";
 
 // Per-install scoping list lives outside the repo so it survives repo updates.
 const STATE_DIR =
-  process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 
-// The pipeline reads projects[] from config.json. Override for tests / custom
-// installs; defaults to the (dynamically resolved) repo's config.json. Resolved
-// per call, not a load-time const, because a bare .mcpb install materializes the
-// repo after boot and setup must write config.json into THAT repo.
+// Canonical home of config.json (2026-07-13): the STATE DIR, not the package.
+// Config is user data; the package is replaceable app payload. Nothing that
+// replaces the package (updates, re-materialize, stray-checkout heal) can
+// touch the state dir, which ends the recurring operator-Mac config splits.
+export function stateConfigPath(): string {
+  return path.join(STATE_DIR, "config.json");
+}
+
+// The pipeline reads projects[] from config.json. Resolution order:
+//   1. $S4L_CONFIG_PATH  — explicit override (tests / unusual installs)
+//   2. the state-dir config, whenever it exists (canonical since 2026-07-13;
+//      ensureConfigInStateDir() migrates legacy installs on boot)
+//   3. legacy $repo/config.json — pre-migration installs and fresh setups
+//      (the first boot after setup migrates the file up to the state dir)
+// The result is realpath-resolved: atomic rename-style writers would
+// otherwise REPLACE a symlink with a plain file instead of writing through
+// it (the 2026-07-11/13 operator config splits). realpath of a plain file is
+// itself, so customer installs see no change. Resolved per call, not a
+// load-time const, because a bare .mcpb install materializes the repo after
+// boot and setup must write config.json into THAT repo.
 export function configPath(): string {
-  return process.env.SAPS_CONFIG_PATH || path.join(repoDir(), "config.json");
+  const p =
+    process.env.S4L_CONFIG_PATH ||
+    (fs.existsSync(stateConfigPath()) ? stateConfigPath() : path.join(repoDir(), "config.json"));
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p; // not created yet: return the intended path unresolved
+  }
+}
+
+// One-time (idempotent) migration to the state-dir home, run at server boot.
+// Cases:
+//   - no state config, legacy is a REAL file  -> move it up, leave a symlink
+//     behind so direct-path readers (shell jq, third-party scripts, older
+//     package lanes) keep working through the old location.
+//   - no state config, legacy is a symlink    -> leave it alone (an operator
+//     arrangement points somewhere deliberate; never shadow it).
+//   - state config exists, legacy is a REAL file -> a pre-migration lane
+//     wrote after the move (or a legacy split): park it as a timestamped
+//     .bak next to the package copy and re-link. State wins; the backup
+//     preserves whatever diverged for manual inspection.
+//   - state config exists, legacy missing/wrong link -> (re)create the link.
+// Best-effort, never throws; the resolver works with or without it.
+export function ensureConfigInStateDir(): string {
+  try {
+    if (process.env.S4L_CONFIG_PATH) return "skip: S4L_CONFIG_PATH override";
+    const state = stateConfigPath();
+    const legacy = path.join(repoDir(), "config.json");
+    if (state === legacy) return "skip: state and legacy resolve identically";
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    let legacyStat: fs.Stats | null = null;
+    try {
+      legacyStat = fs.lstatSync(legacy);
+    } catch {
+      /* absent */
+    }
+    if (!fs.existsSync(state)) {
+      if (legacyStat?.isFile()) {
+        fs.renameSync(legacy, state);
+        fs.symlinkSync(state, legacy);
+        return `migrated ${legacy} -> ${state} (symlink left behind)`;
+      }
+      return "no state config yet; nothing to migrate";
+    }
+    if (legacyStat?.isSymbolicLink()) {
+      try {
+        if (fs.realpathSync(legacy) === fs.realpathSync(state)) return "ok";
+      } catch {
+        /* dangling link: fall through and repoint */
+      }
+      fs.unlinkSync(legacy);
+      fs.symlinkSync(state, legacy);
+      return "repointed legacy symlink at state config";
+    }
+    if (legacyStat?.isFile()) {
+      const bak = `${legacy}.pre-statedir-${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
+      fs.renameSync(legacy, bak);
+      fs.symlinkSync(state, legacy);
+      console.error(
+        `[setup] config divergence: ${legacy} was a real file while the state config exists; ` +
+          `parked it at ${bak} and re-linked. State config wins.`
+      );
+      return `divergence parked at ${bak}`;
+    }
+    fs.symlinkSync(state, legacy);
+    return "created legacy symlink at state config";
+  } catch (e) {
+    return `ensureConfigInStateDir error: ${(e as Error)?.message || e}`;
+  }
 }
 
 // Fields the X drafting prompts genuinely consume. Required ones must all be
@@ -39,6 +124,20 @@ export const REQUIRED_FIELDS = [
   // (project_search_topics) seeded FROM these on setup. With zero topics the
   // picker raises and the whole draft cycle silently returns nothing, so a
   // project is NOT ready until it has at least one topic to seed. (2026-06-02)
+  "search_topics",
+] as const;
+// Required fields for a personal-brand PERSONA project (persona:true). A persona
+// is a person's voice, NOT a product: it has no `website` and no target `icp` by
+// design. Validating a persona against the product REQUIRED_FIELDS therefore ALWAYS
+// reports it "missing website + icp" -> personaReady() could never be true, which
+// silently defeated the persona-aware kicker gate (a personal-brand-only setup then
+// never scheduled the autopilot and drafted nothing). So a persona is "ready" once
+// it has the fields the cycle actually consumes: a name, a voice, and at least one
+// seedable search topic. (2026-06-30, completing the 1.6.173 persona path)
+export const PERSONA_REQUIRED_FIELDS = [
+  "name",
+  "description",
+  "voice",
   "search_topics",
 ] as const;
 export const RECOMMENDED_FIELDS = [
@@ -134,13 +233,67 @@ export function projectExists(name: string): boolean {
   }
 }
 
-function normalizeTopics(t: string[] | string | undefined): string[] | undefined {
+// Strip stray JSON-array syntax that leaks into a single element ONLY when a
+// stringified array had to be split on commas (leading "[", trailing "]", and
+// the surrounding quotes on each element). Without this, topics like '["AI
+// video generation"' and '"ex-Google"]' get seeded verbatim and poison every
+// search query with literal [, ] and " characters (Karol, 2026-06-30).
+//
+// IMPORTANT: apply this ONLY on the naive-split fallback path. On the clean
+// paths (a real array, or a valid stringified array that JSON.parse handled)
+// each element is already clean, so stripping surrounding quotes there would
+// destroy legitimate phrase-match quotes in a search query — e.g.
+// '"agentic coding" min_faves:10' would lose its LEADING " and seed as
+// 'agentic coding" min_faves:10', weakening the phrase match (reported
+// 2026-07-17). Clean paths therefore only get trimmed.
+function stripTopicSyntax(x: string): string {
+  let s = String(x).trim();
+  s = s.replace(/^\[+/, "").replace(/\]+$/, "").trim();
+  s = s.replace(/^["']+/, "").replace(/["']+$/, "").trim();
+  return s;
+}
+
+// Normalize a list field the model may pass as a real array, a stringified
+// JSON array, or a comma/newline-delimited string, into a clean string[].
+// Used for BOTH search_topics and search_queries: the model frequently passes
+// a stringified JSON array for either, and the naive comma-split baked [, ] and
+// " into each element (Karol, 2026-06-30 — corrupted topics AND a silently
+// skipped query seed). Returns undefined only for nullish input.
+export function normalizeStringList(
+  t: string[] | string | undefined | null
+): string[] | undefined {
   if (t == null) return undefined;
-  if (Array.isArray(t)) return t.map((x) => String(x).trim()).filter(Boolean);
-  return String(t)
-    .split(/[,\n]/)
-    .map((x) => x.trim())
-    .filter(Boolean);
+  let raw: unknown[];
+  // Elements only carry stray JSON-array syntax when we reach the naive
+  // comma/newline split below; on the clean paths they're already delimited.
+  let fromNaiveSplit = false;
+  if (Array.isArray(t)) {
+    raw = t;
+  } else {
+    const s = String(t).trim();
+    let parsed: unknown = null;
+    if (s.startsWith("[")) {
+      try {
+        parsed = JSON.parse(s);
+      } catch {
+        parsed = null;
+      }
+    }
+    if (Array.isArray(parsed)) {
+      raw = parsed;
+    } else {
+      raw = s.split(/[,\n]/);
+      fromNaiveSplit = true;
+    }
+  }
+  const clean = fromNaiveSplit
+    ? stripTopicSyntax
+    : (x: string) => String(x).trim();
+  return raw.map((x) => clean(String(x))).filter(Boolean);
+}
+
+function normalizeTopics(t: string[] | string | undefined): string[] | undefined {
+  return normalizeStringList(t);
 }
 
 // The fields the user actually supplies via setup. Only fields that are present
@@ -200,6 +353,16 @@ export function buildProjectEntry(input: ProjectInput): Record<string, unknown> 
     weight: 10,
     platform: "twitter",
     voice_relationship: "first_party",
+    // A freshly onboarded customer has NOT shipped the @m13v/seo-components
+    // /r/[code] resolver on their own domain, so a wrapped short link minted
+    // against project.website would 404 ("this link doesn't exist"). Default
+    // new projects to route /r/<code> through the social-autoposter-owned
+    // resolver at https://s4l.ai instead: short_links_live=false makes
+    // _project_short_links_host / getProjectWrapperHost fall back to
+    // DEFAULT_FALLBACK_HOST. The customer flips this to true (or removes it)
+    // only AFTER they ship their own /r/[code] handler. See the "URL wrapping"
+    // section in CLAUDE.md.
+    short_links_live: false,
     ...userFields(input),
   };
   // Generic fields can override the defaults above (e.g. platform/weight) and
@@ -215,6 +378,7 @@ export function buildProjectEntry(input: ProjectInput): Record<string, unknown> 
 export function applySetup(input: ProjectInput): {
   project: string;
   created: boolean;
+  persona: boolean;
   ready: boolean;
   missing_required: string[];
   fields_set: string[];
@@ -223,6 +387,10 @@ export function applySetup(input: ProjectInput): {
   const cfg = readConfig();
   cfg.projects = cfg.projects || [];
   const idx = cfg.projects.findIndex((p) => p.name === input.name);
+  // Editing the persona project (persona:true) through this path must not pull
+  // it into the managed-PRODUCTS scope list, and its readiness is judged against
+  // PERSONA_REQUIRED_FIELDS (a persona has no website/icp by design).
+  const persona = idx >= 0 && cfg.projects[idx].persona === true;
   let created: boolean;
   let fields_set: string[] = [];
   let fields_removed: string[] = [];
@@ -251,17 +419,271 @@ export function applySetup(input: ProjectInput): {
   }
   fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  void sendStateSnapshot("config_write");
 
-  recordManagedProject(input.name);
-  const missing = missingForProject(input.name) ?? [];
+  if (!persona) recordManagedProject(input.name);
+  const missing =
+    missingForProject(input.name, persona ? PERSONA_REQUIRED_FIELDS : REQUIRED_FIELDS) ?? [];
   return {
     project: input.name,
     created,
+    persona,
     ready: missing.length === 0,
     missing_required: missing,
     fields_set,
     fields_removed,
   };
+}
+
+// Persist the connected Reddit username into config accounts.reddit.username
+// (the field account_resolver.resolve('reddit') reads), following the same
+// never-clobber rule connect_x uses for the X handle: only write when the
+// configured value is empty or the template placeholder. This is the MCP
+// server's config-write path (configPath() resolution + backup + snapshot);
+// setup_reddit_auth.py deliberately does NOT write config.json itself.
+const REDDIT_USERNAME_PLACEHOLDERS = new Set(["", "your-reddit-username", "u/your-reddit-username"]);
+
+export function recordRedditAccount(username: string): { written: boolean; detail: string } {
+  const clean = (username || "").trim().replace(/^u\//i, "").replace(/^@/, "");
+  if (!clean) return { written: false, detail: "empty username" };
+  let cfg: ConfigFile;
+  try {
+    cfg = readConfig();
+  } catch (e: any) {
+    return { written: false, detail: `config unreadable: ${e?.message || e}` };
+  }
+  const accounts = ((cfg as Record<string, unknown>).accounts ??= {}) as Record<string, unknown>;
+  if (typeof accounts !== "object" || accounts === null) {
+    return { written: false, detail: "config accounts is not an object" };
+  }
+  const reddit = (accounts.reddit ??= {}) as Record<string, unknown>;
+  if (typeof reddit !== "object" || reddit === null) {
+    return { written: false, detail: "config accounts.reddit is not an object" };
+  }
+  const cur = String(reddit.username ?? "").trim();
+  if (!REDDIT_USERNAME_PLACEHOLDERS.has(cur.toLowerCase())) {
+    return {
+      written: false,
+      detail: `accounts.reddit.username already set (${cur}); not overwriting`,
+    };
+  }
+  reddit.username = clean;
+  if (!reddit.login_method) reddit.login_method = "browser";
+  try {
+    const cfgPath = configPath();
+    if (fs.existsSync(cfgPath)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+    }
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    void sendStateSnapshot("config_write");
+    return { written: true, detail: `accounts.reddit.username = ${clean}` };
+  } catch (e: any) {
+    return { written: false, detail: `config write failed: ${e?.message || e}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Personal-brand PERSONA project (2026-06-26).
+//
+// The persona is a project the autopilot can draft for in personal_brand mode:
+// link-free organic engagement in the user's own voice (the revived 2026-02
+// flow). It is NOT a product, so it is deliberately kept OUT of the managed-
+// products scope list (no recordManagedProject) — that keeps it off the product-
+// readiness counts and the "all projects ready" gate. It is identified by
+// `persona: true`, runs with `enabled: false` (so the normal weighted pick never
+// touches it) and is force-selected via S4L_FORCE_PROJECT only when the mode
+// toggle is on. Keep these defaults in lockstep with scripts/s4l_mode.py and the
+// hand-authored PersonalBrand entry in config.json.
+export const PERSONA_DEFAULT_NAME = "PersonalBrand";
+
+const PERSONA_DEFAULTS: Record<string, unknown> = {
+  persona: true,
+  enabled: false,
+  weight: 10, // for the FUTURE personal/promo percentage blend; ignored while enabled:false
+  voice_relationship: "first_party",
+  description:
+    "The user's own personal brand. Not a product. Goal is pure organic " +
+    "engagement that grows the user's authority and following by adding genuine " +
+    "value to conversations they have real experience with. No company, no " +
+    "signup, no pitch.",
+  content_angle:
+    "Ground every reply in the user's actual first-hand experience. Only engage " +
+    "a thread when there is a concrete, specific angle from that lived " +
+    "experience; otherwise skip it.",
+  voice: {
+    tone:
+      "write like you're texting a coworker. lowercase is fine, sentence " +
+      "fragments are fine. first person and specific. reply to high-signal " +
+      "comments, not just OP. match the thread's energy and length (1-2 " +
+      "sentences is ideal).",
+    never: [
+      "self-promotion, links, or feature lists",
+      "mentioning a product or company unless it directly solves OP's problem",
+      "opening with 'Makes sense', 'The nuance here is', or 'What everyone here is describing'",
+      "sounding like a blog post, a thought-leader, or an AI",
+      "generic advice with no specific personal angle",
+      "em dashes or en dashes",
+    ],
+  },
+  content_guardrails: {
+    summary:
+      "This is personal-brand growth, not marketing. Follow a 60/30/10 mix: " +
+      "~60% humor (self-deprecating dev stories, funny bugs, relatable pain), " +
+      "~30% inspirational (cool technical wins, 'look what's possible'), ~10% " +
+      "light personal mention only when it genuinely fits. NEVER attach a link " +
+      "or a CTA. NEVER list features or name a product to sell it. Only reply " +
+      "when the user has a real, specific angle from their own work; if the " +
+      "thread doesn't connect to something they've actually done, skip it. Be a " +
+      "value-adding peer, not a promoter.",
+  },
+  search_topics: [
+    "AI agents",
+    "Claude Code",
+    "coding agents",
+    "AI coding tools",
+    "LLM developer workflow",
+    "prompt engineering",
+    "MCP servers",
+    "macOS automation",
+    "browser automation",
+    "desktop app development",
+    "building in public",
+    "indie hacking",
+    "shipping solo",
+    "API costs",
+    "developer productivity",
+  ],
+};
+
+export interface PersonaGrounding {
+  description?: string;
+  content_angle?: string;
+  voice?: unknown;
+  search_topics?: string[] | string;
+  // Raw voice-memo transcript from the onboarding dictation interview, kept
+  // VERBATIM (never paraphrased). Persisted to the persona_corpus.txt sidecar,
+  // NOT config.json, so the multi-KB block never bloats ALL_PROJECTS_JSON. The
+  // persona lane reads it only when it drafts, to quote real specifics.
+  content_corpus?: string;
+}
+
+// The persona project entry (the one with persona:true), or null if none yet.
+export function findPersonaProject(): { name: string } | null {
+  try {
+    const proj = (readConfig().projects || []).find((p) => p.persona === true);
+    return proj ? { name: String(proj.name) } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Create the persona project if it doesn't exist; otherwise merge ONLY the
+// supplied grounding fields (from the profile scan) onto the existing entry,
+// never touching persona/enabled/weight. Writes config.json (backup + full
+// rewrite, same as applySetup). Deliberately does NOT recordManagedProject.
+export function ensurePersonaProject(
+  grounding?: PersonaGrounding
+): { name: string; created: boolean } {
+  const cfg = readConfig();
+  cfg.projects = cfg.projects || [];
+
+  const g: Record<string, unknown> = {};
+  if (grounding) {
+    if (grounding.description && String(grounding.description).trim())
+      g.description = grounding.description;
+    if (grounding.content_angle && String(grounding.content_angle).trim())
+      g.content_angle = grounding.content_angle;
+    if (grounding.voice && typeof grounding.voice === "object")
+      g.voice = grounding.voice;
+    const topics = normalizeTopics(grounding.search_topics);
+    if (topics && topics.length) g.search_topics = topics;
+  }
+
+  const existing = cfg.projects.find((p) => p.persona === true);
+  let name: string;
+  let created: boolean;
+  if (existing) {
+    Object.assign(existing, g); // merge only provided grounding; keep persona flags
+    name = String(existing.name);
+    created = false;
+  } else {
+    cfg.projects.push({ name: PERSONA_DEFAULT_NAME, ...PERSONA_DEFAULTS, ...g });
+    name = PERSONA_DEFAULT_NAME;
+    created = true;
+  }
+
+  const cfgPath = configPath();
+  if (fs.existsSync(cfgPath)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+  }
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+
+  // Raw dictation transcript -> persona_corpus.txt sidecar (NOT config.json).
+  // Mirrors scripts/build_persona.py cmd_apply: config.json is inlined into many
+  // prompts (ALL_PROJECTS_JSON), so a multi-KB corpus there would bloat every
+  // cycle's token bill. The persona lane reads this file only when it drafts.
+  // Best-effort; a write failure must never block persona provisioning.
+  if (grounding && typeof grounding.content_corpus === "string" && grounding.content_corpus.trim()) {
+    try {
+      const corpusPath = path.join(path.dirname(cfgPath), "persona_corpus.txt");
+      fs.writeFileSync(corpusPath, grounding.content_corpus.trim().slice(0, 100000) + "\n", "utf-8");
+    } catch {
+      // ignore: corpus is grounding fuel, not required for a working persona.
+    }
+  }
+  // After the corpus write, so the snapshot picks up config + corpus together.
+  void sendStateSnapshot("config_write");
+  return { name, created };
+}
+
+// Heal installs that onboarded BEFORE short_links_live defaulted to false.
+// Such a project has neither short_links_host nor an explicit short_links_live,
+// so the wrapper host resolves to project.website — but the customer never
+// shipped a /r/[code] resolver there, so every minted short link 404s. Set
+// short_links_live=false (route /r/<code> through s4l.ai) for those projects.
+//
+// Scoped to projects this install actually manages, so a hand-maintained dev
+// config with branded-resolver projects isn't rewritten. Idempotent: a project
+// that already has either short-link field set is left untouched (someone made
+// a deliberate choice). Best-effort; never throws.
+export function ensureShortLinksDefault(): { healed: string[] } {
+  const healed: string[] = [];
+  try {
+    const cfg = readConfig();
+    const projects = cfg.projects || [];
+    if (!projects.length) return { healed };
+    const managed = new Set(managedProjects());
+    let changed = false;
+    for (const p of projects) {
+      const name = typeof p.name === "string" ? p.name : "";
+      if (!name || !managed.has(name)) continue;
+      const hasHost =
+        typeof p.short_links_host === "string" && p.short_links_host.trim() !== "";
+      const hasLiveFlag =
+        p.short_links_live === true || p.short_links_live === false;
+      if (hasHost || hasLiveFlag) continue; // deliberate config: leave it.
+      p.short_links_live = false;
+      healed.push(name);
+      changed = true;
+    }
+    if (changed) {
+      const cfgPath = configPath();
+      if (fs.existsSync(cfgPath)) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+      }
+      fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+      fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      void sendStateSnapshot("config_write");
+    }
+  } catch {
+    // best-effort heal; a failure here must never block boot.
+  }
+  return { healed };
 }
 
 // ---------------------------------------------------------------------------
@@ -270,12 +692,15 @@ export function applySetup(input: ProjectInput): {
 
 // Which required fields are missing on the persisted project in config.json.
 // Returns null when the named project can't be found/read.
-export function missingForProject(name: string | undefined): string[] | null {
+export function missingForProject(
+  name: string | undefined,
+  fields: readonly string[] = REQUIRED_FIELDS
+): string[] | null {
   if (!name) return null;
   try {
     const proj = (readConfig().projects || []).find((p) => p.name === name);
     if (!proj) return null;
-    return REQUIRED_FIELDS.filter((f) => {
+    return fields.filter((f) => {
       const v = proj[f];
       if (v == null) return true;
       if (typeof v === "string") return v.trim() === "";
@@ -296,9 +721,15 @@ export interface ProjectStatus {
 }
 
 export function projectStatus(name: string): ProjectStatus {
-  const missing = missingForProject(name);
+  // The persona lane (persona:true) has no website/icp by design — validate it
+  // against PERSONA_REQUIRED_FIELDS like every other status surface, or an
+  // explicit request for it (e.g. get_stats project:'PersonalBrand') gets the
+  // misleading "still needs: website, icp" refusal.
+  const persona = findPersonaProject()?.name === name;
+  const required = persona ? PERSONA_REQUIRED_FIELDS : REQUIRED_FIELDS;
+  const missing = missingForProject(name, required);
   if (missing === null) {
-    return { name, in_config: false, ready: false, missing_required: [...REQUIRED_FIELDS] };
+    return { name, in_config: false, ready: false, missing_required: [...required] };
   }
   return { name, in_config: true, ready: missing.length === 0, missing_required: missing };
 }
@@ -310,6 +741,85 @@ export function listManagedProjectStatus(): ProjectStatus[] {
 
 export function hasReadyProject(): boolean {
   return listManagedProjectStatus().some((s) => s.ready);
+}
+
+// ---------------------------------------------------------------------------
+// Settings view: current VALUES of the user-editable fields, per project.
+// Powers the panel's "Project settings" section and project_config action:'get'.
+// Whitelist-only on purpose: the panel edits through project_config's validated
+// merge, so this surface exposes exactly the fields that path models, never the
+// whole raw project object (operator-level keys like posthog/landing_pages stay
+// out of the widget; they remain reachable via the `fields` escape hatch).
+// ---------------------------------------------------------------------------
+export const EDITABLE_PROJECT_FIELDS = [
+  "website",
+  "description",
+  "icp",
+  "voice",
+  "differentiator",
+  "search_topics",
+  "get_started_link",
+  "content_guardrails",
+  // Persona grounding (persona projects only in practice; harmless on products).
+  "content_angle",
+] as const;
+
+export interface ProjectSettingsView {
+  name: string;
+  persona: boolean;
+  ready: boolean;
+  missing_required: string[];
+  // Current values for EDITABLE_PROJECT_FIELDS keys present on the project.
+  fields: Record<string, unknown>;
+  // Advanced keys that exist on the project but aren't in the editable
+  // whitelist — surfaced read-only so nothing looks silently hidden.
+  extra_keys: string[];
+}
+
+// Value snapshots for every project this install manages, plus the persona
+// project (kept out of the managed-products scope by design but still the
+// user's own settings).
+export function listProjectSettings(): ProjectSettingsView[] {
+  let projects: Array<Record<string, unknown>>;
+  try {
+    projects = readConfig().projects || [];
+  } catch {
+    return [];
+  }
+  const managed = new Set(managedProjects());
+  const editable = new Set<string>(EDITABLE_PROJECT_FIELDS);
+  return projects
+    .filter((p) => typeof p.name === "string" && (managed.has(p.name as string) || p.persona === true))
+    .map((p) => {
+      const name = String(p.name);
+      const persona = p.persona === true;
+      const req = persona ? PERSONA_REQUIRED_FIELDS : REQUIRED_FIELDS;
+      const missing = missingForProject(name, req) ?? [...req];
+      const fields: Record<string, unknown> = {};
+      for (const k of EDITABLE_PROJECT_FIELDS) {
+        if (p[k] !== undefined) fields[k] = p[k];
+      }
+      const extra_keys = Object.keys(p)
+        .filter((k) => k !== "name" && k !== "persona" && !editable.has(k))
+        .sort();
+      return { name, persona, ready: missing.length === 0, missing_required: missing, fields, extra_keys };
+    });
+}
+
+// The personal-brand persona project (persona:true) is intentionally kept OUT of
+// the managed-products scope, so listManagedProjectStatus()/hasReadyProject() never
+// count it. But in personal_brand mode the cycle DOES draft for it (force-selected
+// via S4L_FORCE_PROJECT). Without this helper a personal-brand-only ("self promo")
+// setup looks like "no project configured" everywhere — the autopilot kicker never
+// installs and the doctor can't see it. Reports whether the persona exists AND is
+// fully configured (has every required field, incl. seeded topics). (2026-06-30)
+export function personaReady(): boolean {
+  const persona = findPersonaProject();
+  if (!persona) return false;
+  // Validate against PERSONA_REQUIRED_FIELDS, NOT the product REQUIRED_FIELDS: a
+  // persona has no website/icp by design, so the product set would never pass.
+  const missing = missingForProject(persona.name, PERSONA_REQUIRED_FIELDS);
+  return missing !== null && missing.length === 0;
 }
 
 // ---------------------------------------------------------------------------

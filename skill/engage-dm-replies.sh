@@ -35,7 +35,7 @@ fi
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ "$PLATFORM" = "linkedin" ] && [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn DM-replies pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn DM-replies pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -116,7 +116,7 @@ LOG_SUFFIX=""
 [ -n "$PLATFORM" ] && LOG_SUFFIX="-$PLATFORM"
 LOG_FILE="$LOG_DIR/engage-dm-replies${LOG_SUFFIX}-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== DM Reply Engagement Run: $(date) (platform: ${PLATFORM:-all}) ==="
@@ -193,7 +193,7 @@ if [ -n "$PLATFORM" ]; then
     HR_PLATFORM_ARG="--platform $PLATFORM"
 fi
 
-# Ingest any human replies that have landed in the i@m13v.com inbox since the
+# Ingest any human replies that have landed in the matt@s4l.ai inbox since the
 # last run. Parses [DM #N] from the subject, strips quoted history, inserts
 # into human_dm_replies with status='pending'. Safe to run every cycle (no-op
 # when inbox is empty; deduped by Gmail message id).
@@ -302,12 +302,25 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 
 ### Step C. If \`reply_channel\` is \`dm\` or \`both\`: deliver the DM
 
+**NO CAMPAIGN SUFFIX ON HUMAN REPLIES.** A row in this queue is a HUMAN answering
+an escalation (often an AI-callout), so the campaign suffix (e.g. ' written with
+ai') must NEVER be coin-flipped onto it — it re-burns the exact lead the human is
+trying to recover (2026-07-13: the suffix landed on the hand-approved ngeloxyz
+recovery DM and helped kill the thread). When sending via the python CLIs, ALWAYS
+prefix the env opt-out:
+\`\`\`bash
+S4L_SKIP_CAMPAIGN_SUFFIX=1 python3 scripts/twitter_browser.py send-dm THREAD_URL "MESSAGE" DM_ID
+S4L_SKIP_CAMPAIGN_SUFFIX=1 python3 scripts/reddit_browser.py send-dm CHAT_URL "MESSAGE" DM_ID
+\`\`\`
+This applies ONLY inside Phase 0 (human replies). Auto-replies in the later phases
+keep the normal campaign behavior — do NOT carry this env var forward.
+
 1. Craft a natural DM based on the human's instructions and the conversation context.
 2. Navigate to the conversation on the correct platform using \`chat_url\` (or find the conversation with their_author).
    - **Reddit Chat** (mcp__reddit-harness__bh_run tool, CDP-driven real Chrome on port 9557)
    - **LinkedIn Messages** (mcp__linkedin-harness__bh_run tool, CDP-driven real Chrome on port 9556)
    - **X/Twitter DMs** (mcp__twitter-harness__bh_run tool), if encrypted DM passcode dialog appears, enter: $TWITTER_DM_PASSCODE
-3. Type and send the crafted DM.
+3. Type and send the crafted DM (with the suffix opt-out env var when using the python send-dm CLIs, per the rule above).
 4. Log the outbound message (log what you ACTUALLY SENT, not the human's instructions). Pass --verified ONLY when the browser tool returned verified=true. If verification failed, log nothing and let the next cycle retry; never pass --verified speculatively:
    \`\`\`bash
    cd ~/social-autoposter && python3 scripts/dm_conversation.py log-outbound --dm-id DM_ID --content "THE_CRAFTED_DM_YOU_SENT" --verified
@@ -681,7 +694,7 @@ Real conversations with real people. Sound like a person, not a bot. But rapport
 
 1. **ONE message per conversation per run.** Never send 2+ messages. If you already sent one, move on.
 2. **NEVER send a message if the last message is outbound.** Check conversation_history first. If we sent last, SKIP entirely.
-3. **NEVER use "btw I built..." or "actually I built..." or "I'm working on..."** These phrases are transparent self-promotion. Banned. Frame any product as a recommendation, not your own.
+3. **Don't open with a pitch or lead with "btw I built..." / "actually I built..." / "I'm working on...".** Leading with a product pitch kills rapport in a cold DM. If your own product genuinely fits the conversation, mention it plainly when it comes up.
 4. **NEVER recommend a product in the first message.** Count the total messages. If there are fewer than 2 messages total (i.e. they haven't replied to us yet), stay in rapport-building mode. No links, no product names. Once they've replied at least once (2+ messages), recommend only if the conversation naturally leads there.
 5. **NEVER fabricate context** like "I've been thinking about your question" or "started putting together a test suite" to create a pretext for sharing.
 
@@ -1260,28 +1273,65 @@ fi
 # per-MCP-call heartbeat proxy wired through their MCP configs yet.
 log "Acquiring platform-browser lock(s) for Claude/MCP step..."
 case "${PLATFORM:-all}" in
-    linkedin) acquire_lock "linkedin-browser" 3600; ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) ;;
+    linkedin)
+        acquire_lock "linkedin-browser" 3600
+        # rc=78 is the linkedin-pipeline lock's reserved skip code (peer
+        # pipeline is driving the 9556 Chrome). The subshell's exit status
+        # must be checked HERE: an exit inside it never stops this script
+        # (2026-07-06 bug: two live LinkedIn tabs from two pipelines).
+        _LI_BOOT_RC=0
+        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
+        if [ "$_LI_BOOT_RC" -eq 78 ]; then
+            log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+            exit 0
+        elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+            log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+            exit "$_LI_BOOT_RC"
+        fi
+        ;;
     reddit)
         # Reddit: brief pre-flight acquire+ensure+release ONLY. Per-DM
         # acquire/release happens inside the Claude prompt.
         log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit pre-flight acquire BUSY; ensure_reddit_browser_for_backend will run anyway; per-DM acquires inside the prompt will retry."
-        ensure_reddit_browser_for_backend
+        ensure_reddit_browser_for_backend || _RD_BOOT_RC=$?
+        if [ "${_RD_BOOT_RC:-0}" = "78" ]; then
+            python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+        fi
+        hc_exit_if_deferred "${_RD_BOOT_RC:-0}" "reddit-harness"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         ;;
-    twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
+    twitter|x)
+        acquire_lock "twitter-browser" 3600
+        ensure_twitter_browser_for_backend || log "WARNING: twitter-harness bootstrap failed (rc=$?); continuing anyway, downstream browser calls may fail"
+        ;;
     all)
         acquire_lock "linkedin-browser" 3600
-        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend )
+        # rc=78 skip (see the `linkedin` branch). A LinkedIn skip exits the
+        # WHOLE all-platform fire, matching the pipeline lock's documented
+        # skip-this-fire semantics; launchd re-fires on the next cadence.
+        _LI_BOOT_RC=0
+        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
+        if [ "$_LI_BOOT_RC" -eq 78 ]; then
+            log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire (all-platform run)"
+            exit 0
+        elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+            log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+            exit "$_LI_BOOT_RC"
+        fi
         # Reddit: brief pre-flight only (same as the `reddit` branch above).
         log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit pre-flight acquire BUSY; per-DM acquires inside the prompt will retry."
-        ensure_reddit_browser_for_backend
+        ensure_reddit_browser_for_backend || _RD_BOOT_RC=$?
+        if [ "${_RD_BOOT_RC:-0}" = "78" ]; then
+            python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+        fi
+        hc_exit_if_deferred "${_RD_BOOT_RC:-0}" "reddit-harness"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         acquire_lock "twitter-browser" 3600
-        ensure_twitter_browser_for_backend
+        ensure_twitter_browser_for_backend || log "WARNING: twitter-harness bootstrap failed (rc=$?); continuing anyway, downstream browser calls may fail"
         ;;
 esac
 
@@ -1304,6 +1354,17 @@ esac
 # ============================================================================
 NEEDS_CLAUDE=false
 GATE_REASON=""
+
+# Pending human replies (Phase 0) must wake Claude even when no inbound
+# signal fires: the operator's email-escalation reply is outbound-only work,
+# so gating purely on inbound counts starved pending rows on quiet-inbox
+# days (surfaced 2026-07-18: DM #106383's reply sat pending while the gate
+# logged "nothing to do" and exited at cost=$0).
+if [ -n "$PHASE0_INSTRUCTIONS" ]; then
+    NEEDS_CLAUDE=true
+    GATE_REASON="phase0: ${HR_COUNT:-?} pending human replies to deliver"
+    log "[gate] ${GATE_REASON}"
+fi
 
 # Helper: count DMs where last message is inbound, per platform. Includes
 # both 'active' and 'needs_reply' because Phase A.0 ingest flips status to

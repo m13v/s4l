@@ -6,9 +6,13 @@ import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_post
+from account_resolver import resolve as _resolve_account
 
 EXCLUDED_AUTHORS = {"louis030195", "louis3195"}
-OWN_NAME = "Matthew Diakonov"
+# Self-match guardrail: resolved LinkedIn display name (accounts.linkedin.name),
+# never a hardcoded literal — a literal filters/attributes as the repo owner on
+# every install. OWN_HANDLES keeps the legacy slug forms notifications carry.
+OWN_NAME = _resolve_account("linkedin") or ""
 OWN_HANDLES = {"m13v", "matthew-diakonov"}
 
 def load_existing_comment_ids():
@@ -130,7 +134,9 @@ def main():
                     "our_content": "[discovered via notification, no original content tracked]",
                     "project": "general",
                     "thread_author": thread_author,
-                    "our_account": "Matthew Diakonov",
+                    # Resolved posting identity, never hardcoded (mis-attributes
+                    # rows on any non-operator install).
+                    "our_account": OWN_NAME,
                     "engagement_style": "discovered_via_notification",
                     "status": "active",
                 },

@@ -6,13 +6,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import path from "node:path";
 import os from "node:os";
 
-const REPO = process.env.SAPS_REPO_DIR || path.join(os.homedir(), "social-autoposter");
+const REPO = process.env.S4L_REPO_DIR || path.join(os.homedir(), "social-autoposter");
 const serverEntry = path.resolve("dist/index.js");
 
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [serverEntry],
-  env: { ...process.env, SAPS_REPO_DIR: REPO, SAPS_PANEL_NO_OPEN: "1" },
+  env: { ...process.env, S4L_REPO_DIR: REPO, S4L_PANEL_NO_OPEN: "1" },
 });
 
 // A plain client with NO ui extension capability => host "can't render inline".
@@ -37,8 +37,8 @@ console.log("fallback_url:", url);
 
 // 1) the loopback serves the panel in http-bridge mode
 const html = await (await fetch(url)).text();
-if (!html.includes('__SAPS_BRIDGE__')) fail("served panel missing __SAPS_BRIDGE__ flag");
-if (!/__SAPS_BRIDGE__\s*=\s*"http"/.test(html)) fail("panel not flipped to http bridge");
+if (!html.includes('__S4L_BRIDGE__')) fail("served panel missing __S4L_BRIDGE__ flag");
+if (!/__S4L_BRIDGE__\s*=\s*"http"/.test(html)) fail("panel not flipped to http bridge");
 console.log("OK: panel served with http bridge flag");
 
 // 2) health endpoint

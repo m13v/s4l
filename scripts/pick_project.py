@@ -25,15 +25,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from project_topics import topics_for_project  # noqa: E402
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 
 # Rolling window (days) for inverse-recent-share weighting in pick_projects().
 RECENT_WINDOW_DAYS = 7
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def _counts_via_api(platform=None):
@@ -74,10 +77,17 @@ def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
 
 
 def _eligible_pool(config, platform=None, exclude=None):
-    """Projects eligible for selection: enabled, weight>0, platform-compatible."""
+    """Projects eligible for selection: enabled, weight>0, non-persona,
+    platform-compatible.
+
+    Persona entries (`persona: true`) are structurally excluded: they run ONLY
+    via the personal_brand lane's force-inject (s4l_mode.persona_name), never
+    via this promotion lottery, regardless of their `enabled` flag.
+    """
     pool = [
         p for p in config.get("projects", [])
         if p.get("enabled", True) and p.get("weight", 0) > 0
+        and p.get("persona") is not True
     ]
     if exclude:
         excluded = {n.lower() for n in exclude}
@@ -122,8 +132,10 @@ def pick_project(config, platform=None, exclude=None):
         return picks[0]
     if exclude:
         return None
-    # No eligible project at all: legacy fallback to any project in config.
-    projects = config.get("projects", [])
+    # No eligible project at all: legacy fallback to any non-persona project.
+    projects = [
+        p for p in config.get("projects", []) if p.get("persona") is not True
+    ]
     return random.choice(projects) if projects else None
 
 

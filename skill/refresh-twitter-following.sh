@@ -16,7 +16,7 @@ set -uo pipefail
 LOG_DIR="$HOME/social-autoposter/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/refresh-twitter-following-$(date +%Y-%m-%d_%H%M%S).log"
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 REPO_DIR="$HOME/social-autoposter"
 
@@ -36,7 +36,9 @@ fi
 log "twitter-browser lock held (pid=$$)"
 
 # Probe + launch harness Chrome on port 9555 if needed, then sweep leftover tabs.
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail"
 
 # Load .env so http_api.py picks up AUTOPOSTER_API_BASE / AUTOPOSTER_API_KEY.
 # shellcheck source=/dev/null

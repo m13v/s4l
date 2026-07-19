@@ -263,11 +263,27 @@ def _load_comment_blocked_subs(project_name=None):
         # without this filter, account A's real ban would suppress a sub for
         # account B that has no such ban. Entries with account=null are
         # treated as global (apply regardless), preserving pre-2026-05-15 data.
-        current_account = (config.get("reddit_account") or {}).get("username") or None
+        # The ONE resolver (env -> reddit_account.username -> accounts.reddit
+        # .username) — keeps ban scoping in lockstep with every other reader.
+        current_account = _resolve_account("reddit") or None
         blocked = set()
         bans = config.get("subreddit_bans") or {}
-        if isinstance(bans, dict):
-            for entry in bans.get("comment_blocked") or []:
+        # Backend union (2026-07-19): the subreddit_bans TABLE is the source
+        # of truth; config.json is the write-through cache / offline fallback.
+        # Union both so neither a missed mirror nor an API outage can un-ban
+        # a sub. fetch_entries returns None on "backend unknown" (never treat
+        # that as "no bans"); entries share the config.json shape so the same
+        # account-scope loop below applies.
+        entries = list(bans.get("comment_blocked") or []) if isinstance(bans, dict) else []
+        try:
+            import subreddit_bans_client as _sbc
+            _backend = _sbc.fetch_entries("comment_blocked", account=current_account)
+            if _backend:
+                entries.extend(_backend)
+        except Exception:
+            pass  # reader must never break on backend/cache trouble
+        if entries:
+            for entry in entries:
                 slug = _ban_entry_to_slug(entry)
                 if not slug:
                     continue
@@ -517,8 +533,8 @@ def cmd_search(args):
     # excludes (subreddit:<slug> rows in project_search_excludes) layer onto
     # the global denylist. The same env var is reused below for the feedback-
     # log side effect, so this reordering is free.
-    project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
-    batch_env = os.environ.get("SAPS_REDDIT_BATCH_ID") or None
+    project_env = os.environ.get("S4L_REDDIT_PROJECT") or None
+    batch_env = os.environ.get("S4L_REDDIT_BATCH_ID") or None
 
     # Compute global vs project-augmented denylist sizes so the stderr marker
     # below shows how much of the block bucket came from the per-project
@@ -557,14 +573,14 @@ def cmd_search(args):
     )
 
     # Opaque-results discover mode (post 2026-05-07 refactor): when
-    # SAPS_REDDIT_DUMP_DIR is set, write the full threads JSON to a unique
+    # S4L_REDDIT_DUMP_DIR is set, write the full threads JSON to a unique
     # file in that directory and print ONLY a one-line summary to stdout.
     # This prevents Claude (running this tool from the discover prompt) from
     # ever seeing thread content, which it would otherwise filter despite
     # explicit "emit every thread" instructions. The orchestrator
     # (_discover_iteration in post_reddit.py) globs the dump dir after Claude
     # exits and reads every dumped file directly into the candidate plan.
-    dump_dir = os.environ.get("SAPS_REDDIT_DUMP_DIR")
+    dump_dir = os.environ.get("S4L_REDDIT_DUMP_DIR")
     if dump_dir and os.path.isdir(dump_dir):
         import tempfile as _tempfile
         fd, dump_path = _tempfile.mkstemp(
@@ -642,13 +658,13 @@ def _html_postable_check(thread_url):
 def cmd_fetch(args):
     """Fetch a thread's comments via Reddit JSON API."""
     # Check if subreddit is blocked. Honors per-project excludes via the
-    # SAPS_REDDIT_PROJECT env var (same shape as cmd_search), so a sub on
+    # S4L_REDDIT_PROJECT env var (same shape as cmd_search), so a sub on
     # a project's private denylist (or in project_search_excludes) returns
     # the same `subreddit_blocked` error and the LLM stops fetching it.
     import re as _re
     sub_match = _re.search(r'/r/([^/]+)', args.url)
     if sub_match:
-        project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
+        project_env = os.environ.get("S4L_REDDIT_PROJECT") or None
         blocked = _load_comment_blocked_subs(project_name=project_env)
         if sub_match.group(1).lower() in blocked:
             print(json.dumps({"error": "subreddit_blocked", "subreddit": sub_match.group(1)}))
@@ -837,6 +853,9 @@ def cmd_log_post(args):
         "project": args.project,
         "engagement_style": getattr(args, "engagement_style", None),
         "search_topic": getattr(args, "search_topic", None),
+        # draft_prompt A/B arm that shaped this draft (2026-07-16); same
+        # posts.draft_prompt_variant column log_post.py stamps for twitter.
+        "draft_prompt_variant": getattr(args, "draft_prompt_variant", None),
         "claude_session_id": session_id,
         "language": None,
         "is_recommendation": False,
@@ -909,7 +928,7 @@ def main():
     p_log.add_argument("project")
     p_log.add_argument("thread_author")
     p_log.add_argument("thread_title")
-    p_log.add_argument("--account", default="Deep_Ad1959")
+    p_log.add_argument("--account", default=(_resolve_account("reddit") or ""))
     p_log.add_argument("--engagement-style", default=None)
     p_log.add_argument("--search-topic", dest="search_topic", default=None,
                        help="The seed topic/query used to find this thread (feedback loop input)")
@@ -925,6 +944,12 @@ def main():
                             "can break out audience-page traffic (e.g. "
                             "'audience_page:founder-ghostwriting') from generic "
                             "homepage links.")
+    p_log.add_argument("--draft-prompt-variant", dest="draft_prompt_variant",
+                       default=None,
+                       help="draft_prompt A/B arm that shaped this draft "
+                            "(treatment_v4/control_v4); stored in "
+                            "posts.draft_prompt_variant, same column the "
+                            "twitter lane stamps via log_post.py.")
 
     args = parser.parse_args()
     try:

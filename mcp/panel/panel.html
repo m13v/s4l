@@ -12,26 +12,46 @@
           <span class="title">S4L</span>
           <span class="ver" id="ver"></span>
         </div>
-        <!-- Inline setup summary + expand dropdown. The counter shows only while
-             setup is incomplete; once complete this collapses to just a "Setup"
-             dropdown so the milestone details stay inspectable on demand. -->
-        <button
-          class="setup-summary"
-          id="setup-summary"
-          type="button"
-          hidden
-          aria-expanded="false"
-        >
-          <span class="setup-summary-label">Setup</span>
-          <span class="setup-summary-count" id="onboarding-count"></span>
-          <span class="chevron" aria-hidden="true"></span>
-        </button>
+        <div class="head-right">
+          <!-- Pause/resume the draft pipeline (kicker + support daemons) without
+               touching Claude Desktop, this session, or X. Inline with the title
+               since it's the primary control, not buried lower on the page. -->
+          <div class="head-pause" id="pause-card">
+            <span class="head-pause-label" id="pause-name">Running</span>
+            <button class="switch" id="switch-pause" type="button" role="switch" aria-checked="true" aria-label="Pause S4L" title="Pause S4L">
+              <span class="knob"></span>
+            </button>
+          </div>
+          <!-- Inline setup summary + expand dropdown. The counter shows only while
+               setup is incomplete; once complete this collapses to just a "Setup"
+               dropdown so the milestone details stay inspectable on demand. -->
+          <button
+            class="setup-summary"
+            id="setup-summary"
+            type="button"
+            hidden
+            aria-expanded="false"
+          >
+            <span class="setup-summary-label">Setup</span>
+            <span class="setup-summary-count" id="onboarding-count"></span>
+            <span class="chevron" aria-hidden="true"></span>
+          </button>
+        </div>
       </header>
 
       <section class="onboarding-details" id="onboarding-details" hidden>
         <div class="onboarding-bar"><span id="onboarding-bar-fill"></span></div>
         <ul class="steps onboarding-steps" id="onboarding-steps"></ul>
         <div class="onboarding-blocker" id="onboarding-blocker" hidden></div>
+      </section>
+
+      <!-- Shown only when the always-on tray app was quit (menubar_running:false).
+           Restart re-loads its LaunchAgent via the restart_menubar tool. -->
+      <section class="menubar-banner" id="menubar-banner" hidden>
+        <div class="menubar-banner-text">
+          The S4L menu bar app isn't running. Restart it to bring the tray icon back.
+        </div>
+        <button id="btn-menubar-restart" class="primary">Restart menu bar</button>
       </section>
 
       <section class="install" id="install-card" hidden>
@@ -50,7 +70,73 @@
 
       <section class="actions">
         <button id="btn-setup">Set up</button>
-        <button id="btn-draft" class="primary" hidden>Run draft cycle</button>
+        <button id="btn-schedule" hidden>Set up draft schedule for this account</button>
+      </section>
+
+      <!-- Two independent engagement lanes, each with its own switch (single
+           source: mode.json via the snapshot; toggles go through
+           engagement_mode action:'toggle' lane:<name>). -->
+      <section class="section" id="mode-card">
+        <div class="section-row">
+          <span class="section-label">Engagement</span>
+        </div>
+        <div class="lane">
+          <div class="lane-text">
+            <div class="lane-name">Personal brand</div>
+            <div class="lane-desc">Organic, link-free engagement in your own voice.</div>
+          </div>
+          <button class="switch" id="switch-personal" type="button" role="switch" aria-checked="false" aria-label="Personal brand lane">
+            <span class="knob"></span>
+          </button>
+        </div>
+        <div class="lane">
+          <div class="lane-text">
+            <div class="lane-name">Product promotion</div>
+            <div class="lane-desc">Marketing your configured products.</div>
+          </div>
+          <button class="switch" id="switch-promo" type="button" role="switch" aria-checked="false" aria-label="Product promotion lane">
+            <span class="knob"></span>
+          </button>
+        </div>
+        <!-- Lane split slider: only meaningful (and only shown) when BOTH lanes
+             are on. Sets the personal-brand share of cycles via
+             engagement_mode action:'split'. -->
+        <div class="lane-split" id="split-row" hidden>
+          <div class="lane-text">
+            <div class="lane-name">Lane split</div>
+            <div class="lane-desc" id="split-desc"></div>
+          </div>
+          <input type="range" id="split-slider" min="0" max="100" step="5" value="50" aria-label="Personal brand share of cycles (percent)" />
+        </div>
+        <!-- Posting volume: server-side per-install throttle (virality bar).
+             Stored on s4l.ai (installations.posting_mode), read/written via the
+             posting_volume tool; est/day labels are computed per install. -->
+        <div class="lane" id="posting-volume-row">
+          <div class="lane-text">
+            <div class="lane-name">Posting volume</div>
+            <div class="lane-desc" id="posting-volume-desc">How many drafts per day the cycle produces.</div>
+          </div>
+          <select id="posting-volume-select" aria-label="Posting volume">
+            <option value="high">Aggressive</option>
+            <option value="medium" selected>Steady</option>
+            <option value="low">Chill</option>
+          </select>
+        </div>
+        <div class="lane-note" id="mode-sub"></div>
+      </section>
+
+      <!-- Drafting pipeline: the cycle the user triggers — it scans for threads
+           first, then hands off to the drafter. A live status / countdown line +
+           a one-click Run-now, mirroring the menu-bar dropdown. Both read
+           scripts/live_status.py so the surfaces can't drift. Shown post-setup. -->
+      <section class="section" id="drafting-card" hidden>
+        <div class="section-row">
+          <span class="section-label">Drafting</span>
+          <div class="section-actions">
+            <button id="btn-run-drafting" class="ghost">Run drafting now</button>
+          </div>
+        </div>
+        <div class="live-status" id="drafting-status"></div>
       </section>
 
       <section class="section" id="live-card" hidden>
@@ -77,6 +163,24 @@
           <span class="chevron" aria-hidden="true"></span>
         </button>
         <div class="stats-grid" id="stats-grid" hidden>
+          <div class="muted">&mdash;</div>
+        </div>
+      </section>
+
+      <!-- Collapsible view of what's saved for each project (the config the
+           pipeline reads), rendered as an editable form. Saves go through the
+           project_config tool's validated merge — never a raw file overwrite. -->
+      <section class="section" id="settings-card" hidden>
+        <button
+          class="section-row section-row-toggle"
+          id="settings-toggle"
+          type="button"
+          aria-expanded="false"
+        >
+          <span class="section-label">Project settings</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
+        <div class="settings-body" id="settings-body" hidden>
           <div class="muted">&mdash;</div>
         </div>
       </section>

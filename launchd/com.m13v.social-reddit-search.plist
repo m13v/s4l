@@ -26,7 +26,9 @@
 		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/Library/Frameworks/Python.framework/Versions/3.9/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
 		<key>HOME</key>
 		<string>/Users/matthewdi</string>
-		<key>SAPS_REDDIT_MAX_SEARCHES</key>
+		<key>S4L_REDDIT_MAX_SEARCHES</key>
+		<string>15</string>
+		<key>S4L_REDDIT_MAX_SEARCHES</key>
 		<string>15</string>
 	</dict>
 	<key>RunAtLoad</key>

@@ -125,6 +125,14 @@ Don't add per-project UTM templates to config.json. The scheme is fixed.
 
 Caller exception branches must call `utm_only_text(text=..., platform=..., project_name=...)` from `dm_short_links` rather than posting unwrapped, so even if `wrap_text_for_post` itself raises, no bare URL escapes. Pattern lives in `post_reddit.py`, `engage_reddit.py`, `post_github.py`, `twitter_post_plan.py` (all four hardened 2026-05-14).
 
+## Releasing: `bash scripts/release-mcpb.sh` only
+
+ONE command releases npm + the GitHub `.mcpb` in lockstep from a `package.json` bump. Never the old manual `npm publish` + `gh release create` flow.
+- **Default = staging:** `bash scripts/release-mcpb.sh --staging` (an `-rc.N` pre-release only staging boxes pull; npm `latest` and `releases/latest` stay put). Go stable only when the user explicitly asks.
+- **Stable = clean digits (user rule):** commit + push, then `bash scripts/release-mcpb.sh --version X.Y.Z` (the rc's base version, or next patch if taken). Never promote an `-rc.N` tag in place; the script blocks it and prints the recipe.
+- **Never re-release an existing version** (`--no-bump`): npm is immutable, so the lanes diverge. A fix always gets a fresh patch bump.
+- **Before releasing:** if npm `latest` or the GitHub latest tag shows a version you didn't publish, a parallel agent released; bump again.
+
 ## SKILL.md - Single File, No Copies
 
 `SKILL.md` lives at the repo root. There is no `skill/SKILL.md`.
@@ -175,7 +183,7 @@ Locked files (do NOT unlock or edit without explicit user instruction):
 Self-improving per-project subreddit denylist for Reddit, mirroring the Twitter cycle's keyword-exclude pattern. Same DB table (`project_search_excludes`), same activation gate (≥2 distinct batches), same 60-day decay. The wiring lives in four files:
 
 - `scripts/project_excludes.py` — adds typed-term forms (`subreddit:<slug>`, `keyword:<word>`) alongside the legacy twitter bare-keyword form. Platform gate (`ALLOWED_KINDS`) prevents cross-contamination: twitter can only write `bare`, reddit can only write `subreddit:` / `keyword:`. New helper `active_excludes_by_kind('reddit', project)` returns `{subreddit:[…], keyword:[…], bare:[…]}`. New CLI subcommand `active-split` exposes the same.
-- `scripts/reddit_tools.py` — `_load_comment_blocked_subs(project_name=...)` reads (1) `config.json: subreddit_bans.comment_blocked` with optional `.project` field for per-project scoping, and (2) active `subreddit:` rows from `project_search_excludes`. Server-side enforcement at parse time in `cmd_search` and `cmd_fetch` via the `SAPS_REDDIT_PROJECT` env var. New `project_block_extra` counter on the `[reddit_search]` stderr marker shows how many of the blocked subs came from the per-project layer.
+- `scripts/reddit_tools.py` — `_load_comment_blocked_subs(project_name=...)` reads (1) `config.json: subreddit_bans.comment_blocked` with optional `.project` field for per-project scoping, and (2) active `subreddit:` rows from `project_search_excludes`. Server-side enforcement at parse time in `cmd_search` and `cmd_fetch` via the `S4L_REDDIT_PROJECT` env var. New `project_block_extra` counter on the `[reddit_search]` stderr marker shows how many of the blocked subs came from the per-project layer.
 - `scripts/post_reddit.py` — draft prompt now accepts `action="reject"` JSON lines with a `proposed_excludes: ["subreddit:<slug>"]` array; `parse_reject_decisions()` + `_propose_excludes_from_rejects()` forward each into `project_excludes.propose('reddit', project, term, batch_id, ...)`. Discover phase logs `[project_excludes] platform=reddit project=… active_subs=N active_keywords=N subs=[…]` and calls `mark_used` to keep decay honest.
 - `skill/run-reddit-search.sh` — documentation-only update; enforcement is fully Python.
 
@@ -243,26 +251,60 @@ All posting and engagement scripts use `scripts/engagement_styles.py` to generat
 - **NEVER remove or simplify style definitions** in `scripts/engagement_styles.py`
 - **NEVER inline style definitions** back into individual scripts; the shared module is the single source of truth
 
-## Account signups: phone numbers via textverified.com (never the user's real phones)
+## Experiment arms: stamp at source, surface on review cards (2026-07-07)
 
-When signing up new agent accounts on any platform that requires phone/SMS verification (X/Twitter, Reddit, LinkedIn, etc.), **always use a fresh phone number from textverified.com**. Never default to the user's real phones.
+Every experiment/scenario arm that affects DRAFTING is stamped ONCE, at the
+source, and read everywhere else. The user has explicitly rejected fallback
+layering here (no "env first, plan second" resolution anywhere).
 
-User's real phones (DO NOT use for new-account signups):
-- +1 (650) 796-1489 (AT&T, canonical US, on this Mac via iMessage forwarding)
-- +30 694 158 2524 (Vodafone Greece side SIM)
+How it works:
+- `run-twitter-cycle.sh`'s plan writer calls `scripts/active_experiments.py::collect()`
+  in the cycle process (where arms are assigned) and stamps an `experiments`
+  {name: variant} dict onto EVERY plan candidate at plan-write time.
+- That per-candidate record is the ONLY source downstream: `merge_review_queue.py`
+  carries it through untouched, the review card's details-eye popover renders
+  every entry generically (`s4l_card._details_lines`), and `twitter_post_plan.py`
+  stamps `posts.draft_prompt_variant` from `c["experiments"]["draft_prompt"]`.
+  The poster does NOT read `S4L_DRAFT_PROMPT_VARIANT` from env at post time;
+  that env read caused the queue-review lane to stamp NULL (the MCP-spawned
+  poster has no cycle env) while autopilot stamped the arm. Do not add it back.
 
-Why: real phones are already tied to the user's primary accounts (e.g. @m13v_ on X is registered to the canonical 650 number). Adding the same phone to a second account makes the platform internally link them via phone fingerprint. Consequences:
-- Anti-spam suspensions cascade (suspension on one account can take out the other).
-- Recovery flows leak signal across accounts.
-- Audience-overlap / "same-user" heuristics treat the accounts as one entity, which collapses the value of running multiple personas.
+Adding a new drafting experiment (the whole convention):
+- Export `S4L_EXP_<NAME>=<variant>` in the process chain that runs the cycle.
+  Done: it auto-stamps onto candidates, auto-renders on cards, and is readable
+  at post time. Do NOT wire per-experiment code into `s4l_card.py`, the merge,
+  or the poster.
+- Scope limits: arms are cycle-scoped (one dict for the whole plan batch). A
+  per-candidate experiment needs its own candidate field (like
+  `engagement_style` has). Post-time experiments (e.g. `tail_link_variant`,
+  coin-flipped in the poster after approval) cannot appear on cards and keep
+  their own posts-column recording.
 
-textverified.com burners keep each agent identity on its own isolated phone footprint.
+Forbidden (v1 design, removed 2026-07-07; do not reintroduce):
+- Merge-time stamping / `--cycle-out` stdout parsing in `merge_review_queue.py`.
+- `S4L_EXPERIMENT name=... variant=...` stdout markers.
+- Any post-time env read or env-vs-plan fallback for arm resolution.
 
-Workflow:
-- Before triggering an SMS-verification step in an automated signup, ask the user to mint a textverified.com number for that account (one number per account, do not reuse across accounts).
-- Use that number for the signup. The OTP arrives in textverified.com's web inbox; the user reads the code and provides it to Claude.
-- Record the burner number alongside the account in the `social_accounts` tracking row (see the accounts/subscriptions tracking schema) so future Claude sessions know which number is tied to which agent identity.
+Note: as of 2026-07-06 the `personal_brand` persona directive in
+run-twitter-cycle.sh is ARM-AWARE (`treatment_v2` adds the concede-then-reverse
+skeleton ban, `control_v2` keeps the plain persona directive), so the assigned
+`draft_prompt` arm DOES affect persona drafts. `active_experiments.collect()`
+therefore KEEPS `draft_prompt` for `lane=personal_brand` (it used to drop it, back
+when the persona directive overrode both arms wholesale), so the arm stamps onto
+persona review cards and the per-arm readout covers both lanes.
 
-If you see a non-canonical US number (e.g. an unfamiliar area code like 508, 781, etc.) entered for an automated signup, **do not assume it is a typo and "correct" it back to the canonical 650 number**. It is almost certainly a textverified burner that the user intentionally provided. Confirm with the user before changing it.
+## Debugging a customer install (READ THIS FIRST when a customer reports "S4L not working")
 
-Example (2026-05-15): @matt_diak X Premium signup used textverified burner +1 (508) 369-9005. The @matt_diak bio publicly states "ai clone of @m13v_", so the relationship is intentionally open at the content layer, but the platform-level phone link is deliberately kept separate.
+Everything below is queryable from this machine, no SSH to the customer. Canonical playbook; the project memories reference this section instead of duplicating it.
+
+**Key architecture fact behind most confusion:** the launchd lanes (cycle producer, posting, review cards) run WITHOUT Claude; only draft generation needs the `s4l-worker` scheduled task, which fires ONLY while Claude Desktop is open and logged into the account that owns the registry entry. "It's posting but shows a warning" = worker dead, launchd alive.
+
+**Known #1 root cause (Karol, 2026-07-06): the Desktop scheduler wedge.** Claude Desktop's warm-session platform bug (finished stream-json worker sessions never exit) makes the scheduler's overlap guard think a run is still in flight, so it silently stops firing the task forever: task stays enabled, lastRunAt freezes, Claude keeps running. Customer fix: FULLY QUIT and reopen Claude Desktop. The reaper is a red herring (check its kill count: 0). Detail: project memory `gotcha_menubar_worker_killed_scheduler_stopped_firing`.
+
+Data lanes, in the order to check them:
+
+1. **Registry truth: `installations.scheduled_tasks_sample`** (Postgres, keychain `s4l-database-url`). Heartbeat-shipped summary of every scheduled-tasks.json on the box (task id, enabled, cwd_tail, last_run_at, registries/worker_tasks counts), fresh while Claude Desktop is open (`scheduled_tasks_sampled_at`). Frozen `last_run_at` + enabled + Claude up = the scheduler wedge above. `worker_tasks < registries` + frozen = possible account-switch orphan.
+2. **Client logs + Claude session transcripts: GCP Cloud Logging, project `s4l-app-prod`.** MUST pass `--account=i@m13v.com` (default gcloud account is often matt@mediar.ai which gets PERMISSION_DENIED). Query: `gcloud logging read 'jsonPayload.install_id="<uuid>" AND <filter>' --project=s4l-app-prod --account=i@m13v.com --freshness=2h`. Filters: `jsonPayload.context:"transcript:"` = compacted worker/s4l-dir Claude session transcripts (1.6.199+, shipped every 5 min); `jsonPayload.logType="client-pipeline"` = subprocess stdout/stderr (MCP-spawned only, launchd cycle internals do NOT stream); `jsonPayload.logType="onboarding-milestone"` = setup ledger; `jsonPayload.context="tool-call"` = per-MCP-tool invocations; `jsonPayload.context="launchd-load"` = launchctl failures. Cycle-phase visibility rides the `twitter_cycle` block inside `context="scripts/memory_snapshot.py"` messages.
+3. **Sentry, org `mediar-n5`, project `social-autoposter`** (token: keychain `sentry-auth-token`). Menubar warnings ("S4L draft autopilot needs attention: missing|disabled|draft_stuck|rate_limited"), field diagnosis reports (component=diagnose_fix), approve_drafts errors. Filter by tag `install_id`. Discover API `statsPeriod` accepts only 24h/14d.
+4. **Postgres history**: `installation_state_snapshots` (jsonb; `runtime.pipeline_version` dates updates; reason=startup rows = MCP server restarts), `twitter_batches` by `owner_host` (batch ids are in the CUSTOMER's local time; stuck at `phase2b-prep` = worker not servicing queue jobs), `posts` by `install_id`, `review_events` by `install_id::text` (proves user was at the machine).
+5. **Find the install_id**: `installations` table (hostname/git_email ILIKE), or Sentry event tags. Karol: `ba6519ca-edaf-4fee-95b9-446da86bd346`.

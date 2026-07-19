@@ -2,7 +2,7 @@
 # engage-twitter.sh — X/Twitter engagement loop
 # Phase A: Discover replies/mentions via Twitter API (no browser needed)
 # Phase B: Respond to pending Twitter replies via browser (API can't reply to most tweets)
-# Called by launchd every 3 hours.
+# Called by launchd every 15 minutes (:13/:28/:43/:58).
 
 
 set -euo pipefail
@@ -25,12 +25,14 @@ source "$(dirname "$0")/lock.sh"
 # Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS, exports TWITTER_CDP_URL=9555.
 source "$(dirname "$0")/lib/twitter-backend.sh"
 
-echo "[$(date +%H:%M:%S)] Acquiring twitter-browser lock (pid=$$)..." | tee -a "$LOG_FILE"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Acquiring twitter-browser lock (pid=$$)..." | tee -a "$LOG_FILE"
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
-echo "[$(date +%H:%M:%S)] twitter-browser lock held (pid=$$)" | tee -a "$LOG_FILE"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] twitter-browser lock held (pid=$$)" | tee -a "$LOG_FILE"
 # Probe + launch harness Chrome on port 9555 if needed, then sweep leftover tabs.
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
-echo "[$(date +%H:%M:%S)] Acquiring twitter (pipeline) lock (pid=$$)..." | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail" | tee -a "$LOG_FILE"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Acquiring twitter (pipeline) lock (pid=$$)..." | tee -a "$LOG_FILE"
 acquire_lock "twitter" 3600 2>>"$LOG_FILE"
 
 # Load secrets
@@ -47,7 +49,7 @@ BATCH_SIZE=500
 ENGAGE_TWITTER_HELPER="$REPO_DIR/scripts/engage_twitter_helper.py"
 # (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== Twitter Engagement Run: $(date) ==="
@@ -67,6 +69,15 @@ python3 "$REPO_DIR/scripts/scan_twitter_mentions_browser.py" --json-file "$NOTIF
     | tee -a "$LOG_FILE" \
     || log "WARNING: Phase A scan_twitter_mentions_browser.py exited with code $?"
 rm -f "$NOTIFS_JSON"
+
+# Phase A2: fill parent-thread linkage on mention-discovered rows. The
+# notifications feed hides the parent tweet id, so scan rows land with
+# mention_id only; this resolves post_id / parent_reply_id / project via
+# fxtwitter HTTP (no browser, no model). Newest rows first, bounded per run.
+log "Phase A2: Enriching parent linkage on mention replies..."
+python3 "$REPO_DIR/scripts/enrich_reply_parents.py" --limit 25 2>&1 \
+    | tee -a "$LOG_FILE" \
+    || log "WARNING: Phase A2 enrich_reply_parents.py exited with code $?"
 
 # ═══════════════════════════════════════════════════════
 # PHASE B: Respond to pending Twitter replies
@@ -138,12 +149,12 @@ print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) i
     # Engagement-style picker (2026-05-19): pick ONE assigned style per
     # reply iteration. The picked style flows two places: (1) --style
     # filter for top_performers.py so the per-style exemplars match the
-    # assignment, (2) saps_render_style_block so the prompt embeds the
+    # assignment, (2) s4l_render_style_block so the prompt embeds the
     # same assignment. On invent mode picked_style is empty and
     # top_performers stays unfiltered.
     source "$REPO_DIR/skill/styles.sh"
-    STYLE_ASSIGN_FILE=$(mktemp -t saps_twitter_eng_assign_XXXXXX.json)
-    saps_pick_style twitter replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+    STYLE_ASSIGN_FILE=$(mktemp -t s4l_twitter_eng_assign_XXXXXX.json)
+    s4l_pick_style twitter replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
     PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -162,7 +173,7 @@ try:
 except Exception:
     print('use')
 " 2>/dev/null)
-    STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" twitter replying)
+    STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" twitter replying)
     rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true
 
     # Top performers feedback report — filtered to the picked style when
@@ -356,6 +367,33 @@ MANDATORY reply flow for every item:
           a) Re-snapshot the page to refresh element state.
           b) Find the reply textbox: role="textbox" with name like "Post your reply"
              or "Post text". Click it.
+             If the textbox is NOT found, do NOT assume a technical glitch or
+             conclude "blocked" from a screenshot alone -- X removes the
+             composer but still renders the tweet normally when the author has
+             blocked us, so a missing textbox is genuinely ambiguous by itself.
+             Determine which deterministically:
+               i.   Click the article's reply icon (data-testid="reply" on the
+                    target article, NOT the submit button).
+               ii.  Wait ~2s, then read the page text (snapshot or DOM query).
+               iii. If the text contains "has blocked you" (case-insensitive):
+                    this is a confirmed, permanent block. Do NOT retry. Skip
+                    this reply: python3 $REPO_DIR/scripts/reply_db.py skipped ID "author_blocked_us"
+                    Then hard-block the author so future items from them are
+                    never drafted (same mechanism as the escape hatch above):
+                      python3 $REPO_DIR/scripts/reply_db.py blocklist add x HANDLE \\
+                        --reason "X reported this author has blocked our account (live reply attempt, engage-twitter)" \\
+                        --classification blocked_by_author \\
+                        --added-by block_probe \\
+                        --source-reply-id REPLY_ID
+                    Move on to the next assigned reply.
+               iv.  If that text is NOT present: this was a transient render
+                    miss, not a block. The click in (i) may have opened the
+                    composer -- re-snapshot; if the textbox is now present,
+                    continue with it below. If still absent, retry this whole
+                    step once more before treating it as a failed technical
+                    attempt.
+             NEVER conclude "blocked" from a screenshot alone -- only the
+             literal "has blocked you" text match above is sufficient evidence.
           c) Type YOUR_REPLY_TEXT (post-Step-3b short-link-wrapped form, post-Step-3a
              suffix) into that textbox. Do NOT auto-submit; we click the Reply
              button explicitly in step e.

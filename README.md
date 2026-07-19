@@ -1,164 +1,194 @@
-# social-autoposter
+# S4L
 
-Open-source repo behind **[S4L (s4lai)](https://s4l.ai)**: an automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Ships as a Claude Code skill plus a set of standalone Python helpers and macOS launchd jobs.
+S4L is a desktop plugin for running a Reddit and X reply-drafting workflow from
+your own machine.
 
-> The hosted managed version is **S4L** (written `s4lai`, domain `s4l.ai`): done-for-you Reddit and Twitter brand-awareness, $1/1K impressions, $50/1K site visits. See https://s4l.ai.
+It watches the conversations your buyers already read, finds threads with real
+momentum and fit, drafts contribution-first replies in your voice, and gives you
+a review queue before anything goes live. The product is positioned as a
+self-serve desktop plugin: subscribe, install, connect your accounts, review the
+drafts, and track the results.
 
-State (posts, replies, candidates, stats) is read and written through the hosted S4L HTTP API (`AUTOPOSTER_API_BASE` + an install key in `~/social-autoposter/.env`); no database to provision. Each platform drives its own persistent Playwright MCP browser profile, so logins survive across runs.
+- Website: https://s4l.ai
+- Pricing: https://s4l.ai/pricing
+- Source: https://github.com/m13v/s4l
 
-## Prerequisites
+## What S4L does
 
-A new machine needs all of these before the pipeline can run end to end:
+Most social tools start after you already know what to post. S4L starts earlier:
+it looks for conversations worth entering.
 
-- **macOS** (the launchd plists are mac-only; Linux users can crib the cron snippets from `setup/SKILL.md` Step 7)
-- **Node.js 16+** (for `npx`, the installer, and `@playwright/mcp` at runtime)
-- **Python 3.9+** with `pip3` (helper scripts; deps auto-installed by the installer)
-- **Claude Code CLI** on `PATH` (the cron scripts shell out to `claude -p` with a per-platform MCP config)
-- One Chromium install per platform (created on first run by `@playwright/mcp` against the persistent profile dirs)
+- Finds high-traffic Reddit and X threads with enough context to join well.
+- Ranks opportunities by momentum, intent, community norms, and product fit.
+- Drafts replies that answer the thread first and mention your product only when
+  it belongs.
+- Keeps project-specific voice, claim language, competitors, sensitive topics,
+  and hard lines in the drafting context.
+- Presents drafts in a review workflow so you can approve, reject, or edit before
+  posting.
+- Tracks views, upvotes, clicks, deletions, and misses so each run learns from
+  the previous one.
 
-Optional:
+Nothing is posted automatically by default. Posting autopilot stays off until you
+explicitly turn it on.
 
-- `MOLTBOOK_API_KEY` in `.env` for Moltbook posting and scanning
-- `RESEND_API_KEY` and `NOTIFICATION_EMAIL` in `.env` for DM-escalation emails
+## Who it is for
 
-## Install
+S4L is for founders and small teams who want an AI-assisted social workflow
+without handing their accounts to an agency or living inside mention alerts all
+day.
+
+You bring the accounts, product context, voice, and judgment. The plugin handles
+thread discovery, draft generation, review cards, scheduling, and result memory.
+
+## How users install it
+
+The production path is the desktop plugin download from S4L.
+
+1. Subscribe at https://s4l.ai/pricing.
+2. Download the plugin link emailed after checkout.
+3. Install the plugin in Claude Desktop.
+4. Start a new Claude chat and send:
+
+```text
+Set me up on S4L plugin end to end
+```
+
+The setup flow repairs the local runtime, connects your X browser session,
+discovers product and voice context, seeds search topics, schedules draft
+generation, and verifies that draft cards appear without posting.
+
+## What is in this repo
+
+This repository contains the open-source runtime behind the S4L plugin:
+
+```text
+social-autoposter/
+|-- mcp/                    Desktop plugin / MCP server, panel UI, release bundle
+|-- scripts/                Discovery, drafting, stats, telemetry, and queue helpers
+|-- skill/                  Shell entrypoints used by scheduled jobs
+|-- setup/                  End-to-end setup skill used by Claude
+|-- browser-agent-configs/  Browser automation profile templates
+|-- launchd/                macOS LaunchAgent templates
+|-- mcp-servers/            Local MCP helpers used by the runtime
+|-- config.example.json     Example project/account configuration
+`-- SKILL.md                Legacy social-autoposter agent playbook
+```
+
+The `mcp/` package is the plugin users interact with. The rest of the repo is the
+pipeline it bundles, installs, and drives.
+
+## Architecture
+
+```text
+Claude Desktop plugin
+  -> S4L MCP server
+  -> local runtime + menu bar review UI
+  -> scheduled queue worker
+  -> browser profiles you control
+  -> S4L API for install-scoped queues, stats, and configuration
+```
+
+Important properties:
+
+- Runs locally on macOS.
+- Uses the user's own logged-in browser profiles.
+- Stores install state locally and scopes API calls by install identity.
+- Keeps secrets such as `.env`, `config.json`, browser profiles, logs, and local
+  databases out of Git.
+- Uses approval-first drafting as the default operating mode.
+
+## Optional TweetClaw source import
+
+[TweetClaw](https://github.com/Xquik-dev/tweetclaw) can provide reviewed public
+X records to the existing candidate scorer. Install it separately, export the
+results to JSON, then run:
 
 ```bash
-npx social-autoposter init
-```
-
-`bin/cli.js` does all of the wiring in one shot:
-
-1. Copies `scripts/`, `skill/`, `setup/`, `SKILL.md`, and `browser-agent-configs/` into `~/social-autoposter/`
-2. Creates `config.json` from `config.example.json` and writes a blank `.env` template (fill in your S4L API key and optional `MOLTBOOK_API_KEY`)
-3. Installs the Python helper deps via `pip3` if missing
-4. Generates launchd plists in `~/social-autoposter/launchd/` with the user's actual `HOME` and `PATH`
-5. Installs the Playwright MCP configs to `~/.claude/browser-agent-configs/` (twitter, reddit, linkedin) with `__HOME__` and `__NODE_BIN__` placeholders substituted. Existing files are left alone, so any window-position tweaks survive `npx social-autoposter update`.
-6. Creates empty persistent browser profile dirs at `~/.claude/browser-profiles/{twitter,reddit,linkedin}`
-7. Symlinks `~/.claude/skills/social-autoposter` and `~/.claude/skills/social-autoposter-setup` to the install dir
-
-To refresh code without touching user files (`config.json`, `.env`, `SKILL.md`, or any browser config you customized):
-
-```bash
-npx social-autoposter update
-```
-
-## Configure
-
-Tell your Claude agent: **"set me up on social-autoposter end to end"**. The
-setup skill treats that as a terminal goal:
-
-1. Inspect and repair the owned runtime.
-2. Auto-detect the best browser profile and connect X/Twitter. macOS may require
-   a Safe Storage approval; a logged-out account may require one manual sign-in.
-3. Scan the X profile, discover and research the user's product, and infer a
-   conservative project, ICP, voice, and search topics without an interview.
-4. Save the project and seed its topics into the backend.
-5. Run a draft-only cycle to verify the pipeline without posting.
-
-The agent pauses only for an unavoidable login or when no product can be
-identified. Autopilot remains off until explicitly requested.
-
-## How the runtime is wired
-
-```
-launchd  ──▶  skill/run-{platform}.sh  ──▶  claude -p  --strict-mcp-config  --mcp-config ~/.claude/browser-agent-configs/{platform}-agent-mcp.json
-                       │                                        │
-                       │                                        └──▶  @playwright/mcp@latest
-                       │                                                       │
-                       │                                                       └──▶  ~/.claude/browser-profiles/{platform}/  (persistent userDataDir)
-                       │
-                       ├──▶  scripts/find_threads.py, top_twitter_queries.py  (no browser, API dedup)
-                       ├──▶  scripts/pick_project.py            (weighted project rotation)
-                       ├──▶  scripts/top_performers.py          (feedback report from past stats)
-                       └──▶  S4L HTTP API                       (AUTOPOSTER_API_BASE in .env)
-```
-
-Optional X/Twitter source import from TweetClaw:
-
-```bash
-openclaw plugins install @xquik/tweetclaw
-python3 ~/social-autoposter/scripts/tweetclaw_candidates.py \
+python3 scripts/tweetclaw_candidates.py \
   --file /path/to/reviewed-tweetclaw-results.json \
   --project "PROJECT_NAME" \
   --search-topic "agent workflows" \
   --query "agent workflows min_faves:10" \
-  | python3 ~/social-autoposter/scripts/score_twitter_candidates.py
+  | python3 scripts/score_twitter_candidates.py
 ```
 
-Use this when an OpenClaw run has already reviewed TweetClaw search tweets,
-search tweet replies, user lookup, follower export, media links, monitor tweets,
-or webhook evidence and you want those public X/Twitter records scored by the
-existing candidate pipeline. The importer only normalizes local JSON and prints
-candidate rows; the existing scorer in the second command performs the normal
-scoring and upsert step. The importer does not post tweets, post tweet replies,
-send direct messages, upload media, call the S4L API, or drive the browser.
+The importer only normalizes local JSON. It does not post, send messages, call
+the S4L API, or control a browser.
 
-Each `skill/run-*.sh`:
+## Develop from source
 
-1. Controlled by launchd (load/unload). Use the dashboard Pause All / Resume All button, or `launchctl unload/load` directly
-2. Acquires a per-platform lock from `skill/lock.sh` (waits up to 60 min for any prior run)
-3. Sources `~/social-autoposter/.env`
-4. Picks a project, builds a feedback report, fetches `llms.txt` for product context
-5. Calls `find_*.py` for API-side candidates already deduped against the DB
-6. Spawns a child Claude process with `--strict-mcp-config` so it only sees the one platform's browser MCP
+For normal users, use the plugin download from S4L. These steps are for working
+on the repo itself.
 
-The launchd schedules generated by `bin/cli.js` on install:
+Prerequisites:
 
-| Job | Cadence |
-|-----|---------|
-| `com.m13v.social-stats` (`stats.sh`) | every 21600 s (6 h) |
-| `com.m13v.social-engage` (`engage.sh`) | every 21600 s (6 h) |
+- macOS
+- Node.js 16+
+- Python 3.9+
+- Claude Desktop or Claude Code for MCP testing
 
-All per-platform plists live in `launchd/` (reddit-search, reddit-threads, twitter-cycle, linkedin, moltbook, github, octolens, audit, dm-replies-*, link-edit-*, scan-reddit-replies, scan-moltbook-replies, etc.) and use either `StartInterval` or `StartCalendarInterval` for fixed wall-clock times. Activate any of them with:
+Install dependencies:
 
 ```bash
-ln -sf ~/social-autoposter/launchd/com.m13v.social-twitter-cycle.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.m13v.social-twitter-cycle.plist
+npm install
+cd mcp
+npm install
 ```
 
-## Skill commands
-
-| Command | What it does |
-|---------|-------------|
-| `/social-autoposter` | Comment run: find threads, draft, post, log (cron-safe) |
-| `/social-autoposter post` | Create an original post or thread (manual only) |
-| `/social-autoposter stats` | Update engagement stats via API |
-| `/social-autoposter engage` | Scan and reply to responses on our posts |
-| `/social-autoposter audit` | Full browser audit of all posts |
-
-View live stats at `https://s4l.ai/stats/<your-handle>` once posts start landing.
-
-## Repo layout
-
-```
-social-autoposter/
-├── SKILL.md                  the playbook (locked, immutable)
-├── bin/cli.js                installer + dashboard launcher
-├── browser-agent-configs/    Playwright MCP templates (twitter/reddit/linkedin)
-├── config.example.json       config template
-├── setup/SKILL.md            autonomous end-to-end setup skill (locked)
-├── scripts/                  Python and JS helpers (no browser, no LLM)
-│   └── tweetclaw_candidates.py optional TweetClaw JSON import for X/Twitter candidates
-├── skill/                    shell wrappers invoked by launchd
-└── launchd/                  generated macOS LaunchAgent plists
-```
-
-## For other AI agents
-
-The skill works with any agent that has shell access, browser automation, and an LLM. The Python and JS helpers in `scripts/` handle thread discovery, reply scanning, and stats updates without needing a browser. `SKILL.md` is the playbook; any agent can read it and execute the workflows with its own tools.
-
-## Pause and resume
-
-Use the dashboard at `localhost:3141` (Pause All / Resume All button), or manually:
+Build the plugin server and panel:
 
 ```bash
-# Pause: unload all jobs + kill running processes
-for plist in ~/Library/LaunchAgents/com.m13v.social-*.plist; do launchctl unload "$plist"; done
-
-# Resume: reload all jobs
-for plist in ~/social-autoposter/launchd/com.m13v.social-*.plist; do
-  ln -sf "$plist" ~/Library/LaunchAgents/
-  launchctl load ~/Library/LaunchAgents/$(basename "$plist")
-done
+cd mcp
+npm run build
 ```
+
+Register this checkout with Claude Desktop and Claude Code for local testing:
+
+```bash
+cd mcp
+node install.mjs
+```
+
+Then fully quit and reopen Claude so MCP servers reload.
+
+Run the test suite:
+
+```bash
+npm test
+```
+
+Build a local `.mcpb` artifact without publishing:
+
+```bash
+bash scripts/release-mcpb.sh --no-bump --no-npm --no-release
+```
+
+That command packs the current pipeline into `mcp/dist/pipeline.tgz`, builds the
+plugin, creates `mcp/social-autoposter.mcpb`, and runs the release checks without
+touching npm or GitHub releases.
+
+## Runtime commands
+
+The plugin exposes MCP tools for the user-facing workflow:
+
+- `project_config` configures projects, products, voice, topics, and X auth.
+- `engagement_mode` chooses personal-brand and product-promotion lanes.
+- `dashboard` opens the review dashboard.
+- `approve_drafts` posts only the drafts the user selected.
+- `get_stats` reads X/Twitter stats.
+- `pause_s4l` pauses or resumes scheduled S4L jobs.
+- `runtime` installs, updates, and diagnoses the local runtime.
+- `report_diagnosis` sends a support report to the S4L team.
+
+The legacy `/social-autoposter` skill and npm package remain in the repo because
+the plugin bundles and reuses the same pipeline scripts.
+
+## Public-repo hygiene
+
+This repo is public. Do not commit local customer data, browser state, generated
+media, private automation experiments, `.mcpb` bundles, `.env` files, databases,
+or logs. The root `.gitignore` intentionally keeps those out of source control.
+
+If a workflow needs private scratch space, keep it outside the repo or under an
+ignored directory.

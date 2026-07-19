@@ -12,17 +12,18 @@
 //   5. the Playwright Chromium binary
 //
 // The absolute interpreter path is written to runtime.json; the server reads it
-// for SAPS_PYTHON. No PATH lookup, no venv activation, no system python — so the
+// for S4L_PYTHON. No PATH lookup, no venv activation, no system python — so the
 // whole "Python environment + paths" class of bug disappears.
 //
 // Progress is written to install-progress.json as a JSON object the panel polls
 // via the `install_status` tool (host-agnostic; survives the iframe sandbox).
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { captureError } from "./telemetry.js";
 
 // Pin the standalone CPython series the venv is built from. Bump deliberately.
 const PYTHON_VERSION = "3.12";
@@ -68,11 +69,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Everything we own lives under one state dir (next to setup-state.json).
 const STATE_DIR =
-  process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const RUNTIME_DIR = path.join(STATE_DIR, "runtime");
 const VENV_DIR = path.join(RUNTIME_DIR, ".venv");
 const RUNTIME_JSON = path.join(STATE_DIR, "runtime.json");
 const PROGRESS_JSON = path.join(STATE_DIR, "install-progress.json");
+// Cross-process provisioning lock (see tryAcquireProvisionLock below).
+const PROVISION_LOCK_PATH = path.join(STATE_DIR, "provision.lock");
+const PROVISION_LOCK_STALE_MS = 60_000;
 
 // The venv's interpreter, by absolute path (no activation needed).
 const VENV_PYTHON =
@@ -107,6 +111,29 @@ const MENUBAR_DIR = path.join(STATE_DIR, "menubar");
 const MENUBAR_ENTRY = path.join(MENUBAR_DIR, "s4l_menubar.py");
 const MENUBAR_OUT_LOG = path.join(MENUBAR_DIR, "menubar.out.log");
 const MENUBAR_ERR_LOG = path.join(MENUBAR_DIR, "menubar.err.log");
+// Stop sentinel: the menu bar's Quit flow writes this file (and boots itself
+// out) to record that the USER explicitly stopped S4L. Every auto-start path
+// (boot-time ensureMenubar, runtime provision) must respect it, otherwise the
+// tray is guaranteed back on the next Claude restart — the exact bug users hit
+// after Quit. Only an explicit start action (restart_menubar tool, queue_setup
+// re-arm) clears it. KEEP the filename in sync with menubar/s4l_menubar.py.
+const MENUBAR_STOP_FLAG = path.join(STATE_DIR, "stopped.flag");
+
+export function menubarStopped(): boolean {
+  try {
+    return fs.existsSync(MENUBAR_STOP_FLAG);
+  } catch {
+    return false;
+  }
+}
+
+export function clearMenubarStop(): void {
+  try {
+    fs.rmSync(MENUBAR_STOP_FLAG, { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
 
 // A directory is a usable pipeline clone only if it carries requirements.txt
 // (the deps manifest) AND scripts/ (the pipeline). Guards against pointing at an
@@ -119,19 +146,82 @@ function looksLikeRepo(dir: string | undefined): boolean {
   );
 }
 
+// ---- Stray git-checkout detection -------------------------------------------
+// A pipeline repo that is a git checkout is legitimate ONLY when it is the
+// working tree the running server itself was built in (dev registration:
+// `node <checkout>/mcp/dist/index.js`). Any other .git-bearing repo on a
+// shipped install is a "stray" clone (someone git-cloned the public repo during
+// troubleshooting): every self-update lane deliberately refuses to touch a
+// checkout, so the box silently freezes at the clone's version forever while
+// the menu bar keeps re-showing the update banner. We only reject a checkout when there is
+// something to serve instead (a materialized repo, or the embedded tarball to
+// make one); otherwise legacy behavior is preserved.
+function hasGit(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+function isDevCheckout(dir: string): boolean {
+  try {
+    return path.resolve(__dirname, "..", "..") === path.resolve(dir);
+  } catch {
+    return false;
+  }
+}
+
+function isStrayCheckout(dir: string | undefined | null): boolean {
+  if (!dir) return false;
+  if (!hasGit(dir) || isDevCheckout(dir)) return false;
+  return looksLikeRepo(MATERIALIZED_REPO) || fs.existsSync(EMBEDDED_TARBALL);
+}
+
+// S4L_REPO_DIR frequently points AT the materialized repo itself rather than a
+// user clone: the menubar's launchd plist exports it so snapshot.py resolves
+// the pipeline, and macOS `open` propagates the caller's environment, so a
+// menubar-driven Claude relaunch leaks it into Desktop and every MCP server
+// child. Treating that value as a "real clone, never touch" froze every
+// self-update lane (the bundle advanced while repo/package stayed stale and
+// the update banner re-fired forever, 2026-07-03).
+function isMaterializedPath(dir: string | undefined | null): boolean {
+  if (!dir) return false;
+  try {
+    return path.resolve(dir) === path.resolve(MATERIALIZED_REPO);
+  } catch {
+    return false;
+  }
+}
+
+// The env repo override, but ONLY when it names a genuine external clone the
+// user owns (npm/git install). The materialized repo and stray checkouts do
+// not qualify — self-update lanes must stay in charge of those.
+function envRepoClone(): string | null {
+  const env = process.env.S4L_REPO_DIR;
+  if (!env || isMaterializedPath(env)) return null;
+  if (!looksLikeRepo(env) || isStrayCheckout(env)) return null;
+  return env;
+}
+
 // Resolve the pipeline repo the server shells out to, preferring (in order):
-//   1. SAPS_REPO_DIR when it's a real clone (npm/git install, Story A); never
+//   1. S4L_REPO_DIR when it's a real clone (npm/git install, Story A); never
 //      overwritten, power users keep their working tree.
 //   2. runtime.json's repo_dir (the materialized repo from a .mcpb install).
 //   3. the materialized path on disk even if runtime.json is missing.
-//   4. SAPS_REPO_DIR as-is, then the two-levels-up dev default.
+//   4. S4L_REPO_DIR as-is, then the two-levels-up dev default.
 // Dynamic (not a load-time const) so a first-run materialize is picked up
 // without a server restart (same property resolvePython() relies on).
+// Stray git checkouts (see isStrayCheckout) are skipped at every step: a clone
+// the running server does NOT live in can never be the pipeline repo on a
+// shipped install, because no update lane will ever advance it.
 export function resolveRepoDir(): string {
-  const env = process.env.SAPS_REPO_DIR;
-  if (looksLikeRepo(env)) return env as string;
+  const env = (process.env.S4L_REPO_DIR);
+  const clone = envRepoClone();
+  if (clone) return clone;
   const rt = readRuntime();
-  if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir)) return rt.repo_dir;
+  if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir) && !isStrayCheckout(rt.repo_dir))
+    return rt.repo_dir;
   if (looksLikeRepo(MATERIALIZED_REPO)) return MATERIALIZED_REPO;
   if (env) return env;
   return path.resolve(__dirname, "..", "..");
@@ -142,7 +232,7 @@ export interface RuntimeInfo {
   uv: string;
   python_version: string;
   // Absolute path to the pipeline repo the server shells out to. For a npm /
-  // git install this is the user's clone (SAPS_REPO_DIR); for a bare .mcpb
+  // git install this is the user's clone (S4L_REPO_DIR); for a bare .mcpb
   // double-click it's the repo we materialize from the embedded tarball under
   // the state dir. Persisted so resolveRepoDir() finds it on later boots.
   repo_dir?: string;
@@ -154,6 +244,11 @@ export interface RuntimeInfo {
   chrome?: string;
   ready: boolean;
   provisioned_at: string;
+  // The .mcpb version whose pipeline.tgz was last materialized into repo_dir.
+  // Lets ensurePipelineCurrent() detect a plugin update that refreshed dist/
+  // (this server) but left the materialized pipeline stale, and re-extract just
+  // the pipeline so server/pipeline fixes actually take effect on update.
+  pipeline_version?: string;
 }
 
 export type StepStatus = "pending" | "running" | "done" | "error";
@@ -162,6 +257,11 @@ export interface ProgressStep {
   label: string;
   status: StepStatus;
   detail?: string;
+  // ISO timestamp the step last entered "running". Lets status render
+  // elapsed-in-step so a slow download (Chromium/Chrome) is distinguishable
+  // from a hung one — the progress file's top-level updated_at alone froze for
+  // minutes during long steps and read as "stuck."
+  started_at?: string;
 }
 export interface InstallProgress {
   running: boolean;
@@ -186,7 +286,7 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
 ];
 
 // ---------------------------------------------------------------------------
-// runtime.json (the durable result the server reads for SAPS_PYTHON).
+// runtime.json (the durable result the server reads for S4L_PYTHON).
 // ---------------------------------------------------------------------------
 export function readRuntime(): RuntimeInfo | null {
   try {
@@ -194,6 +294,167 @@ export function readRuntime(): RuntimeInfo | null {
     return JSON.parse(fs.readFileSync(RUNTIME_JSON, "utf-8")) as RuntimeInfo;
   } catch {
     return null;
+  }
+}
+
+// The .mcpb version this running server was built from. The release script
+// stamps dist/version.json next to this compiled module. Returns null for a dev
+// build with no stamp (in which case we leave the working tree untouched).
+const VERSION_JSON = path.join(__dirname, "version.json");
+function bundledVersion(): string | null {
+  try {
+    const v = JSON.parse(fs.readFileSync(VERSION_JSON, "utf-8"));
+    return typeof v?.version === "string" ? v.version : null;
+  } catch {
+    return null;
+  }
+}
+
+// `ensurePipelineCurrent()` extracts updates over the existing materialized
+// repo so customer config and logs survive. That also means deleting a file
+// from the npm tarball does not delete an older copy already on disk. Keep
+// explicit tombstones for retired helpers long enough for the fleet to pass
+// through this release; new installs never receive these files.
+const RETIRED_MATERIALIZED_FILES = [
+  "scripts/saps_mode.py",
+  "scripts/saps_activity.py",
+  "scripts/_lock_preempt_test.py",
+];
+
+function removeRetiredMaterializedFiles(): void {
+  for (const rel of RETIRED_MATERIALIZED_FILES) {
+    const target = path.join(MATERIALIZED_REPO, rel);
+    try {
+      if (!fs.existsSync(target)) continue;
+      fs.rmSync(target, { force: true });
+      console.error(`[runtime] removed retired pipeline file ${rel}`);
+    } catch (e: any) {
+      console.error(`[runtime] could not remove retired pipeline file ${rel}: ${e?.message || e}`);
+    }
+  }
+}
+
+// Re-materialize the pipeline source when a plugin UPDATE shipped a newer
+// pipeline.tgz than what's on disk. The .mcpb update refreshes dist/ (this
+// server) but does NOT re-extract the embedded tarball, so without this the box
+// keeps running the pipeline it first materialized and server/pipeline fixes
+// silently never take effect on update. Cheap: a version compare, and a tar only
+// when stale.
+//
+// Unlike provision()'s Step 0, this does NOT wipe the repo first — it extracts
+// OVER it, so the project's config.json and the logs/ dir (neither of which is in
+// the tarball) survive. Best-effort and synchronous: meant to run at server
+// startup BEFORE any tool shells out to the pipeline; never throws.
+export function ensurePipelineCurrent(): void {
+  try {
+    // A real clone (npm/git install) is the user's working tree — never touch
+    // it. A STRAY checkout (git clone nobody opted into, see isStrayCheckout)
+    // does not qualify: fall through so healStrayCheckout() can reclaim. Nor
+    // does S4L_REPO_DIR pointing at the materialized repo itself (leaked env,
+    // see envRepoClone): that repo is exactly what this refresh maintains.
+    if (envRepoClone()) return;
+    healStrayCheckout();
+    // Nothing materialized yet, or no tarball to extract from: provision() owns
+    // the first materialize; this only refreshes an existing one.
+    if (!looksLikeRepo(MATERIALIZED_REPO)) return;
+    if (!fs.existsSync(EMBEDDED_TARBALL)) return;
+
+    const bundled = bundledVersion();
+    if (!bundled) return; // dev build, no stamp — leave the materialized repo alone.
+    // Run before the version early-return too: a prior package build may have
+    // accidentally included a retired file under this same version.
+    removeRetiredMaterializedFiles();
+    const rt = readRuntime();
+    if (rt?.pipeline_version === bundled) return; // already current.
+    const prevVer = rt?.pipeline_version ?? "unrecorded"; // capture before we mutate rt below.
+
+    // Stale (or never recorded): extract the new pipeline OVER the materialized
+    // repo. No rmSync, so config.json + logs are preserved.
+    fs.mkdirSync(REPO_MATERIALIZE_DIR, { recursive: true });
+    const r = spawnSync("tar", ["xzf", EMBEDDED_TARBALL, "-C", REPO_MATERIALIZE_DIR], {
+      timeout: 120000,
+    });
+    if (r.status !== 0 || !looksLikeRepo(MATERIALIZED_REPO)) {
+      console.error(
+        `[runtime] pipeline re-materialize failed (exit ${r.status}); keeping existing pipeline`
+      );
+      return;
+    }
+    // Defense in depth: a stale/locally-built tarball cannot reintroduce a
+    // retired helper even if its package allowlist drifts.
+    removeRetiredMaterializedFiles();
+    // Record the new version so we don't re-extract on every boot.
+    const next = rt ?? readRuntime();
+    if (next) {
+      next.pipeline_version = bundled;
+      try {
+        fs.writeFileSync(RUNTIME_JSON, JSON.stringify(next, null, 2) + "\n", "utf-8");
+      } catch {
+        /* best effort — worst case we re-extract next boot */
+      }
+    }
+    console.error(`[runtime] re-materialized pipeline -> ${bundled} (was ${prevVer})`);
+  } catch (e: any) {
+    console.error(`[runtime] ensurePipelineCurrent error: ${e?.message || e}`);
+  }
+}
+
+// Reclaim a box whose pipeline repo resolution landed on a stray git checkout
+// (either S4L_REPO_DIR baked into an old registration/plist, or runtime.json's
+// repo_dir). Non-destructive: the checkout stays on disk untouched; we simply
+// stop using it. Steps: materialize the bundled pipeline if it isn't on disk
+// yet, migrate the user state the checkout accumulated while it was live
+// (config.json, .env; the project setup lives there), and re-point
+// runtime.json so every later resolveRepoDir()/plist rewrite agrees. Runs at
+// server boot from ensurePipelineCurrent(); best-effort, never throws.
+function healStrayCheckout(): void {
+  try {
+    const env = (process.env.S4L_REPO_DIR);
+    const rt = readRuntime();
+    const stray =
+      (looksLikeRepo(env) && isStrayCheckout(env) && (env as string)) ||
+      (rt?.repo_dir && looksLikeRepo(rt.repo_dir) && isStrayCheckout(rt.repo_dir) && rt.repo_dir) ||
+      null;
+    if (!stray) return;
+    if (!looksLikeRepo(MATERIALIZED_REPO)) {
+      if (!fs.existsSync(EMBEDDED_TARBALL)) return; // nothing to serve instead
+      fs.mkdirSync(REPO_MATERIALIZE_DIR, { recursive: true });
+      const r = spawnSync("tar", ["xzf", EMBEDDED_TARBALL, "-C", REPO_MATERIALIZE_DIR], {
+        timeout: 120000,
+      });
+      if (r.status !== 0 || !looksLikeRepo(MATERIALIZED_REPO)) {
+        console.error(
+          `[runtime] stray-checkout heal: materialize failed (exit ${r.status}); keeping ${stray}`
+        );
+        return;
+      }
+    }
+    for (const f of ["config.json", ".env"]) {
+      try {
+        const src = path.join(stray, f);
+        const dst = path.join(MATERIALIZED_REPO, f);
+        if (!fs.existsSync(src)) continue;
+        if (!fs.existsSync(dst) || fs.statSync(src).mtimeMs > fs.statSync(dst).mtimeMs) {
+          fs.copyFileSync(src, dst);
+        }
+      } catch {
+        /* per-file best effort */
+      }
+    }
+    if (rt && rt.repo_dir !== MATERIALIZED_REPO) {
+      rt.repo_dir = MATERIALIZED_REPO;
+      try {
+        fs.writeFileSync(RUNTIME_JSON, JSON.stringify(rt, null, 2) + "\n", "utf-8");
+      } catch {
+        /* best effort; resolveRepoDir falls back to MATERIALIZED_REPO anyway */
+      }
+    }
+    console.error(
+      `[runtime] pipeline repo was a stray git checkout (${stray}); re-pointed to ` +
+        `${MATERIALIZED_REPO}. The checkout was left on disk but is no longer used.`
+    );
+  } catch (e: any) {
+    console.error(`[runtime] healStrayCheckout error: ${e?.message || e}`);
   }
 }
 
@@ -212,12 +473,12 @@ export function runtimeReady(): boolean {
 }
 
 // Resolve the interpreter the pipeline should run under, preferring the owned
-// uv runtime, then the install-pinned SAPS_PYTHON, then bare python3. This is
+// uv runtime, then the install-pinned S4L_PYTHON, then bare python3. This is
 // the single seam that moves the pipeline off the user's system Python.
 export function resolvePython(): string {
   const rt = readRuntime();
   if (rt && rt.python && fs.existsSync(rt.python)) return rt.python;
-  return process.env.SAPS_PYTHON || "python3";
+  return process.env.S4L_PYTHON || "python3";
 }
 
 // First Chrome/Chromium binary that exists AND is executable, from the same
@@ -338,7 +599,8 @@ function findUv(): string | null {
 
 // ---------------------------------------------------------------------------
 // Provisioning. Idempotent: re-running re-derives any missing piece. A module
-// guard prevents two concurrent runs within the same process.
+// guard (`inFlight`) prevents two concurrent runs within the same process,
+// and a lock FILE (below) prevents two concurrent runs across processes.
 // ---------------------------------------------------------------------------
 let inFlight: Promise<InstallProgress> | null = null;
 
@@ -346,23 +608,244 @@ export function isProvisioning(): boolean {
   return inFlight !== null;
 }
 
+// Cross-process guard. `inFlight` above only protects against two calls in
+// the SAME process, but a new MCP server process spawns on every host boot —
+// including every leftover/queue-worker scheduled-task tick — so two separate
+// processes could both call startProvisioning() and race on the shared
+// HARNESS_DIR checkout (one process's "delete broken checkout" cleanup
+// colliding with another's `uv tool install`, corrupting the install; seen
+// live on the MacStadium QA box 2026-07-15). Reuses the same wx-create +
+// mtime-staleness idiom as version.ts's tryProbeLock. The holder refreshes
+// the lock's mtime via the existing progress heartbeat so staleness detection
+// stays accurate across long-running steps (Chromium/Chrome downloads).
+function tryAcquireProvisionLock(): boolean {
+  const create = () => fs.closeSync(fs.openSync(PROVISION_LOCK_PATH, "wx"));
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    create();
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      try {
+        if (Date.now() - fs.statSync(PROVISION_LOCK_PATH).mtimeMs > PROVISION_LOCK_STALE_MS) {
+          fs.unlinkSync(PROVISION_LOCK_PATH); // stale: holder died mid-provision
+          create();
+          return true;
+        }
+      } catch {
+        /* raced with the holder finishing/cleaning up */
+      }
+      return false;
+    }
+    return true; // unexpected fs error — probe anyway rather than going blind
+  }
+}
+
+function touchProvisionLock(): void {
+  try {
+    const now = new Date();
+    fs.utimesSync(PROVISION_LOCK_PATH, now, now);
+  } catch {
+    /* lock may have been reclaimed as stale, or already released; ignore */
+  }
+}
+
+function releaseProvisionLock(): void {
+  try {
+    fs.unlinkSync(PROVISION_LOCK_PATH);
+  } catch {
+    /* already gone */
+  }
+}
+
+// True when a DIFFERENT process holds a fresh (non-stale) provisioning lock.
+// Used by boot-time actors other than provision() itself (e.g. the harness
+// patch step) that also touch HARNESS_DIR and must not run concurrently with it.
+export function anotherProcessProvisioning(): boolean {
+  try {
+    return (
+      fs.existsSync(PROVISION_LOCK_PATH) &&
+      Date.now() - fs.statSync(PROVISION_LOCK_PATH).mtimeMs <= PROVISION_LOCK_STALE_MS
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Kick off provisioning (or return the in-flight run). Returns immediately with
 // the initial progress snapshot; the panel polls install_status for updates.
 export function startProvisioning(): InstallProgress {
   if (!inFlight) {
+    if (!tryAcquireProvisionLock()) {
+      // A different process already holds a fresh lock and is actively
+      // provisioning — don't start a second run that would race on the same
+      // HARNESS_DIR checkout. Report whatever that process has written so far.
+      return readProgress() ?? freshProgress();
+    }
     const progress = freshProgress();
     writeProgress(progress);
+    // Heartbeat: the long download steps (Chromium ~150MB, Google Chrome DMG)
+    // don't call setStep for minutes, so the progress file's updated_at froze
+    // and pollers couldn't tell "slow" from "hung." Re-stamp updated_at on a
+    // timer while the run is live so status always shows real motion. Also
+    // refreshes the provision lock so its staleness check stays accurate.
+    const heartbeat = setInterval(() => {
+      try {
+        touchProvisionLock();
+        if (!progress.done) writeProgress(progress);
+      } catch {
+        /* best effort; never let the heartbeat throw into the timer */
+      }
+    }, 15000);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
     inFlight = provision(progress).finally(() => {
+      clearInterval(heartbeat);
+      releaseProvisionLock();
       inFlight = null;
     });
   }
   return readProgress() ?? freshProgress();
 }
 
+// Bounded auto-retry for a provision that ended in failure OR silently died.
+// Called from the runtime `status` handler on each poll. Two distinct dead
+// states, both recoverable the same way:
+//   1. done && !ok — a real failure (fail() ran to completion).
+//   2. running still true, but updated_at hasn't moved in a long time — the
+//      HOLDING PROCESS WAS KILLED mid-provision (e.g. Claude Desktop quit
+//      mid-install: its onQuitCleanup path closes the MCP server abruptly,
+//      never reaching the .finally() that releases the provision lock or
+//      calls fail()). Confirmed live on the MacStadium QA box 2026-07-15: a
+//      quit ~16s into the Chromium step froze install-progress.json at
+//      "running": true forever. The reconnecting process(es) that spawned
+//      seconds later saw the lock file as still-fresh (< PROVISION_LOCK_STALE_MS
+//      old at that moment) and correctly deferred to it — but nothing ever
+//      retried afterward, because case 1's guard doesn't match "running", and
+//      ensureRuntimeProvisioned() only fires once, at process boot. Case 2
+//      closes that gap: once updated_at is stale enough that the holder is
+//      certainly dead, treat it exactly like case 1 — the venv/harness steps
+//      already clean their own partial artifacts, and startProvisioning()'s
+//      tryAcquireProvisionLock() will find the (by-now very stale) lock file
+//      and correctly reclaim it.
+// Capped so a genuinely broken environment (no network, no disk) surfaces the
+// error instead of looping forever. Returns true if it started a retry.
+let autoRetryCount = 0;
+const MAX_AUTO_RETRIES = 3;
+// Deliberately well above PROVISION_LOCK_STALE_MS (60s): a heartbeat this old
+// cannot be a merely-slow step (the heartbeat ticks every 15s regardless of
+// what the step itself is doing), only a dead holder.
+const STALLED_RUNNING_MS = 120_000;
+export function retryProvisionIfStalled(): boolean {
+  try {
+    if (runtimeReady()) return false;
+    if (isProvisioning()) return false;
+    const p = readProgress();
+    const failed = !!(p && p.done && !p.ok);
+    const zombieRunning = !!(
+      p &&
+      p.running &&
+      !p.done &&
+      Date.now() - new Date(p.updated_at).getTime() > STALLED_RUNNING_MS
+    );
+    if (!(failed || zombieRunning)) return false;
+    if (autoRetryCount >= MAX_AUTO_RETRIES) return false;
+    autoRetryCount += 1;
+    startProvisioning();
+    return true;
+  } catch {
+    return false; // best-effort; must never break a status poll
+  }
+}
+
+// Boot-time deterministic provisioning: bring the owned runtime to ready on
+// every server start WITHOUT relying on the agent to call `runtime
+// action:'install'`. Called from main() on every server start, which the host
+// spawns when the plugin loads — so the env starts installing the moment the
+// plugin is active, before any agent turn.
+//
+// Provision-on-boot policy (option a): auto-fire whenever the runtime is not
+// ready, fresh install or interrupted one alike. A brand-new install downloads
+// and installs everything it needs (uv, Python, venv, deps, Chromium, harness,
+// Chrome — whatever the megabytes) up front; an install that died mid-way (a
+// failed step, or Claude restarted between steps) resumes. provision() is
+// idempotent, so this re-checks done steps and skips them, attempting only
+// what's missing. The single deterministic trigger is server boot, not agent
+// reasoning. Returns true if it kicked a run. Best-effort, never throws.
+export function ensureRuntimeProvisioned(): boolean {
+  try {
+    if (runtimeReady()) return false; // fully provisioned already
+    if (isProvisioning()) return false; // a run is in flight in this process
+    // Not ready: provision everything now (startProvisioning is idempotent and
+    // re-entrant — a no-op if a run is already in flight).
+    startProvisioning();
+    return true;
+  } catch {
+    return false; // best-effort; a boot provision must never break startup
+  }
+}
+
+// Boot hook closing the provisioning gap for ALREADY-ready runtimes: provision()
+// skips when runtimeReady(), so a vendored-patch update shipped in an rc never
+// reaches an existing install's harness checkout (proved on the QA box: rc.26
+// delivered scripts/patches/ but the checkout stayed unpatched, 2026-07-13).
+// This runs on every MCP boot: if the fix marker is absent and the patch
+// applies, apply it and reload the harness daemon so the running process picks
+// up the new source (the uv tool install is EDITABLE, so patched files are
+// live without a reinstall). Best-effort; never blocks startup.
+export async function ensureHarnessPatched(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    // Also a boot-time actor on HARNESS_DIR (git checkout/apply below) — skip
+    // while another process is actively provisioning it (cloning/resetting/
+    // installing) rather than racing on the same checkout.
+    if (anotherProcessProvisioning()) return { ok: false, detail: "provisioning in progress elsewhere" };
+    // Version marker of the CURRENT vendored patch: a symbol that exists only
+    // in its newest revision (v2 added the daemon.py websocket-proxy
+    // neutralization after v1's cdp_urlopen alone proved insufficient — the
+    // WS dial still routed through the macOS system proxy and died with
+    // "proxy rejected connection: HTTP 503"). Bump this string whenever the
+    // patch gains a new hunk, or upgraded installs will silently keep the
+    // previous revision.
+    const daemonPy = path.join(HARNESS_DIR, "src", "browser_harness", "daemon.py");
+    if (!fs.existsSync(daemonPy)) return { ok: false, detail: "harness not installed yet" };
+    if (fs.readFileSync(daemonPy, "utf-8").includes("s4l_no_proxy_ws")) {
+      return { ok: true, detail: "already patched" };
+    }
+    const harnessPatch = path.join(
+      MATERIALIZED_REPO,
+      "scripts",
+      "patches",
+      "browser-harness-loopback-cdp-proxy.patch"
+    );
+    if (!fs.existsSync(harnessPatch)) return { ok: false, detail: "patch file missing from package" };
+    // Discard any PRIOR vendored-patch revision (e.g. v1) so the cumulative
+    // patch applies onto pristine pinned sources. Only src/ is touched; the
+    // checkout is a managed artifact, never a place for local edits.
+    await sh("git", ["-C", HARNESS_DIR, "checkout", "--", "src/browser_harness"], {
+      timeoutMs: 30000,
+    });
+    const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
+      timeoutMs: 30000,
+    });
+    if (chk.code !== 0) {
+      return { ok: false, detail: "patch does not apply (dirty or diverged checkout)" };
+    }
+    const app = await sh("git", ["-C", HARNESS_DIR, "apply", harnessPatch], { timeoutMs: 30000 });
+    if (app.code !== 0) return { ok: false, detail: `git apply failed (exit ${app.code})` };
+    // Reload the daemon so the long-lived process re-imports the patched source.
+    await sh(HARNESS_BIN, ["--reload"], { timeoutMs: 30000 });
+    return { ok: true, detail: "patched + daemon reloaded" };
+  } catch (e: any) {
+    return { ok: false, detail: String(e?.message || e) };
+  }
+}
+
 async function provision(progress: InstallProgress): Promise<InstallProgress> {
   const setStep = (id: string, status: StepStatus, detail?: string) => {
     const st = progress.steps.find((s) => s.id === id);
     if (st) {
+      if (status === "running" && st.status !== "running") {
+        st.started_at = new Date().toISOString();
+      }
       st.status = status;
       if (detail !== undefined) st.detail = detail;
     }
@@ -374,27 +857,37 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     progress.ok = false;
     progress.error = msg;
     writeProgress(progress);
+    // Every fatal install-step failure (repo unpack, uv, python, venv, deps,
+    // chromium, harness, chrome) was previously only written to the local
+    // install-progress.json, invisible to us. Report it so a failed runtime
+    // install becomes a real Sentry event, tagged with the step that failed.
+    const failedStep = progress.steps.find((s) => s.status === "running");
+    captureError(new Error(msg), {
+      component: "install",
+      ...(failedStep ? { step: failedStep.id } : {}),
+    });
     return progress;
   };
 
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
 
   // --- Step 0: materialize the pipeline repo --------------------------------
-  // If SAPS_REPO_DIR is already a real clone (npm/git install), use it untouched.
+  // If S4L_REPO_DIR is already a real clone (npm/git install), use it untouched.
   // Otherwise (bare .mcpb double-click) unpack the embedded npm tarball so the
   // pipeline source lands on disk and every later step + the server agree on one
   // repo path. requirements.txt MUST exist after this for the deps step.
   setStep("repo", "running");
   let resolvedRepo: string;
-  if (looksLikeRepo(process.env.SAPS_REPO_DIR)) {
-    resolvedRepo = process.env.SAPS_REPO_DIR as string;
+  const envClone = envRepoClone();
+  if (envClone) {
+    resolvedRepo = envClone;
     setStep("repo", "done", `using existing clone: ${resolvedRepo}`);
   } else {
     if (!fs.existsSync(EMBEDDED_TARBALL)) {
       return fail(
-        `no pipeline source: SAPS_REPO_DIR is not a clone and the embedded ` +
+        `no pipeline source: S4L_REPO_DIR is not a clone and the embedded ` +
           `tarball is missing (${EMBEDDED_TARBALL}). Reinstall the extension or ` +
-          `set SAPS_REPO_DIR to a social-autoposter clone.`
+          `set S4L_REPO_DIR to a social-autoposter clone.`
       );
     }
     // Clean any half-unpacked previous attempt, then extract fresh (idempotent).
@@ -428,9 +921,32 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       }
       if (!occupied) fs.symlinkSync(MATERIALIZED_REPO, compat);
     } catch {
-      /* best effort; SAPS_REPO_DIR + the run-*.sh fallback also resolve the repo */
+      /* best effort; S4L_REPO_DIR + the run-*.sh fallback also resolve the repo */
     }
     setStep("repo", "done", `unpacked to ${resolvedRepo}`);
+
+    // Auto-opt a bare .mcpb FIRST install into the staging channel when the
+    // shipped build is itself a pre-release (-rc.N) — e.g. downloaded from
+    // the staging-latest alias link (scripts/release-mcpb.sh step 7b).
+    // Without this, channel.json stays absent, which releaseChannel()'s
+    // fail-safe default reads as "stable" (mcp/src/version.ts), so the box
+    // would install this one rc and then silently stop tracking staging
+    // (never pick up the next rc). Mirrors the same one-time write in
+    // bin/cli.js's installMcp() for the npx install path. Gated to this
+    // `else` branch (genuine bare-.mcpb unpack, not envClone) so a
+    // developer's own npm/git clone is never auto-enrolled. Only writes when
+    // no channel marker exists yet — never overrides an existing preference.
+    try {
+      const bv = bundledVersion();
+      const channelPath = path.join(STATE_DIR, "channel.json");
+      if (bv && bv.includes("-rc.") && !fs.existsSync(channelPath)) {
+        fs.mkdirSync(STATE_DIR, { recursive: true });
+        fs.writeFileSync(channelPath, JSON.stringify({ channel: "staging" }, null, 2) + "\n", "utf-8");
+        console.error(`[runtime] first install of a staging build (${bv}) — opted into the staging channel`);
+      }
+    } catch {
+      /* best effort; worst case the box just tracks stable */
+    }
   }
 
   // --- Step 1: uv -----------------------------------------------------------
@@ -465,9 +981,24 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   setStep("python", "done");
 
   // --- Step 3: owned venv ---------------------------------------------------
+  // A prior aborted run can leave a PARTIAL .venv (dir created, but the
+  // interpreter symlink never landed because the standalone-Python download was
+  // cut off). `uv venv` refuses a non-empty target, so every retry then failed
+  // identically and the ONLY escape was a human `rm -rf .venv` — the single
+  // non-idempotent step that turned a 5-minute install into an hour. Treat a
+  // venv with no interpreter as garbage and clear it first (same defensive idiom
+  // Step 0 uses for a half-unpacked repo), and pass --clear so uv rebuilds
+  // cleanly. This makes re-provision fully self-healing.
   setStep("venv", "running");
   {
-    const r = await sh(uv, ["venv", "--python", PYTHON_VERSION, VENV_DIR], {
+    if (fs.existsSync(VENV_DIR) && !fs.existsSync(VENV_PYTHON)) {
+      try {
+        fs.rmSync(VENV_DIR, { recursive: true, force: true });
+      } catch {
+        /* best effort; --clear below is the second line of defense */
+      }
+    }
+    const r = await sh(uv, ["venv", "--clear", "--python", PYTHON_VERSION, VENV_DIR], {
       env: uvEnv,
       timeoutMs: 120000,
     });
@@ -500,6 +1031,21 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     if (r.code !== 0) {
       return fail(`playwright install chromium failed (exit ${r.code}). ${r.out.slice(-400)}`);
     }
+    // Smoke-test the EXACT gate the pipeline's post path runs at use time
+    // (twitter_post_plan.py preflight): the owned interpreter must import
+    // playwright. The reply step is the only Playwright importer, so a deps
+    // sync that left it unimportable was invisible until the first real post
+    // died with no_reply_json in production (Karol, 2026-06-22). Fail the
+    // install LOUDLY here instead.
+    const smoke = await sh(VENV_PYTHON, ["-c", "import playwright"], {
+      timeoutMs: 60000,
+    });
+    if (smoke.code !== 0) {
+      return fail(
+        `runtime smoke test failed: ${VENV_PYTHON} cannot import playwright ` +
+          `(exit ${smoke.code}). ${smoke.out.slice(-400)}`
+      );
+    }
   }
   setStep("chromium", "done");
 
@@ -511,6 +1057,18 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // draft_cycle returned "no candidates". This brings .mcpb to parity with npm.
   setStep("harness", "running");
   {
+    // Retry-safety: a clone cut off mid-way leaves HARNESS_DIR present but with
+    // no .git, so the "clone if absent" check below skips it and the fetch/reset
+    // then fail forever against a broken checkout — the same partial-artifact
+    // deadlock the venv step had. Treat a non-git HARNESS_DIR as garbage and
+    // rebuild it.
+    if (fs.existsSync(HARNESS_DIR) && !fs.existsSync(path.join(HARNESS_DIR, ".git"))) {
+      try {
+        fs.rmSync(HARNESS_DIR, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    }
     // Clone if absent (mkdir parent first), else reuse the checkout.
     if (!fs.existsSync(HARNESS_DIR)) {
       fs.mkdirSync(path.dirname(HARNESS_DIR), { recursive: true });
@@ -529,6 +1087,42 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       timeoutMs: 120000,
     });
     await sh("git", ["-C", HARNESS_DIR, "reset", "--hard", "FETCH_HEAD"], { timeoutMs: 60000 });
+    // Vendored fix on top of the pin: loopback CDP requests must never route
+    // through a proxy. macOS system proxy settings leak into urllib's default
+    // opener, and a box-wide forwarder 403s every 127.0.0.1 probe, so Chrome
+    // reads as "wedged"/logged-out while it is actually fine (2026-07-13).
+    // Upstream doesn't carry the fix and we don't control that repo, so apply
+    // our patch at install time, on every machine. If it stops applying
+    // cleanly, upstream has either merged the fix (detected below; fine) or
+    // refactored the files (warn); never fail the install over it.
+    const harnessPatch = path.join(
+      MATERIALIZED_REPO,
+      "scripts",
+      "patches",
+      "browser-harness-loopback-cdp-proxy.patch"
+    );
+    if (fs.existsSync(harnessPatch)) {
+      const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
+        timeoutMs: 30000,
+      });
+      if (chk.code === 0) {
+        await sh("git", ["-C", HARNESS_DIR, "apply", harnessPatch], { timeoutMs: 30000 });
+      } else {
+        let fixedUpstream = false;
+        try {
+          fixedUpstream = fs
+            .readFileSync(path.join(HARNESS_DIR, "src", "browser_harness", "admin.py"), "utf-8")
+            .includes("cdp_urlopen");
+        } catch {
+          /* file moved — fall through to the warning */
+        }
+        if (!fixedUpstream) {
+          console.error(
+            "[runtime] browser-harness loopback-proxy patch no longer applies and the fix is absent upstream; CDP probes may 403 behind a system proxy"
+          );
+        }
+      }
+    }
     // Install the CLI via uv tool (lands at ~/.local/bin/browser-harness).
     // --force so a refreshed source / changed entry point is reinstalled.
     const inst = await sh(uv, ["tool", "install", "--force", "-e", HARNESS_DIR], {
@@ -565,8 +1159,8 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     // ~/Applications branch without re-detecting spaces-in-path quirks).
     const script = [
       "set -e",
-      'DMG="$(mktemp -t saps-gchrome).dmg"',
-      'MNT="$(mktemp -d -t saps-gchrome-mnt)"',
+      'DMG="$(mktemp -t s4l-gchrome).dmg"',
+      'MNT="$(mktemp -d -t s4l-gchrome-mnt)"',
       'cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; rm -f "$DMG"; rmdir "$MNT" 2>/dev/null || true; }',
       "trap cleanup EXIT",
       `curl -fsSL -o "$DMG" "${GOOGLE_CHROME_DMG}"`,
@@ -615,11 +1209,24 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // Non-fatal: a menu bar failure must never block a usable runtime, so on any
   // problem we mark the step errored and still persist runtime.json below.
   setStep("menubar", "running");
-  if (process.platform === "darwin") {
+  if (process.platform !== "darwin") {
+    setStep("menubar", "done", "skipped (macOS only)");
+  } else if (menubarStopped()) {
+    // A runtime repair/re-provision must not resurrect a tray the user
+    // explicitly quit; an explicit start clears the flag first.
+    setStep("menubar", "done", "skipped (user stopped the menu bar)");
+  } else {
     const mb = await installMenubar(uv, uvEnv, VENV_PYTHON);
     setStep("menubar", mb.ok ? "done" : "error", mb.detail);
-  } else {
-    setStep("menubar", "done", "skipped (macOS only)");
+    // Non-fatal step, so the only prior signal of a menu bar install failure was
+    // a local install-progress.json entry (invisible to us). Report it so "menu
+    // bar didn't start" becomes a real Sentry event with the failing detail.
+    if (!mb.ok) {
+      captureError(new Error(`menubar install failed: ${mb.detail}`), {
+        component: "menubar",
+        phase: "install",
+      });
+    }
   }
 
   // --- Persist the result ---------------------------------------------------
@@ -631,6 +1238,11 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     chrome: chromeBin || undefined,
     ready: true,
     provisioned_at: new Date().toISOString(),
+    // Stamp the just-materialized pipeline version so ensurePipelineCurrent()
+    // can detect a later update without re-extracting on every boot. Only
+    // meaningful for the materialized (.mcpb) repo, not a S4L_REPO_DIR clone.
+    pipeline_version:
+      resolvedRepo === MATERIALIZED_REPO ? bundledVersion() ?? undefined : undefined,
   };
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(RUNTIME_JSON, JSON.stringify(info, null, 2) + "\n", "utf-8");
@@ -714,11 +1326,11 @@ function menubarPlistXml(python: string): string {
 \t\t<string>${menubarPath}</string>
 \t\t<key>HOME</key>
 \t\t<string>${os.homedir()}</string>
-\t\t<key>SAPS_STATE_DIR</key>
+\t\t<key>S4L_STATE_DIR</key>
 \t\t<string>${STATE_DIR}</string>
-\t\t<key>SAPS_PYTHON</key>
+\t\t<key>S4L_PYTHON</key>
 \t\t<string>${python}</string>
-\t\t<key>SAPS_REPO_DIR</key>
+\t\t<key>S4L_REPO_DIR</key>
 \t\t<string>${resolveRepoDir()}</string>
 \t</dict>
 </dict>
@@ -726,9 +1338,26 @@ function menubarPlistXml(python: string): string {
 `;
 }
 
-async function menubarLoaded(): Promise<boolean> {
+export async function menubarLoaded(): Promise<boolean> {
   const r = await sh("launchctl", ["list"], { timeoutMs: 10_000 });
   return r.out.includes(MENUBAR_LABEL);
+}
+
+// Is the menu bar app expected to be up right now? Only meaningful once the
+// runtime is provisioned (the LaunchAgent isn't installed before that) and only
+// on macOS. Any failure defaults to `true` so the panel never shows a spurious
+// "menu bar down" banner from a flaky launchctl read.
+export async function menubarRunning(): Promise<boolean> {
+  if (process.platform !== "darwin") return true;
+  if (!runtimeReady()) return true;
+  // User explicitly quit the tray: it is down ON PURPOSE, so report "fine" —
+  // the dashboard banner must not nag about a state the user chose.
+  if (menubarStopped()) return true;
+  try {
+    return await menubarLoaded();
+  } catch {
+    return true;
+  }
 }
 
 export async function installMenubar(
@@ -786,13 +1415,24 @@ export async function ensureMenubar(): Promise<{
   skipped?: boolean;
 }> {
   if (process.platform !== "darwin") return { ok: true, skipped: true, detail: "non-macOS" };
+  // The user clicked Quit in the tray: stay stopped across Claude restarts,
+  // regardless of runtime state. Explicit start paths (restart_menubar tool,
+  // queue_setup) clear the flag before calling this.
+  if (menubarStopped()) {
+    return { ok: true, skipped: true, detail: "user stopped the menu bar (stopped.flag)" };
+  }
   if (!runtimeReady()) return { ok: false, skipped: true, detail: "runtime not ready" };
   if (
     fs.existsSync(MENUBAR_ENTRY) &&
     fs.existsSync(MENUBAR_PLIST) &&
     (await menubarLoaded())
   ) {
-    return { ok: true, skipped: true, detail: "already installed" };
+    // Installed — but refresh the stable copy if the bundled menu bar is newer.
+    // An .mcpb update ships new menu bar code, yet the running menu bar runs from
+    // this stable copy (so it survives extension replacement); without this it
+    // would stay the version it first installed at. Cheap: content-compare, and
+    // a kickstart only when something actually changed.
+    return await refreshMenubarIfStale();
   }
   const uv = findUv();
   if (!uv) return { ok: false, detail: "uv not found" };
@@ -800,4 +1440,67 @@ export async function ensureMenubar(): Promise<{
     UV_PYTHON_INSTALL_DIR: path.join(RUNTIME_DIR, "python"),
   };
   return installMenubar(uv, uvEnv, resolvePython());
+}
+
+// Re-copy the bundled menu bar python into the stable dir when it differs from
+// what's installed, and kickstart the launchd job so the running menu bar picks
+// up the new code. Content-compare keeps this a no-op on an unchanged boot, so
+// it's cheap to call on every ensureMenubar(). This is what makes menu bar
+// changes (e.g. the "Update now & restart Claude Desktop" button) actually ship on an .mcpb update.
+async function refreshMenubarIfStale(): Promise<{ ok: boolean; detail: string; skipped?: boolean }> {
+  const src = menubarSourceDir();
+  if (!src) return { ok: true, skipped: true, detail: "no bundle source to refresh from" };
+  let changed = false;
+  try {
+    for (const f of fs.readdirSync(src)) {
+      if (!f.endsWith(".py")) continue;
+      const s = fs.readFileSync(path.join(src, f));
+      const dPath = path.join(MENUBAR_DIR, f);
+      const d = fs.existsSync(dPath) ? fs.readFileSync(dPath) : Buffer.alloc(0);
+      if (!s.equals(d)) {
+        fs.writeFileSync(dPath, s);
+        changed = true;
+      }
+    }
+  } catch (e: any) {
+    return { ok: true, skipped: true, detail: `menu bar refresh check failed: ${e?.message || e}` };
+  }
+  // The plist bakes S4L_REPO_DIR/S4L_PYTHON at write time and was historically
+  // never rewritten, so a box whose repo resolution changed (e.g. a stray git
+  // checkout healed at boot) kept feeding the menu bar (and every snapshot.py
+  // it spawns) the stale repo, which is what pins the displayed version and the
+  // update banner. Regenerate and compare; a drifted plist needs a full
+  // bootout/bootstrap (env changes don't apply on kickstart).
+  let plistChanged = false;
+  try {
+    const want = menubarPlistXml(resolvePython());
+    let have = "";
+    try {
+      have = fs.readFileSync(MENUBAR_PLIST, "utf-8");
+    } catch {
+      have = "";
+    }
+    if (want !== have) {
+      fs.mkdirSync(path.dirname(MENUBAR_PLIST), { recursive: true });
+      fs.writeFileSync(MENUBAR_PLIST, want, "utf-8");
+      plistChanged = true;
+    }
+  } catch {
+    /* best effort; a failed plist refresh must not block the .py refresh */
+  }
+  if (!changed && !plistChanged)
+    return { ok: true, skipped: true, detail: "menu bar already current" };
+  const uid = process.getuid ? process.getuid() : 0;
+  if (plistChanged) {
+    await sh("launchctl", ["bootout", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
+    const lr = await sh("launchctl", ["bootstrap", `gui/${uid}`, MENUBAR_PLIST], {
+      timeoutMs: 15_000,
+    });
+    if (lr.code !== 0) {
+      await sh("launchctl", ["load", MENUBAR_PLIST], { timeoutMs: 15_000 });
+    }
+    return { ok: true, detail: "menu bar plist refreshed + agent reloaded" };
+  }
+  await sh("launchctl", ["kickstart", "-k", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
+  return { ok: true, detail: "menu bar refreshed + restarted to bundled version" };
 }

@@ -38,7 +38,7 @@ LE_HELPER="$REPO_DIR/scripts/link_edit_helper.py"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/link-edit-reddit-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== Reddit Link Edit Run: $(date) ==="
@@ -118,7 +118,7 @@ Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each 
       - voice_relationship == "first_party": Frame as our own creation. Bridge form: "fwiw the [specific-thing-from-4a] is from [PROJECT_NAME], a thing I built that [specific-mechanism-from-4b], LINK_URL". Concrete first_party examples (do NOT copy verbatim; rewrite to match each post's actual claim):
         * "fwiw the 81 number is from a rubric we trained on med-school decks, scores factual correctness, distractor quality, and rephrases on revisit so you can't pattern-match the stem, https://studyly.io/t/anki-card-generator-for-medical-school"
         * "we shipped this for the rephrase-on-revisit problem specifically, it scores against a 4-axis rubric and re-asks the same fact in different stems, https://studyly.io/t/active-recall-question-generator"
-      - voice_relationship == "third_party": You are an outside observer pointing at the project's mechanism. Bridge form: "fwiw [PROJECT_NAME] handles the [specific-thing-from-4a] via [specific-mechanism-from-4b], LINK_URL". Do NOT use "I built" / "we shipped" / "we made". Do NOT pretend you stumbled on it ("found this", "came across this") either; that drops engagement. Stay matter-of-fact and concrete.
+      - voice_relationship == "third_party": for accounts that are not the project's maker. Cite the project's mechanism directly. Bridge form: "fwiw [PROJECT_NAME] handles the [specific-thing-from-4a] via [specific-mechanism-from-4b], LINK_URL". Do NOT use "I built" / "we shipped" / "we made", and do NOT use "found this" / "came across this". Stay matter-of-fact and concrete.
    e. BANNED phrasing (rejects the bridge structure, costs CTR):
       - Bare citation with no mechanism: "fwiw the X number is from PROJECT, URL" with no named mechanism.
       - Generic verbs with no object: "a tool for exactly this", "does this" (no concrete mechanism named).
@@ -174,8 +174,11 @@ PROMPT_EOF
 log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py pre-flight acquire failed; proceeding (claude will retry per-post)."
-if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
-    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    log "WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true

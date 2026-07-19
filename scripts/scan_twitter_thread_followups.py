@@ -50,19 +50,34 @@ except Exception:
     def _resolve_account(_platform):  # type: ignore[unused-arg]
         return None
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
-OUR_HANDLE = _resolve_account("twitter") or "m13v_"
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
+OUR_HANDLE = _resolve_account("twitter")
+if not OUR_HANDLE:
+    # No hardcoded fallback: scanning/attributing under a default handle silently
+    # impersonates the repo owner. Refuse to run so the missing config surfaces.
+    sys.stderr.write(
+        "[scan_twitter_followups] no Twitter handle configured "
+        "(accounts.twitter.handle / AUTOPOSTER_TWITTER_HANDLE); refusing to run "
+        "to avoid wrong-account attribution. Run connect_x first.\n")
+    sys.exit(1)
 DEFAULT_DAYS = 14
 DEFAULT_MAX_URLS = 40
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 REPLY_PAGE_LIMIT = 500
 
+# Pinned interpreter, never the literal "python3": twitter_browser.py (below)
+# imports Playwright, and bare "python3" resolves to the caller's system
+# Python on PATH, which has no Playwright on a fresh install (silent
+# failure). See scripts/twitter_post_plan.py:131.
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
 
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
+
 
 
 def fetch_our_recent_x_replies(days, max_urls):
@@ -129,7 +144,7 @@ def run_browser_scrape(urls, scroll_count=3):
             f.write(u + "\n")
     try:
         proc = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts/twitter_browser.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts/twitter_browser.py"),
              "thread-followups", urls_path, str(scroll_count)],
             capture_output=True, text=True, timeout=1800,
         )

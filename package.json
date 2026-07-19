@@ -1,22 +1,26 @@
 {
   "name": "social-autoposter",
-  "version": "1.6.74",
+  "version": "1.7.6",
   "description": "Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Install as a Claude Code agent skill.",
   "bin": {
-    "social-autoposter": "bin/cli.js"
+    "social-autoposter": "bin/cli.js",
+    "s4l": "bin/cli.js"
   },
   "scripts": {
     "start": "node bin/server.js",
     "dev": "node --watch bin/server.js",
     "release:mcpb": "bash scripts/release-mcpb.sh",
-    "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/systemd-golden.test.js && node test/tweetclaw-candidates.test.js && node mcp/scripts/test_onboarding_contract.mjs && node mcp/scripts/test_onboarding_ledger.mjs"
+    "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/tweetclaw-candidates.test.js && node mcp/scripts/test_onboarding_contract.mjs && node mcp/scripts/test_onboarding_ledger.mjs"
   },
   "files": [
     "bin/",
     "!bin/server.js",
     "!bin/auth.js",
     "scripts/*.py",
+    "scripts/patches/",
     "!scripts/db_direct.py",
+    "!scripts/admin_fetch_install_config.py",
+    "!scripts/sync_blocked_authors.py",
     "!scripts/backfill_real_clicks.py",
     "!scripts/historical_engagement.py",
     "!scripts/style_length_report.py",
@@ -54,6 +58,7 @@
     "!scripts/_serp_report.py",
     "!scripts/_serp_vs_gsc_report.py",
     "!scripts/_test_since_hook.py",
+    "!scripts/_lock_preempt_test.py",
     "!scripts/add_deploy_metadata.py",
     "!scripts/add_nightowl_to_config.py",
     "!scripts/amplitude_user_lookup.py",
@@ -116,12 +121,14 @@
     "requirements.txt",
     "SKILL.md",
     "skill/*.sh",
+    "!skill/sync-blocked-authors.sh",
     "skill/lib/*.sh",
     "setup/SKILL.md",
     "browser-agent-configs/",
     "mcp-servers/",
     "mcp/dist/",
     "!mcp/dist/pipeline.tgz",
+    "mcp/shared/",
     "mcp/menubar/",
     "mcp/package.json",
     "mcp/manifest.json",
@@ -151,10 +158,9 @@
     "node": ">=16"
   },
   "dependencies": {
-    "ws": "^8.0.0"
-  },
-  "devDependencies": {
+    "@sentry/node": "^10.64.0",
     "firebase-admin": "^13.8.0",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "ws": "^8.0.0"
   }
 }

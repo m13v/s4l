@@ -79,9 +79,15 @@ def _resolve_handle() -> str:
         if h:
             return h.lstrip("@").strip().lower()
     except Exception as e:
-        print(f"[harvest] account_resolver failed ({e}); falling back to m13v_",
-              file=sys.stderr)
-    return "m13v_"
+        print(f"[harvest] account_resolver failed ({e})", file=sys.stderr)
+    # No hardcoded fallback: stamping a default handle here silently harvests /
+    # attributes under the wrong account. Refuse to run instead so the missing
+    # config surfaces. Run connect_x (or `setup_twitter_auth.py resolve-handle`)
+    # to persist accounts.twitter.handle.
+    print("[harvest] no Twitter handle configured (accounts.twitter.handle / "
+          "AUTOPOSTER_TWITTER_HANDLE); refusing to run to avoid wrong-account "
+          "attribution.", file=sys.stderr)
+    sys.exit(1)
 
 
 def _looks_logged_out(url: str) -> bool:

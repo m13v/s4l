@@ -30,6 +30,14 @@
 
 set -uo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 # 2026-05-28: launchd inherits a default open-files limit of 256 on macOS,
 # which is below the threshold the claude binary needs when it loads MCP
 # servers from ~/.claude.json (50+ servers, each opening a stdio pipe pair).
@@ -41,13 +49,14 @@ set -uo pipefail
 # if the kernel/account caps below this.
 ulimit -n 4096 2>/dev/null || true
 
-# Honor SAPS_REPO_DIR (set by the MCP wrapper + launchd plists) so a .mcpb
+# Honor S4L_REPO_DIR (set by the MCP wrapper + launchd plists) so a .mcpb
 # install that materializes the repo under ~/.social-autoposter-mcp/repo/package
 # resolves correctly. Falls back to the legacy ~/social-autoposter path for
 # npm/git installs and direct invocations. Cascades to every $REPO_DIR/... ref
 # below (sourced libs + child scripts inherit it), so this one line fixes the
 # whole cycle's repo resolution on a bare .mcpb install.
-REPO_DIR="${SAPS_REPO_DIR:-$HOME/social-autoposter}"
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
+export REPO_DIR
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
@@ -100,15 +109,47 @@ TW_ENGINE_PREFIX=""
 # ceiling drops that carry runway so aged-out junk expires instead of riding
 # ~80 cycles. Discovery is already capped at 1h (FRESHNESS_HOURS_DISCOVER).
 #
-# 2026-06-17 (per user request): DRAFT mode (DRAFT_ONLY=1, the MCP draft_cycle
-# tool) widens both freshness knobs to 24h so human review surfaces more (and
-# older) candidates. Autopilot is untouched: it keeps the experiment-concluded
-# 2h expire ceiling + 1h discovery window (variant D). The branch is on
-# DRAFT_ONLY, an external env var set by the draft_cycle tool, available here.
-if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS=24
+# 2026-07-06 (per user request): there is exactly ONE freshness path and ONE
+# exception, with NO env-var knobs. Every cycle, draft or autopilot, runs the
+# experiment-concluded variant D windows: 2h expire ceiling here plus 1h
+# discovery. The single exception is first-run setup: the MCP server drops
+# first-run-boost.json into the state dir when it installs the kicker
+# (mcp/src/index.ts), and while that marker is live a draft cycle widens both
+# knobs to a hardcoded 48h so the user's FIRST review batch surfaces real
+# candidates. run-draft-and-publish.sh owns the marker lifecycle: consumed
+# the moment a merge delivers cards, removed after 24h without any. We read
+# the marker file directly; the old S4L_DRAFT_FRESHNESS_HOURS and
+# S4L_FIRST_RUN_FRESHNESS_HOURS env overrides are retired.
+#
+# 2026-07-15 (per user request, thread-age-vs-engagement investigation): both
+# knobs raised 2h/1h -> 6h. Isolating variant D's own posting history (no
+# cross-variant confound) showed engagement flat through ~3h and only
+# cratering past 6h (18-22 avg views vs 51-77 in the 0-3h plateau); 3-6h is a
+# real but under-sampled gray zone precisely because the old 2h cap prevented
+# candidates from ever reaching it. 6h is the evidence-backed outer bound, not
+# a measured optimum inside 3-6h. Discovery (FRESHNESS_HOURS_DISCOVER) moves to
+# 6h too, on explicit request — this reopens, rather than confirms, the
+# concluded A/B/C/D result below, which found a *tighter* 1h discovery window
+# winning.
+#
+# Also fixed here: the expire-stale gate has always compared against
+# discovered_at (discovery age), not tweet_posted_at (thread age) — harmless
+# while discovery was capped at 1h (the two stayed within ~1h of each other),
+# but wrong now that discovery can itself be up to 6h stale at the moment we
+# find a candidate: a discovered_at-based gate would then let real thread age
+# reach ~12h before expiring. score_twitter_candidates.py now passes
+# basis="tweet_posted_at" on its expire-stale calls so the gate measures
+# thread age directly, not how long the row sat in our own pipeline. The
+# route (~/social-autoposter-website twitter-candidates/expire-stale) treats
+# basis as opt-in, defaulting to discovered_at, so other installs are
+# unaffected.
+FIRST_RUN_BOOST_MARKER="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
+if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -f "$FIRST_RUN_BOOST_MARKER" ]; then
+    FRESHNESS_HOURS=48
+    FRESHNESS_HOURS_DISCOVER=48
 else
-    FRESHNESS_HOURS=2
+    FRESHNESS_HOURS=6
+    FRESHNESS_HOURS_DISCOVER=6
 fi
 
 # ----------------------------------------------------------------------------
@@ -121,26 +162,33 @@ fi
 # permanent, hardcoded behavior. The cycle_variant column is still stamped 'D'
 # below so historical analytics keep a consistent label.
 #
-# Phase 0 hard-expire uses FRESHNESS_HOURS (the union ceiling, tightened to 2h
-# on 2026-06-01, see above) so peer cycles don't accidentally expire each
-# other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
-# since-rewrite hook) stays tightened to 1h, the winning D setting.
+# 2026-07-15: FRESHNESS_HOURS_DISCOVER raised 1h -> 6h (see the block above) —
+# this reopens the exact question this experiment settled in D's favor. D's
+# own no-ripen + 2k-view-cap logic is untouched; only the discovery window
+# widens.
+#
+# Phase 0 hard-expire uses FRESHNESS_HOURS (the union ceiling, now 6h and keyed
+# on thread age via the basis param — see above) so peer cycles don't
+# accidentally expire each other's still-pending rows.
 TWITTER_CYCLE_VARIANT=D
-# DRAFT mode widens discovery to 24h (the twitter-search-since-rewrite.py hook
-# clamps the override to a 1-24h range, so 24 is the accepted max); autopilot
-# keeps the winning D setting of 1h. See the DRAFT_ONLY branch on
-# FRESHNESS_HOURS above (2026-06-17, per user request).
-if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS_DISCOVER=24
-else
-    FRESHNESS_HOURS_DISCOVER=1
-fi
+# FRESHNESS_HOURS_DISCOVER is set together with FRESHNESS_HOURS in the
+# first-run-boost block above: 6h everywhere (2026-07-15), 48h only while the
+# setup marker is live. The lean Phase 1 CDP scraper reads it directly and
+# honors any value.
 # Export FRESHNESS_HOURS too so score_twitter_candidates.py inherits it and
-# drives the expire-stale gate from the same knob (was hardcoded 18h there).
+# drives the expire-stale gate from the same knob.
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
 # Hook env: ~/.claude/hooks/twitter-search-since-rewrite.py reads this and
-# uses it in place of its hardcoded 6h default when present.
-export FRESHNESS_HOURS_OVERRIDE=$FRESHNESS_HOURS_DISCOVER
+# uses it in place of its hardcoded 6h default when present. The hook accepts
+# only a 1-24h range and silently falls back to its 6h default on anything
+# bigger, so cap the exported value at 24: during the 48h first-run boost the
+# CDP scraper still gets the full window via FRESHNESS_HOURS_DISCOVER, while
+# any hook-rewritten query keeps the widest value the hook can honor.
+if [ "$FRESHNESS_HOURS_DISCOVER" -gt 24 ] 2>/dev/null; then
+    export FRESHNESS_HOURS_OVERRIDE=24
+else
+    export FRESHNESS_HOURS_OVERRIDE=$FRESHNESS_HOURS_DISCOVER
+fi
 
 # `set -a` auto-exports every variable assigned by `source .env`, so DATABASE_URL
 # and friends propagate to subprocess env (python3 scripts use os.environ at
@@ -153,10 +201,10 @@ if [ -f "$REPO_DIR/.env" ]; then
     set +a
 fi
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
-log "Logic=D (no-ripen + 1h freshness + 2k_view_cap; experiment concluded 2026-05-31); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
+log "Logic=D (no-ripen + 2k_view_cap; experiment concluded 2026-05-31, discovery window widened 2026-07-15); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
 log "Length-control experiment concluded 2026-06-04; winner=control; LENGTH_ARM retired"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
@@ -208,6 +256,20 @@ if [ "${SCAN_ONLY:-0}" = "1" ]; then
     SA_PREFLIGHT_SCRIPT="run-twitter-cycle-scan"
     preflight_skip_if_jetsam_pressure
     preflight_acquire_slot_or_skip "twitter-scan" 1
+elif [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    # Same reasoning as the SCAN_ONLY branch above: a sandbox run does none of
+    # the discovery/scraping the "twitter-cycle" pool exists to rate-limit
+    # (Phase 0/1 are skipped entirely), so it gets its OWN pool rather than
+    # queueing behind -- or blocking -- a live production cycle. Real
+    # serialization still happens correctly at the resources that actually
+    # matter: the twitter-browser lock (FIFO queue, acquire_lock waits its
+    # turn rather than bailing) and the claude_job.py queue (the s4l-worker
+    # drains one job at a time regardless of how many callers enqueued).
+    # Still capped at 1 so two sandbox runs of my own don't overlap each
+    # other. Still respects the claude-quota and jetsam-pressure gates below.
+    preflight_skip_if_claude_blocked
+    preflight_skip_if_jetsam_pressure
+    preflight_acquire_slot_or_skip "twitter-cycle-sandbox" 1
 else
     preflight_skip_if_claude_blocked
     preflight_skip_if_jetsam_pressure
@@ -229,7 +291,36 @@ source "$REPO_DIR/skill/lock.sh"
 # honors TWITTER_CDP_URL exported by this lib.
 source "$REPO_DIR/skill/lib/twitter-backend.sh"
 TW_MCP_CONFIG="$MCP_CONFIG_FILE"
-TW_ENGINE_PREFIX="${BROWSER_INSTRUCTIONS}"$'\n\n' # inject backend + translation table at top of every prompt
+# 2026-06-26: the model-facing steps (Phase 1 query draft, Phase 2b prep draft) are
+# TOOL-FREE. All browser work is done deterministically by the shell's CDP scan
+# (browser-harness over port 9555) + Phase 2b-post's twitter_browser.py, NOT by the
+# model. The old BROWSER BACKEND / bh_run "translation table" block is no longer
+# injected: prep drafts purely from the inlined candidate context (Text: $ctext per
+# candidate) + MEDIA_BLOCK, which is exactly what the model's rare bh_run fallback
+# used to re-fetch (1 call/week vs ~18.5k/wk deterministic CDP scans). The 9555 Chrome
+# is still launched by twitter-backend.sh above for the shell scan + post step; only
+# the model's browser fallback is removed. This also drops the hardcoded "logged in as
+# m13v_" identity that the block carried, so prompts are no longer single-tenant.
+TW_ENGINE_PREFIX=""
+
+# --- Prompt-sandbox short-circuit (2026-07-15) -------------------------------
+# When S4L_SANDBOX_CANDIDATES_FILE is set, skip live batch tracking + Phase 0
+# salvage + Phase 1 discovery/scraping entirely and jump straight to Phase
+# 2b-prep drafting against a pre-selected set of historical twitter_candidates
+# rows (scripts/twitter_prompt_sandbox.py writes the file in the exact
+# pipe-separated shape twitter_cycle_helper.py's cmd_candidates produces).
+# Lets a prompt variant (S4L_DRAFT_PROMPT_VARIANT / S4L_EXP_*) be tried
+# against real past threads through the real drafting pipeline without
+# spending live search/scrape quota or writing a twitter_batches telemetry
+# row. The historical rows' OWN draft/status history is never written to:
+# the loader mints synthetic ids far outside the real serial range so any
+# accidental by-id write-back (log_draft.py, media set_media) 404s
+# harmlessly instead of corrupting the real historical candidate — mirrors
+# the "rd-" candidate_id prefix merge_review_queue.py already uses for
+# reddit cards for the identical reason. The body of the "live" branch below
+# (Phase tracking through the Phase 1 candidate fetch) is intentionally left
+# at its original indentation to keep this a pure wrap, not a reformat.
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
 
 # --- Phase tracking: start the twitter_batches row + chain into lock.sh trap -
 # Per-cycle phase row (twitter_batches.current_phase + phase_started_at) is
@@ -472,16 +563,16 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 _PJ_ERR="$(mktemp)"
 PROJECTS_JSON=$(python3 - 2>"$_PJ_ERR" <<'PY'
 import json, os, subprocess, sys
-REPO = os.path.expanduser('~/social-autoposter')
+REPO = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
 sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import project_excludes as pe
 
 _pp_args = ['python3', os.path.join(REPO, 'scripts', 'pick_project.py'),
             '--platform', 'twitter', '--count', '1', '--json']
-# Manual-mode (MCP draft_cycle) single-project scoping: when SAPS_FORCE_PROJECT
+# Manual-mode (MCP draft_cycle) single-project scoping: when S4L_FORCE_PROJECT
 # is set, force that exact project instead of the weighted-random autopilot
 # pick, so a customer's interactive cycle only ever touches their own project.
-_force_project = os.environ.get('SAPS_FORCE_PROJECT')
+_force_project = os.environ.get('S4L_FORCE_PROJECT')
 if _force_project:
     _pp_args += ['--project', _force_project]
 res = subprocess.run(
@@ -704,14 +795,12 @@ ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(l
 log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
 
 
-# --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
-# JSON schema forces structured output. Eliminates the prose-drift failure mode
-# Lean Phase 1 schema (2026-05-28): the scan session no longer scrapes,
-# it only drafts queries. The Python pipeline runs each query via headless
-# Chrome and writes the tweets directly to SCAN_TWEETS_FILE for the shell.
-SCAN_SCHEMA_LEAN='{"type":"object","properties":{"queries":{"type":"array","items":{"type":"object","properties":{"project":{"type":"string"},"query":{"type":"string"},"search_topic":{"type":"string"}},"required":["project","query","search_topic"]}}},"required":["queries"]}'
+# --- Phase 1: deterministic query bank, scrapes tweets ----------------------
+# No Claude call (removed 2026-07-08; see the query-bank comment below). The
+# Python pipeline runs each banked query via headless Chrome and writes the
+# tweets directly to SCAN_TWEETS_FILE for the shell.
 
-log "Acquiring twitter-browser lock for Phase 1 Claude scan..."
+log "Acquiring twitter-browser lock for Phase 1 scan..."
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 1"
 # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
@@ -719,7 +808,9 @@ log "twitter-browser lock held (pid=$$) Phase 1"
 # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
 # went wrong when opening your profile" 7x and the pipeline hangs. Helper
 # refuses to clean if the lock PID is alive.
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); the access probe below will catch a genuinely broken browser"
 
 # --- Pre-flight: live X session probe (added 2026-06-02) --------------------
 # Before drafting/scraping anything, confirm the harness Chrome actually has a
@@ -784,6 +875,120 @@ else
     exit 1
 fi
 
+# --- Pre-flight 2: live access-gate probe + backoff (added 2026-06-29) -------
+# The cookie probe above only proves an auth_token EXISTS. X can still gate a
+# perfectly valid session: from a datacenter IP (e.g. the MacStadium box) it
+# commonly 302s authenticated routes to /account/access ("verify it's you") or
+# fronts them with a Cloudflare "security verification" interstitial. A gated
+# session renders real, public tweets as "this page doesn't exist", so the scan
+# silently returns 0-few candidates and we'd draft/post against phantom
+# emptiness (this is one root of the old "Phase 1 returned 0 tweets" mysteries
+# that the cookie probe alone never caught). Navigate ONE authenticated route
+# and STOP the cycle if X is gating us. Fails OPEN: a probe error or an
+# ok/unknown render never blocks, so a transient hydration miss can't halt
+# posting — only a positively-detected gate (gated:true) stops the cycle.
+#
+# BACKOFF: this launchd job fires every 5 min, and a gated cycle exits in ~2s,
+# so without backoff we'd hit Cloudflare /account/access ~12x/hr (~288/day),
+# which only deepens the datacenter-IP trust penalty. A state marker records the
+# gate and an exponential cooldown (15m -> 30m -> 60m -> cap 120m). While the
+# cooldown is live we skip the cycle WITHOUT navigating (no flagged traffic);
+# once it elapses we re-probe; an 'ok' probe clears the marker and resumes. Only
+# gated:true ever writes the marker, so fail-open is preserved.
+_S4L_STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
+_GATE_FILE="$_S4L_STATE_DIR/x-access-gate.json"
+_NOW=$(date +%s)
+
+# Backoff short-circuit: still inside a cooldown window -> skip without probing.
+if [ -f "$_GATE_FILE" ]; then
+    _CD_UNTIL=$(python3 -c 'import json,sys
+try: print(int(json.load(open(sys.argv[1])).get("cooldown_until",0)))
+except Exception: print(0)' "$_GATE_FILE" 2>/dev/null || echo 0)
+    if [ "${_CD_UNTIL:-0}" -gt "$_NOW" ]; then
+        _MINS=$(( (_CD_UNTIL - _NOW + 59) / 60 ))
+        log "Pre-flight: X access-gate backoff active (~${_MINS}m left); skipping cycle without re-probing to avoid adding flagged Cloudflare traffic."
+        echo "twitter_batches: ended $BATCH_ID"
+        release_lock "twitter-browser" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
+log "Pre-flight: probing for an X access gate (/account/access, Cloudflare)..."
+_ACCESS_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
+    python3 "$REPO_DIR/scripts/twitter_access_check.py" --session-probe --wait-ms 12000 2>/dev/null)
+if printf '%s' "$_ACCESS_OUT" | grep -q '"gated": *true'; then
+    # Write/refresh the backoff marker with an exponential cooldown. Python
+    # prints "<next_mins> <consecutive> <cooldown_secs> <gate_age_secs>".
+    _GATE_FIELDS=$(python3 -c 'import json,sys
+gf, now = sys.argv[1], int(sys.argv[2])
+base, cap, factor = 900, 7200, 2
+try: prev = json.load(open(gf))
+except Exception: prev = {}
+cd = prev.get("cooldown_secs")
+cd = base if not cd else min(int(cd)*factor, cap)
+fs = int(prev.get("first_seen", now))
+cons = int(prev.get("consecutive", 0)) + 1
+out = {"first_seen": fs, "last_seen": now, "reason": "access_gated",
+       "consecutive": cons, "cooldown_secs": cd, "cooldown_until": now+cd}
+json.dump(out, open(gf, "w"))
+print(cd//60, cons, cd, max(0, now-fs))' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo "15 1 900 0")
+    read -r _NEXT_MINS _CONS _CD_SECS _AGE_SECS <<< "$_GATE_FIELDS"
+    log "  Pre-flight FAILED: X is gating this session (access gate detected)."
+    log "  Probe: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+    log "  X redirected an authenticated route to /account/access or served a Cloudflare verification page. This is usually datacenter-IP trust degradation: the session cookie is still valid but X hides content from it, so a scan would return phantom 'doesn't exist' results."
+    log "  Backoff engaged: next access re-probe in ~${_NEXT_MINS}m (intervening 5-min firings skip without touching Cloudflare)."
+    log "  Action: open the harness Chrome (CDP :9555) and complete the verification at https://x.com/account/access once, or route the box through a residential/clean IP. The cycle auto-resumes within one cooldown of the gate lifting."
+    # Machine-greppable marker (additive; mirrors the stderr-marker convention
+    # bin/server.js parses). Pairs with twitter_access_gate:recovered below.
+    echo "twitter_access_gate: gated consecutive=${_CONS} age_s=${_AGE_SECS} next_reprobe_s=${_CD_SECS}" >&2
+    echo "twitter_batches: ended $BATCH_ID"
+    release_lock "twitter-browser" 2>/dev/null || true
+    exit 1
+fi
+# Probe-error guard (2026-07-12, S4L-4H): output lacking a "gated" verdict
+# means the probe CRASHED (typically the CDP attach failed or timed out on a
+# wedged Chrome) rather than returning a clean bill. The old code logged
+# 'Pre-flight access OK: {"success": false, ...}' and marched a wedged browser
+# into the scan. Heal once (ensure_twitter_browser_for_backend now does a real
+# CDP readiness check and restarts a wedged harness Chrome), re-probe, and end
+# the cycle if there is still no verdict.
+if [ -z "$_ACCESS_OUT" ] || ! printf '%s' "$_ACCESS_OUT" | grep -q '"gated"'; then
+    log "  Pre-flight access probe FAILED (no verdict; browser not driveable): $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+    echo "twitter_cdp_wedge: access_probe_no_verdict" >&2
+    ensure_twitter_browser_for_backend || true
+    _ACCESS_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
+        python3 "$REPO_DIR/scripts/twitter_access_check.py" --session-probe --wait-ms 12000 2>/dev/null)
+    if [ -z "$_ACCESS_OUT" ] || ! printf '%s' "$_ACCESS_OUT" | grep -q '"gated"'; then
+        log "  Pre-flight access probe still has no verdict after harness heal; ending cycle."
+        echo "twitter_batches: ended $BATCH_ID"
+        release_lock "twitter-browser" 2>/dev/null || true
+        exit 1
+    fi
+    if printf '%s' "$_ACCESS_OUT" | grep -q '"gated": *true'; then
+        log "  Recovered probe reports an access gate; ending cycle (backoff engages on the next firing)."
+        echo "twitter_batches: ended $BATCH_ID"
+        release_lock "twitter-browser" 2>/dev/null || true
+        exit 1
+    fi
+    log "  Access probe recovered after harness heal."
+fi
+# Probe came back clean. If a backoff marker exists we were gated: record the
+# recovery (how long the gate lasted, since first_seen) BEFORE deleting it, so
+# the lift event + duration survive in the log even though the marker is gone.
+if [ -f "$_GATE_FILE" ]; then
+    _REC=$(python3 -c 'import json,sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: d = {}
+now = int(sys.argv[2]); fs = int(d.get("first_seen", now)); cons = int(d.get("consecutive", 0))
+dur = max(0, now-fs)
+print(dur, dur//60, cons)' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo "0 0 0")
+    read -r _DUR_S _DUR_M _RCONS <<< "$_REC"
+    rm -f "$_GATE_FILE"
+    echo "twitter_access_gate: recovered_after_s=${_DUR_S} consecutive=${_RCONS}" >&2
+    log "  X access gate lifted after ~${_DUR_M}m (${_RCONS} consecutive gated probes); cleared backoff marker and resuming normal cycle."
+fi
+log "  Pre-flight access OK: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+
 # --- Phase 1 retry loop (2026-05-27) ----------------------------------------
 # When a single scan produces fewer than RETRY_TARGET candidates that survive
 # all Phase 1 filters (harness age gate, scorer stale_age cutoff, already-
@@ -794,16 +999,15 @@ fi
 # cap is hit before target, proceed with whatever we have (even 1 candidate
 # is better than 0). When BATCH_COUNT is still 0 after the loop, the
 # post-loop empty_batch branch fires.
-# DEFAULT Phase 1 is the deterministic qualified-query bank (no Claude): the
-# bank replays every historically qualified query for the picked project in a
+# Phase 1 is the deterministic qualified-query bank (no Claude): the bank
+# replays every historically qualified query for the picked project in a
 # single pass, so there is nothing to "retry-draft" and one attempt is enough.
-# The legacy LLM-draft path (TWITTER_PHASE1_LLM_DRAFT=1) keeps the 5-attempt
-# retry loop, because LLM queries frequently return empty and need re-drafting.
-if [ "${TWITTER_PHASE1_LLM_DRAFT:-0}" = "1" ]; then
-    MAX_SCAN_ATTEMPTS=5
-else
-    MAX_SCAN_ATTEMPTS=1
-fi
+# (The old LLM-draft path used a 5-attempt retry loop, because LLM-drafted
+# queries frequently returned empty and needed re-drafting; removed 2026-07-08
+# — unused since the bank became the default 2026-05-28, and the queue-routed
+# claude call it made held the twitter-browser lock for no reason, the same
+# class of bug fixed in Phase 2b-prep the same day.)
+MAX_SCAN_ATTEMPTS=1
 RETRY_TARGET=5
 SCAN_ATTEMPT=0
 BATCH_COUNT=0
@@ -863,7 +1067,8 @@ if [ "$SCAN_ATTEMPT" -gt 1 ]; then
     rm -f "$UNIVERSE_EXHAUSTED_MARKER"
     PROJECTS_JSON=$(python3 - "$PROJECTS_JSON" "$TRIED_TOPICS_JSON" "$UNIVERSE_EXHAUSTED_MARKER" <<'PY' 2>>"$LOG_FILE"
 import json, os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+REPO = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
 from pick_search_topic import pick_topic_for_project, PickerError, UniverseExhaustedError
 
 projects = json.loads(sys.argv[1] or '[]')
@@ -956,110 +1161,8 @@ export SCAN_TWEETS_FILE
 # Output downstream is identical: $RAW_FILE + $QUERIES_FILE feed the scorer
 # and twitter_search_attempts logger the same way as before.
 #
-if [ "${TWITTER_PHASE1_LLM_DRAFT:-0}" = "1" ]; then
-# === LLM QUERY-DRAFT PATH (legacy, behind TWITTER_PHASE1_LLM_DRAFT=1) ========
-log "Lean Phase 1: drafting queries (no browser tools)..."
-
-QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
-
-## Step 1: Draft one search query per project
-
-You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's ASSIGNED search_topic.
-
-Each project entry carries TWO fields that drive your behavior: \`topic_picked_mode\` (either \`use\` or \`explore_invent\`) and \`search_topic\` (a string in \`use\` mode, NULL in \`explore_invent\` mode).
-
-USE mode (~90% of cycles, indicated by \`topic_picked_mode: \"use\"\` and a non-null \`search_topic\`):
-The Python picker has already chosen this project's search_topic by weighted-random sampling over the FULL universe in config.json. Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets. Do NOT substitute a different topic; do NOT paraphrase the topic. End-to-end attribution joins on the exact string.
-
-EXPLORE_INVENT mode (~10% of cycles, indicated by \`topic_picked_mode: \"explore_invent\"\` and \`search_topic: null\`):
-The picker is asking you to INVENT a brand-new search_topic. Look at the project's own \`reference_topics\` array and propose ONE new topic concept that does NOT appear there and is NOT a paraphrase of anything in it. Use your invented topic as the query's \`search_topic\` AND drive the keyword phrasing from it (one consistent string per project).
-
-Projects:
-$PROJECTS_JSON
-
-Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (7-day window, per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Each row carries THREE labels that tell you what to do with it as a reference:
-
-  - \`supply_bucket\`: low (<1 tweet/attempt), medium (1-5), high (>5). Raw supply X returned for this phrasing.
-  - \`conversion_bucket\`: low (<0.2 post_rate), medium (0.2-0.6), high (>=0.6). How often a found tweet survived the draft gate.
-  - \`guidance\`: one of MIMIC, KEEP_STYLE, NARROW, BROADEN — the action to take when drawing from this query.
-  - \`posts_per_attempt\`: posts produced per Phase 1 search invocation; <0.1 means most attempts produce zero survivors.
-
-How to act on \`guidance\`:
-  - MIMIC      — gold tier. Reuse the operator skeleton verbatim, swap only the topic keyword for the picker-assigned topic.
-  - KEEP_STYLE — solid. Use the operator pattern as inspiration; small phrasing tweaks OK.
-  - NARROW     — high supply, low conversion (noisy pond). If you draw from it, ADD specificity: more OR alternates, stricter min_faves, extra -term excludes.
-  - BROADEN    — low supply (query dying or topic running dry). The OPERATORS are dead weight. Shorten to 1-2 keywords, drop OR groups, step min_faves down a tier. Do NOT inherit operators from a BROADEN-tagged row.
-
-The canonical source for \`min_faves:N\` selection is the PER-PROJECT SUPPLY SIGNAL block below.
-$TOP_QUERIES_PER_PROJECT_JSON
-
-TOP-PERFORMING SEARCH TOPICS (conceptual seeds, 14d window) — context for query phrasing only; you draft a query for the picker-assigned topic, you do NOT swap topics here:
-$TOP_TOPICS_JSON
-
-DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h:
-$DUD_QUERIES_JSON
-
-DUD CONCEPT SEEDS — these search_topic seeds pulled in tweets that Phase 2b's draft gate kept skipping over the last 7d. Per entry: \`omit_rate\` = skipped_n / (posted_n + skipped_n), \`sample_skip_reasons\` are the top reject reasons. If \`omit_rate >= 0.6\` AND \`skipped_n >= 5\`, REWORD the query narrower or drop the seed and pick a different config.json seed for that project:
-$DUD_TOPICS_JSON
-
-PER-PROJECT SUPPLY SIGNAL — for each project, the historical median tweets_found at each \`min_faves:N\` tier you've drafted in the last 14d. Pick the LOWEST tier where \`median_tweets_found >= 3\`; if every tier is below 3, drop one tier lower than the lowest you've tried. Trust this table over priors:
-$SUPPLY_SIGNAL_JSON
-
-ALREADY-ENGAGED TWEET IDS (last 48h) — the Python scraper skips these regardless, but knowing them helps you avoid drafting a query that would predominantly surface dead candidates:
-$ENGAGED_TWEET_IDS
-
-THIS-CYCLE QUERIES ALREADY TRIED with per-query outcomes (attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS, target=$RETRY_TARGET candidates after filters). Do NOT repeat any of these phrasings or close variants. Read each entry's \`verdict\` field and respond directionally (do NOT default to generic "broaden"):
-- \`dead_supply\` (raw_tweets=0): the phrasing returned ZERO tweets from X. The query was too narrow for X's index. HARD RULE: attempt N+1 MUST execute at least ONE of these THREE concrete broadening moves, NOT a topic rotation. Pick exactly one and apply it visibly: (a) lower \`min_faves\` by ONE FULL TIER (e.g. 20→5, 5→1, 1→0); (b) reduce the OR alternates inside any parenthesized group to AT MOST 2 terms (e.g. \`(A OR B OR C OR D)\` → \`(A OR B)\`); (c) drop ALL \`-term\` excludes EXCEPT those listed in this project's \`excludes_for_search\` (which remain mandatory). The PER-PROJECT SUPPLY SIGNAL block is OVERRIDDEN by \`dead_supply\` THIS CYCLE — do not appeal to historical min_faves when the current attempt returned 0. Swapping the topic noun while keeping the same operator skeleton is NOT broadening and is FORBIDDEN as a response to \`dead_supply\`.
-- \`all_aged_out\` (raw>0, kept_after_age=0): topic is supply-limited at the current freshness window; every tweet was older than the cap. Pick a structurally adjacent topic; do NOT rephrase the same one (it will just hit the cap again).
-- \`all_engaged_or_skipped\` (kept_after_age>0, kept_after_skip=0): query phrasing is fine, but the surviving tweets were already engaged on prior cycles. Pick a DIFFERENT topic, not a rephrase.
-- \`found_some\` (kept_after_skip>0 but below target): query is on-target. Raise min_faves one tier OR add a semantic constraint to lift quality. Do NOT broaden.
-$TRIED_QUERIES_JSON
-
-Query guidelines:
-- MANDATORY: do NOT add any date or time-window operator to your query (no \`since:\`, \`until:\`, \`since_time:\`, \`until_time:\`). The Python scraper enforces the freshness window at the URL level after you return; any time operator you include is stripped and overwritten. Including raw bash arithmetic, format strings, or placeholder text in place of a real epoch will be sent to X as a literal keyword and produce zero results.
-- MANDATORY EVEN IF YOUR QUERY KEYWORDS DO NOT NAME THE EXCLUDED TOPIC: if a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EVERY listed term to that project's query, verbatim, no exceptions.
-- MANDATORY: pick \`min_faves:N\` per the PER-PROJECT SUPPLY SIGNAL above. If a project has no entry there (new / first cycle), start at min_faves:20.
-- Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways.
-- Pick a query likely to surface tweets RELEVANT to that project's actual domain.
-- Mix it up each run; don't always use the same query for the same project.
-- Use the project's ASSIGNED \`search_topic\` plus its \`description\` as grounding for query phrasing.
-- The \`search_topic\` you emit in the output JSON MUST be the project's assigned \`search_topic\` field pasted VERBATIM (NOT the query string, NOT a paraphrase). The scoring pipeline stamps \`twitter_candidates.search_topic\` from this for end-to-end attribution.
-
-## Output
-
-Return ONLY the structured_output JSON with this shape:
-{\"queries\": [{\"project\": \"PROJECT_NAME\", \"query\": \"X advanced search string with operators\", \"search_topic\": \"assigned or invented topic, verbatim\"}, ...]}
-
-One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>&1)
-
-
-# Dump the captured envelope to the cycle log for offline inspection.
-echo "$QUERIES_OUTPUT" >> "$LOG_FILE"
-
-# Extract the drafted queries to a temp file.
-QUERIES_TMP="/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-queries.json"
-python3 -c "
-import json, sys
-text = sys.stdin.read().strip()
-try:
-    env, _ = json.JSONDecoder().raw_decode(text)
-except Exception as e:
-    print(f'lean phase 1: envelope parse error: {e}', file=sys.stderr)
-    json.dump([], open('$QUERIES_TMP', 'w'))
-    sys.exit(0)
-so = env.get('structured_output')
-if so is None:
-    so = env.get('result')
-if isinstance(so, str):
-    try: so = json.loads(so)
-    except Exception: pass
-qs = so.get('queries', []) if isinstance(so, dict) else []
-json.dump(qs, open('$QUERIES_TMP', 'w'))
-print(f'lean phase 1: drafted {len(qs)} queries', flush=True)
-" <<< "$QUERIES_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
-
-else
-# === DETERMINISTIC QUALIFIED-QUERY-BANK PATH (default, 2026-05-28) ==========
+# === DETERMINISTIC QUALIFIED-QUERY-BANK PATH (default since 2026-05-28;
+# only path since 2026-07-08 removal of the LLM query-draft alternative) =====
 # No Claude call. Replay every historically qualified query for the picked
 # project(s): every distinct query that ever produced a posted reply with
 # >=1 like OR >=1 non-bot link click, regardless of the per-cycle
@@ -1074,7 +1177,6 @@ if [ "$SCAN_ATTEMPT" -gt 1 ]; then
 else
     log "Phase 1 (bank): building qualified query bank from PROJECTS_JSON (deterministic, no Claude)..."
     echo "$PROJECTS_JSON" | python3 "$REPO_DIR/scripts/qualified_query_bank.py" --from-projects-json > "$QUERIES_TMP" 2>>"$LOG_FILE"
-fi
 fi
 
 QUERIES_COUNT=$(python3 -c "
@@ -1338,7 +1440,8 @@ fi
 # search_attempts log so a Phase 1 abort still leaves the marks behind.
 python3 - "$PROJECTS_JSON" <<'PY' 2>&1 | tee -a "$LOG_FILE" || true
 import json, os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+REPO = os.path.expanduser(os.environ.get('S4L_REPO_DIR') or os.environ.get('REPO_DIR') or '~/social-autoposter')
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import project_excludes as pe
 projects = json.loads(sys.argv[1] or '[]')
 total = 0
@@ -1505,6 +1608,51 @@ log "No ripen wait (logic D): skipping sleep + T1 fetch, delta_score stays at T0
 # scripts/twitter_cycle_helper.py:cmd_candidates.
 CANDIDATES=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" candidates --batch-id "$BATCH_ID" 2>/dev/null || echo "")
 
+else
+    log "SANDBOX MODE: loading historical candidates from $S4L_SANDBOX_CANDIDATES_FILE (Phase 0/Phase 1 discovery skipped, no twitter_batches row created)."
+    if [ ! -s "$S4L_SANDBOX_CANDIDATES_FILE" ]; then
+        log "Sandbox candidates file missing or empty: $S4L_SANDBOX_CANDIDATES_FILE"
+        _SA_RUN_SUMMARY_EMITTED=1
+        exit 1
+    fi
+    BATCH_ID="sandbox-$(date +%Y%m%d-%H%M%S)"
+    CANDIDATES=$(cat "$S4L_SANDBOX_CANDIDATES_FILE")
+    SALVAGED=0
+    QUERIES_TOTAL=0
+    DUDS_TOTAL=0
+    TWEETS_PULLED=0
+    BATCH_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]')
+    # Phase 1 normally sets this (query-bank routing signal); skipped here, so
+    # default it under `set -u` (line 31) -- otherwise Phase 2b-gen's payload
+    # build below hits "TOP_QUERIES_PER_PROJECT_JSON: unbound variable" (found
+    # live 2026-07-15; non-fatal thanks to that call's own `|| echo '{}'`
+    # fallback, but noisy and worth defaulting properly).
+    TOP_QUERIES_PER_PROJECT_JSON='{}'
+    # Same reasoning as TOP_QUERIES_PER_PROJECT_JSON above: all three are
+    # Phase-1-only outputs (query-bank routing / dud-query / supply-signal
+    # reports), referenced later in the same Phase 2b-gen payload build.
+    # Discovered incrementally across two live sandbox runs -- `set -u`
+    # only reports the FIRST unbound reference it hits per expansion, so
+    # fixing one revealed the next; defaulting all three here at once
+    # instead of one more round-trip each.
+    SUPPLY_SIGNAL_JSON='[]'
+    DUD_QUERIES_JSON='[]'
+    TOP_TOPICS_JSON='[]'
+    # Hard force, NOT just a default (2026-07-15): a sandbox run must NEVER
+    # reach Phase 2b-post, full stop. A prior test run without an explicit
+    # DRAFT_ONLY=1 raced straight through Phase 2b-prep/2b-gen to Phase
+    # 2b-post and actually attempted a real post -- it was only skipped
+    # because that specific historical candidate happened to already be
+    # posted-to in reality (an incidental dedup hit, not a real safety net).
+    # scripts/twitter_post_plan.py's post_one() now also hard-refuses any
+    # experiments.sandbox candidate regardless of this, but that is
+    # defense-in-depth, not a substitute for stopping before Phase 2b-post
+    # even runs. This also happens to be the only way a sandbox run ever
+    # produces a reviewable draft instead of skipping straight to a post
+    # attempt.
+    export DRAFT_ONLY=1
+fi
+
 if [ -z "$CANDIDATES" ]; then
     log "No candidates with delta scores. Marking batch expired."
     # /api/v1/twitter-candidates/expire-batch performs the same status-flip
@@ -1527,22 +1675,71 @@ if [ -z "$CANDIDATES" ]; then
     exit 0
 fi
 
+# --- ROLLING VIRALITY BAR fetch + candidate-level PREFILTER (2026-07-17) -----
+# The p0.99 bar (see the PRE-DRAFT VIRALITY GATE below for history) is fetched
+# HERE, immediately after the candidate fetch, and applied as a deterministic
+# per-candidate filter BEFORE the prompt is ever built: when the bar is active,
+# below-bar candidates are removed from $CANDIDATES so the drafting session
+# only sees candidates that can actually enter the plan (plan-parse keeps the
+# top-1 on-brand pick ONLY if it clears this same bar). Measured 2026-07-17,
+# before this prefilter: 125 below-bar draft-reuse offers across 50 prompts
+# converted into 0 of 24 plan entries, so drafting below-bar candidates bought
+# nothing. Filtered rows are NOT expired or rejected: they stay 'pending', are
+# salvaged by later cycles, and re-enter the prompt automatically if their
+# thread's virality rises above the bar within the freshness window. Placement
+# AFTER the empty-batch expire check above is deliberate: a batch that is
+# non-empty but fully below-bar must NOT be expired, only skipped this cycle.
+# Fail-open: bar OFF (cold start / thin pool / fetch failure / sandbox) means
+# no filtering and drafting behaves exactly as before.
+if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    # The fetch below reads /api/v1/twitter-candidates/virality-threshold under
+    # THIS machine's own identity (http_api.py's X-Installation), so it would
+    # reflect the OPERATOR's trailing-24h candidate pool -- the wrong baseline
+    # entirely when replaying another install's (e.g. Karol's, Nhat's)
+    # candidates. A sandbox test also wants every model-approved draft
+    # visible, not gated to only the top-1 that would clear a live posting
+    # cadence bar which, again, doesn't apply since nothing is ever posted.
+    VIRALITY_THRESHOLD=""
+    log "Virality bar OFF for sandbox mode (would reflect the operator's own pool, not the replayed install's; every model-approved draft stays visible)."
+else
+    # Fetch via the SHARED bar helper (scripts/virality.py, 2026-07-18): one
+    # implementation for both the X and Reddit bars. Prints the threshold, or
+    # nothing when the bar is OFF (cold start / thin pool / fetch failure);
+    # always exits 0, so `|| echo ""` only covers a python3 launch failure.
+    VIRALITY_THRESHOLD=$(python3 "$REPO_DIR/scripts/virality.py" bar \
+        --platform twitter \
+        --pctile 0.99 \
+        --min-sample "${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+        --hours 24 2>>"$LOG_FILE" || echo "")
+    if [ -n "$VIRALITY_THRESHOLD" ]; then
+        log "Virality bar ACTIVE: p0.99 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
+    else
+        log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
+    fi
+fi
+if [ -n "$VIRALITY_THRESHOLD" ] && [ -n "$CANDIDATES" ]; then
+    _VF_TOTAL=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]' || true)
+    CANDIDATES=$(printf '%s\n' "$CANDIDATES" | awk -F'|' -v b="$VIRALITY_THRESHOLD" '$1 ~ /^[0-9]+$/ && NF>=5 && $5+0 >= b+0')
+    _VF_KEPT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]' || true)
+    log "[virality_prefilter] kept ${_VF_KEPT:-0} of ${_VF_TOTAL:-0} candidate(s) at/above bar=$VIRALITY_THRESHOLD; below-bar rows stay pending and are never sent to the drafter"
+fi
+
 # --- SCAN_ONLY gate: stop after scoring, emit candidates, skip drafting -------
 # When SCAN_ONLY=1 the cycle runs scan -> score -> top-N select, writes the chosen
 # candidates as JSON, and STOPS before the claude drafting step. The MCP
 # scan_candidates tool reads this so a Claude Desktop scheduled-task session can do
 # the drafting ITSELF (on the user's plan, no `claude -p`) and hand the drafts back
 # via submit_drafts. Candidates stay 'pending' (drafted+posted via submit_drafts ->
-# post_drafts, or salvaged by a later cycle). The browser lock was already released
+# approve_drafts, or salvaged by a later cycle). The browser lock was already released
 # at the Phase 1 handoff, so this exits clean via the EXIT trap. NO current caller
 # sets SCAN_ONLY, so the autopilot/draft_cycle paths are byte-for-byte unchanged.
 if [ "${SCAN_ONLY:-0}" = "1" ]; then
-    SCAN_FILE="/tmp/saps_scan_candidates_${BATCH_ID}.json"
+    SCAN_FILE="/tmp/s4l_scan_candidates_${BATCH_ID}.json"
     # $CANDIDATES is the same pipe-separated top-N the drafting step consumes (cols
     # documented in twitter_cycle_helper.py:cmd_candidates; tweet_text/draft fields
     # are pipe+newline sanitized there, so a field split is safe). Batch id + out
     # path travel via env so the single-quoted python needs no shell interpolation.
-    printf '%s\n' "$CANDIDATES" | SAPS_SCAN_FILE="$SCAN_FILE" SAPS_SCAN_BATCH="$BATCH_ID" python3 -c '
+    printf '%s\n' "$CANDIDATES" | S4L_SCAN_FILE="$SCAN_FILE" S4L_SCAN_BATCH="$BATCH_ID" python3 -c '
 import json, os, sys
 def _i(x):
     try:
@@ -1569,7 +1766,7 @@ for line in sys.stdin:
         "views": _i(p[11]), "author_followers": _i(p[12]), "age_hours": _f(p[13]),
         "existing_draft": p[14] if len(p) > 14 else "", "existing_draft_style": p[15] if len(p) > 15 else "",
     })
-json.dump({"batch_id": os.environ["SAPS_SCAN_BATCH"], "candidates": out}, open(os.environ["SAPS_SCAN_FILE"], "w"))
+json.dump({"batch_id": os.environ["S4L_SCAN_BATCH"], "candidates": out}, open(os.environ["S4L_SCAN_FILE"], "w"))
 ' 2>/dev/null || printf '{"batch_id": "%s", "candidates": []}' "$BATCH_ID" > "$SCAN_FILE"
     SCAN_N=$(python3 -c "import json; print(len(json.load(open('$SCAN_FILE')).get('candidates') or []))" 2>/dev/null || echo 0)
     log "SCAN_ONLY=1: $SCAN_N candidate(s) scored and written to $SCAN_FILE. Stopping before drafting (agent drafts next)."
@@ -1593,9 +1790,9 @@ CANDIDATE_BLOCK=""
 # AFTER the browser lock is acquired, we can deterministically pre-fetch the
 # media (images/videos/GIFs/link-cards) of every thread the model is about to
 # draft against and feed it into the prep prompt. Gated by
-# SAPS_TWITTER_CAPTURE_MEDIA so it stays a no-op until the website API (with the
+# S4L_TWITTER_CAPTURE_MEDIA so it stays a no-op until the website API (with the
 # set_media action + thread_media column) deploys. Populated in the loop below.
-MEDIA_URLS_FILE=$(mktemp -t saps_twitter_media_urls_XXXXXX.tsv)
+MEDIA_URLS_FILE=$(mktemp -t s4l_twitter_media_urls_XXXXXX.tsv)
 while IFS='|' read -r cid curl cauthor ctext cscore cdelta cproject ctopic clikes crts creplies cviews cfollowers cage cdraft cdraftstyle cdraftage; do
     if [ -n "$cid" ] && [ -n "$curl" ]; then
         printf '%s\t%s\n' "$cid" "$curl" >> "$MEDIA_URLS_FILE"
@@ -1630,21 +1827,51 @@ Project match: $cproject${DRAFT_LINE}${AUTHOR_HISTORY_LINE}
 "
 done <<< "$CANDIDATES"
 
-ALL_PROJECTS_JSON=$(python3 -c "
-import json, os
-config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
-print(json.dumps({p['name']: p for p in config.get('projects', [])}, indent=2))
-" 2>/dev/null || echo "{}")
+# ALL_PROJECTS_JSON, GLOBAL_LEARNED_PREFS_JSON, and the ACCOUNT VOICE CORPUS
+# block are no longer assembled in shell: scripts/draft_prompt_core.py
+# computes them at render time from config.json / persona_corpus.txt
+# (honoring the same S4L_SANDBOX_CONFIG_DIR override and lane whitelist/ops
+# denylist). See the render-twitter call below.
+
+# --- Draft-prompt A/B arm (v4, voice-first) ----------------------------------
+# Owned by scripts/draft_prompt_core.py (single source of truth, shared with
+# the Reddit draft lane): the full experiment history, both arm texts, the
+# Draft-B divergence note, the persona-lane directive, and the pick
+# precedence (pre-set env for sandbox forcing -> server-side per-install pin
+# -> 50/50 coin flip via TWITTER_DRAFT_PROMPT_AB_RATE) ALL live there. The
+# arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
+# (active_experiments.collect -> plan candidates -> twitter_post_plan.py ->
+# posts.draft_prompt_variant), and engagement_styles.get_assigned_style_prompt
+# reads the SAME env var at render time in this process.
+#
+# MOVED HERE, before the style picker, on 2026-07-17: treatment_v4 assigns no
+# engagement style at all (see the style-picker block below), so the arm must
+# be known BEFORE deciding whether to run the picker. Do not move this back
+# below the style picker.
+source "$REPO_DIR/skill/styles.sh"
+S4L_DRAFT_PROMPT_VARIANT=$(python3 "$REPO_DIR/scripts/draft_prompt_core.py" pick-arm 2>>"$LOG_FILE" || echo treatment_v4)
+export S4L_DRAFT_PROMPT_VARIANT
+log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (draft_prompt_core pick-arm: env>pin>coin)"
 
 # Engagement-style picker (2026-05-19): pick ONE assigned style for this
 # cycle. The picked style flows two places: (1) --style filter for
 # top_performers.py so the per-style exemplars section shows only posts
-# matching the assigned style, (2) saps_render_style_block (below) so the
+# matching the assigned style, (2) s4l_render_style_block (below) so the
 # prompt block embeds the same assignment. On invent mode picked_style is
 # empty and top_performers stays unfiltered (model sees full landscape).
-source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_twitter_assign_XXXXXX.json)
-saps_pick_style twitter posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+#
+# Called UNCONDITIONALLY regardless of arm (2026-07-17 consolidation): under
+# treatment_v4, pick_style_for_post()/pick_exploration_style() themselves
+# (scripts/engagement_styles.py) refuse to assign a real style and return
+# the "voice_first" sentinel directly -- no network round-trip, and no arm
+# check needed here in the shell. This used to be a Twitter-only branch
+# here that skipped the picker and blanked PICKED_STYLE by hand; that logic
+# moved into the picker functions themselves so every caller (this bash
+# driver AND scripts/post_reddit.py, which calls the same functions
+# directly and was never covered by the old Twitter-only branch) gets the
+# same behavior automatically. Do not reintroduce an arm check in this file.
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_twitter_assign_XXXXXX.json)
+s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
 PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -1665,11 +1892,116 @@ except Exception:
 " 2>/dev/null)
 log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}"
 
-if [ -n "$PICKED_STYLE" ]; then
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
-else
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+# --- Second engagement style for dual-draft review cards (2026-07-07) -------
+# Two-draft cards: pick a SECOND style ("Style B") this cycle, independent of
+# the first ("Style A" = PICKED_STYLE/PICKED_MODE above). The prep step drafts
+# every fresh candidate once under EACH style and the reviewer picks which
+# posts; see PREP_SCHEMA/PREP_PROMPT below. Bounded retry so the two styles
+# are actually different (a same-name pair defeats the whole point); INVENT
+# mode on either side is accepted immediately since an invented name is
+# definitionally distinct from a pinned one. This is orthogonal to the
+# treatment_v4/control_v4 draft-prompt A/B above (that varies WORDING of the
+# directive for the whole cycle; this varies STYLE per draft slot), so neither
+# experiment disturbs the other.
+STYLE_ASSIGN_FILE_B=$(mktemp -t s4l_twitter_assign_b_XXXXXX.json)
+# --- Draft-B exploration source (2026-07-11) ---------------------------------
+# Style B is now the EXPLORE slot: it trials the newest human_derived styles
+# and post-2026-07-10 inventions (least-used first) instead of drawing a
+# second scored pick from the same proven pool as Style A. This is the
+# distribution channel for the standalone invent_styles.py job: the card
+# pick + the posted draft's engagement write a new style's first real score,
+# and winners graduate into the Draft-A pool via the normal sampler. NOTHING
+# is invented here (pick_exploration_style never returns mode=invent). On an
+# empty pool or API failure we fall back to the legacy second scored pick so
+# dual-draft cards never break. The source tag rides the S4L_EXP_ convention:
+# active_experiments.collect() auto-stamps it onto every plan candidate and
+# the review card's details-eye renders it with zero card-side code.
+DRAFT_B_SOURCE=$(python3 -c "
+import json, sys
+sys.path.insert(0, '$REPO_DIR/scripts')
+from engagement_styles import pick_exploration_style
+a = pick_exploration_style('twitter', context='posting', exclude={'$PICKED_STYLE'})
+if a and a.get('style'):
+    with open('$STYLE_ASSIGN_FILE_B', 'w') as f:
+        json.dump(a, f)
+    print(a.get('source') or '')
+" 2>/dev/null || echo "")
+if [ -n "$DRAFT_B_SOURCE" ]; then
+    PICKED_STYLE_B=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE_B') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+    PICKED_MODE_B="use"
 fi
+if [ -z "${PICKED_STYLE_B:-}" ]; then
+    DRAFT_B_SOURCE="scored_fallback"
+    for _style_b_attempt in 1 2 3; do
+        s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE_B" >/dev/null 2>&1 || true
+        PICKED_STYLE_B=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE_B') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+        PICKED_MODE_B=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE_B') as f:
+        d = json.load(f)
+    print(d.get('mode') or 'use')
+except Exception:
+    print('use')
+" 2>/dev/null)
+        if [ "$PICKED_MODE" = "invent" ] || [ "$PICKED_MODE_B" = "invent" ] || [ "$PICKED_STYLE_B" != "$PICKED_STYLE" ]; then
+            break
+        fi
+    done
+fi
+export S4L_EXP_DRAFT_B_SOURCE="$DRAFT_B_SOURCE"
+log "Engagement style B assigned: mode=$PICKED_MODE_B style=${PICKED_STYLE_B:-(invent)} source=$DRAFT_B_SOURCE"
+
+# 2026-07-10 anti-sameness: --no-project-sections strips the multi-project
+# winner corpus (~400 lines of "Top Posts by Project" + summary table) that
+# used to ride along in EVERY draft prompt and homogenize drafts. The prep
+# session now queries per-project winners on demand AFTER routing a
+# candidate (see PROJECT TOP PERFORMERS section in PREP_PROMPT below).
+# 2026-07-15 (draft_prompt v4): treatment_v4 skips even the per-style
+# exemplar report below. voice.examples + the account voice corpus +
+# learned_preferences are meant to be the dominant signal on treatment; a
+# report of what wins in this style ACROSS OTHER ACCOUNTS/PROJECTS is direct
+# competing signal against one specific account's own real voice, and is cut
+# entirely rather than reduced. control_v4 is unaffected (unchanged from v3).
+if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment_v4" ]; then
+    TOP_REPORT=""
+    TOP_REPORT_B=""
+else
+    if [ -n "$PICKED_STYLE" ]; then
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    else
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    fi
+    if [ -n "$PICKED_STYLE_B" ]; then
+        TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE_B" --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    else
+        TOP_REPORT_B=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --no-project-sections 2>/dev/null || echo "(top performers report unavailable)")
+    fi
+fi
+
+# --- Cross-cycle self-memory (anti-repetition) ------------------------------
+# 2026-07-10: the prep session never used to see this account's own recent
+# replies across threads (author_history_block is per-author only), so it
+# recycled the same openers and sentence skeletons cycle after cycle. This
+# block is NEGATIVE context, rendered with explicit do-not-imitate rules by
+# recent_self_posts.py. Empty string on any failure; never blocks the cycle.
+RECENT_SELF_BLOCK=$(python3 "$REPO_DIR/scripts/recent_self_posts.py" --platform twitter --limit 20 2>/dev/null || echo "")
 
 # --- Generation trace -------------------------------------------------------
 # Snapshot the few-shot context this cycle will feed to Claude — top_performers
@@ -1703,18 +2035,35 @@ payload = {
 }
 print(json.dumps(payload))
 " "$TOP_REPORT" "$TOP_QUERIES_PER_PROJECT_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" "$TOP_TOPICS_JSON" 2>/dev/null || echo '{}')
-SAPS_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
-export SAPS_TWITTER_GEN_TRACE_PATH
-if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
-    log "Generation trace: $SAPS_TWITTER_GEN_TRACE_PATH ($(wc -c < "$SAPS_TWITTER_GEN_TRACE_PATH") bytes)"
+S4L_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
+export S4L_TWITTER_GEN_TRACE_PATH
+if [ -n "$S4L_TWITTER_GEN_TRACE_PATH" ] && [ -f "$S4L_TWITTER_GEN_TRACE_PATH" ]; then
+    log "Generation trace: $S4L_TWITTER_GEN_TRACE_PATH ($(wc -c < "$S4L_TWITTER_GEN_TRACE_PATH") bytes)"
 else
     log "WARN: generation_trace build returned empty path; posts this cycle will have NULL trace"
 fi
 
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" twitter posting)
-# Style assignment file is the same one we picked above; styles.sh already sourced.
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" twitter posting)
+# Style B block: the assigned-style portion only (description/example/note/
+# length/grounding rule), NOT the full s4l_render_style_block — content rules,
+# anti-patterns, and the voice-relationship rule are platform/project-wide, not
+# per-style, and are already embedded once via STYLES_BLOCK above. Calling
+# get_assigned_style_prompt() directly here avoids repeating those shared
+# sections a second time and keeps skill/styles.sh untouched.
+STYLES_BLOCK_B=$(python3 -c "
+import json, sys
+sys.path.insert(0, '$REPO_DIR/scripts')
+from engagement_styles import get_assigned_style_prompt
+try:
+    with open('$STYLE_ASSIGN_FILE_B', 'r') as f:
+        assignment = json.load(f)
+    print(get_assigned_style_prompt('twitter', assignment, context='posting'))
+except Exception:
+    print('(style module unavailable)')
+" 2>/dev/null || echo "(style module unavailable)")
+# Style assignment files are the ones we picked above; styles.sh already sourced.
 # Cleanup at cycle end (best effort).
-trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
+trap 'rm -f "$STYLE_ASSIGN_FILE" "$STYLE_ASSIGN_FILE_B" 2>/dev/null || true' EXIT
 
 # Phase 2b is split into three sub-phases so the twitter-browser lock is only
 # held during actual browser work. The killer in the old single-session flow
@@ -1739,24 +2088,65 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 # of stale phase2a (20-min budget). Without this stamp, mid-Phase-2b runs get
 # wrongly salvaged once 20 min elapse past phase2a's start, creating false
 # phase2b_silent run-monitor rows even when posts succeeded.
-python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
-log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
-acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
-log "twitter-browser lock held (pid=$$) Phase 2b-prep"
-# Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+# Sandbox short-circuit: skip so a sandbox run never auto-creates a
+# twitter_batches row (advance's own "auto-creates the row if start was
+# missed" fallback would otherwise silently do it, since sandbox mode never
+# calls 'start' — found live 2026-07-15, a stray sandbox-* row landed in
+# production twitter_batches from this exact call).
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
+fi
 
-# Thread-media capture (2026-06-03, gated by SAPS_TWITTER_CAPTURE_MEDIA, default
-# OFF). Now that the browser lock is held and the harness Chrome is up, do ONE
-# cheap deterministic pass over every candidate thread to pull its media
-# (images/videos/GIFs/link-cards), persist each into
+# --- PRE-DRAFT VIRALITY GATE (2026-07-15; prefilter degenerate case 2026-07-17) ---
+# The bar is now fetched and applied as a candidate-level PREFILTER right after
+# the candidate fetch (see [virality_prefilter] above), so the drafting session
+# never sees a candidate that cannot enter the plan. This gate is the leftover
+# degenerate case: NOTHING survived the prefilter => skip media capture and the
+# whole Claude drafting session and synthesize an empty prep envelope through
+# the existing plan_count=0 path. Candidates stay status='pending' (never
+# expired or rejected here); Phase 0 salvages and re-judges them next cycle.
+# With the bar OFF the prefilter is a no-op and this gate can only fire on an
+# empty candidate list, which the expire check above already handles.
+PREGATE_SKIP=0
+_PG_N=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]' || true)
+if [ "${_PG_N:-0}" = "0" ]; then
+    PREGATE_SKIP=1
+    if [ -n "$VIRALITY_THRESHOLD" ]; then
+        log "[virality_pregate] SKIP drafting: no candidate at/above bar=$VIRALITY_THRESHOLD survived the prefilter; rows stay pending for next-cycle salvage"
+    else
+        log "[virality_pregate] SKIP drafting: candidate list is empty"
+    fi
+fi
+
+# Thread-media capture (2026-06-03, gated by S4L_TWITTER_CAPTURE_MEDIA, default
+# OFF). When enabled, does ONE cheap deterministic pass over every candidate
+# thread to pull its media (images/videos/GIFs/link-cards), persist each into
 # twitter_candidates.thread_media, and build a MEDIA CONTEXT block injected into
 # the prep prompt so the reply-writer can react to what the tweet visually shows
 # instead of replying text-blind. Must be deterministic (Python pre-fetch) because
 # the prep prompt forbids the model from calling twitter_browser.py. Entirely
 # best-effort: any failure leaves MEDIA_BLOCK empty and the cycle proceeds.
+#
+# The twitter-browser lock exists SOLELY to guard this capture step, so it is
+# now gated by the same flag (2026-07-16): acquiring it unconditionally meant
+# every cycle -- sandbox or live -- contended for the browser lock even when
+# nothing in this phase touches the browser, which is the default state (media
+# capture off). Found live: a sandbox test run waited ~6 minutes in the FIFO
+# lock queue behind a real cycle for a lock it never ended up needing.
 MEDIA_BLOCK=""
-if [ "${SAPS_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${SAPS_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
+if [ "$PREGATE_SKIP" = "1" ]; then
+    # Virality pre-gate: no draft will be produced this cycle, so thread-media
+    # capture would be pure waste; skip it along with the drafting session.
+    rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
+elif [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
+    log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
+    acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+    log "twitter-browser lock held (pid=$$) Phase 2b-prep"
+    # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
+    ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+    _ensure_rc="${PIPESTATUS[0]}"
+    [ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream browser calls may fail"
+
     if [ -s "$MEDIA_URLS_FILE" ]; then
         log "Phase 2b-prep: capturing thread media for $(wc -l < "$MEDIA_URLS_FILE" | tr -d ' ') candidate(s)..."
         MEDIA_BLOCK=$(python3 "$REPO_DIR/scripts/capture_thread_media.py" --urls-file "$MEDIA_URLS_FILE" --scroll 1 2>>"$LOG_FILE" || true)
@@ -1766,10 +2156,29 @@ if [ "${SAPS_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${SAPS_TWITTER_CAPTURE_MED
             log "Phase 2b-prep: no media captured (none found or capture skipped)."
         fi
     fi
+    rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
+
+    # Release the twitter-browser lock now. Thread-media capture above was the
+    # ONLY browser-touching step in Phase 2b-prep; the Claude drafting call below
+    # is architecturally browser-free (--strict-mcp-config omits the
+    # twitter-harness MCP, so the model can never reach the CDP Chrome even if it
+    # tried) and, since the 2026-06-23 queue migration, "run-twitter-cycle-prep"
+    # routes through claude_job.py to an independent worker process that can
+    # block for up to S4L_CLAUDE_QUEUE_TIMEOUT (1800s default). Holding the
+    # browser lock across that wait made this process a preemption target for
+    # any post that needed the browser: the post-vs-scan hijack fix SIGKILLs
+    # whoever holds the lock (see docs/twitter_browser_lock.md), which killed
+    # this process mid-wait while the worker kept drafting in the background,
+    # stranding the finished result until the salvage reconciler's 35-min window
+    # (scripts/salvage_orphaned_prep_results.py) picked it up. Releasing here
+    # removes this whole phase from being a SIGKILL target for the rest of the
+    # drafting wait. Phase 2b-post re-acquires unconditionally below.
+    log "Releasing twitter-browser lock before Claude drafting (drafting never touches the browser)..."
+    release_lock "twitter-browser" 2>>"$LOG_FILE"
 else
-    log "Phase 2b-prep: thread-media capture disabled (SAPS_TWITTER_CAPTURE_MEDIA not set)."
+    log "Phase 2b-prep: thread-media capture disabled (S4L_TWITTER_CAPTURE_MEDIA not set); skipping the twitter-browser lock entirely."
+    rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 fi
-rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 
 log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
 
@@ -1782,126 +2191,154 @@ log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)...
 CLAUDE_SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 export CLAUDE_SESSION_ID
 
-# PREP_SCHEMA — strict JSON schema for the prep envelope. Includes
-# optional `new_style` per candidate (an inner object) that the model
-# MUST populate when it chooses a brand-new engagement style name (i.e.
-# the picker set mode=invent and the model invented a snake_case name).
-# Fields mirror engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the
-# downstream validate_or_register call accepts the block without a
-# second schema layer.
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
+# PREP_SCHEMA — strict JSON schema for the prep envelope. Two-draft cards
+# (2026-07-07, no-recommendation redesign 2026-07-08): each candidate
+# carries draft_a_* / draft_b_* (one per assigned style) instead of a
+# single reply_text/engagement_style, plus is_reused_draft. The model does
+# NOT pick a favorite; Draft A is always the default shown/selected on the
+# review card, the reviewer's own click chooses otherwise. Includes optional
+# `draft_a_new_style` / `draft_b_new_style` per candidate (inner objects) that
+# the model MUST populate when that slot's picker set mode=invent and it
+# invented a snake_case name. Fields mirror
+# engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the downstream
+# validate_or_register call accepts the block without a second schema layer.
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"is_reused_draft":{"type":"boolean"},"draft_a_text":{"type":"string"},"draft_a_style":{"type":"string"},"draft_a_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_a_text_en":{"type":["string","null"]},"draft_b_text":{"type":["string","null"]},"draft_b_style":{"type":["string","null"]},"draft_b_new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"draft_b_text_en":{"type":["string","null"]},"language":{"type":"string"},"thread_text_en":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","is_reused_draft","draft_a_text","draft_a_style","draft_b_text","draft_b_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
-PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
-
-Your ONLY job in THIS session:
-  1. Read each thread you decide to reply to (browser tools from the BROWSER BACKEND block above, READ-ONLY).
-  2. Draft a reply for each.
-  3. Persist each fresh draft via log_draft.py.
-  4. Emit a structured plan describing the chosen candidates, the reply text, and (when applicable) the SEO link keyword + slug.
-
-You will NOT post anything. You will NOT generate landing pages. You will NOT call log_post.py. The shell handles all of that AFTER your session ends, with the browser lock released for the long landing-page build.
-
-Read $SKILL_FILE for content rules and voice context.
-Read $REPO_DIR/config.json for project metadata.
-
-## PRE-SCORED CANDIDATES (sorted by Virality DESC, highest first)
-Virality is a composite predictor of how big this thread will get AFTER you reply: it combines engagement velocity (eng/hour), author reach (follower tier), age decay (6h half-life), retweet ratio, reply count, and discussion quality (reply:like ratio). On historical posted data the highest-Virality cohort (score >= 10000) received ~36x the median reply views of the lowest cohort (score < 10), so prioritize on-brand candidates with HIGH Virality. Rule of thumb: Virality >= 100 = strong thread on a real growth curve, your reply is likely to land 10-100x more eyeballs than a low-Virality thread. Delta (5min) is the raw T1-T0 engagement count and is shown for context only; do not re-rank on Delta.
-$CANDIDATE_BLOCK
-$MEDIA_BLOCK
-
-## PROJECT ROUTING (per-candidate)
-Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
-All project configs: $ALL_PROJECTS_JSON
-
-## FEEDBACK FROM PAST PERFORMANCE:
-$TOP_REPORT
-
-$STYLES_BLOCK
-
-## WORKFLOW
-There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
-
-For each chosen candidate:
-1. Navigate to CANDIDATE_URL using the navigate tool from the BROWSER BACKEND block above (READ-ONLY).
-2. Read the thread to understand context.
-3. DRAFT HANDLING (existing vs fresh):
-   - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
-   - Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.
-3a. PERSIST FRESH DRAFTS (skip for reused drafts):
-     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'YOUR_REPLY_TEXT' --style STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
-   The --assigned-style / --assigned-mode flags carry the orchestrator's picker output (this cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}') into the candidate row so the post pipeline can coerce drift and register invented styles. Pass them VERBATIM as shown.
-   If you are inventing a brand-new style this cycle (i.e. \$PICKED_MODE=invent and your STYLE is a new snake_case name not in the style block above), ALSO pass:
-     --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
-   with the same description/example/why_existing_didnt_fit you put in the 'new_style' field of your output JSON for this candidate.
-   Failure here is non-fatal, log a warning and continue.
-4. EMIT one entry in the structured 'candidates' array with these fields:
-   - candidate_id (int): from the candidate block
-   - candidate_url (string): the parent tweet URL
-   - thread_author (string): the @handle (no leading @)
-   - thread_text (string): the parent tweet's text, condensed to <=500 chars if needed
-   - matched_project (string): the project name to attribute this post to
-   - reply_text (string): the FINAL reply text WITHOUT any URL appended (the shell appends the URL later). 250 chars is the hard ceiling (leaves room for a 23-char t.co link inside the 280-char cap) — stay well under it, not up to it.
-   - engagement_style (string): style name applied (or 'reused' for an unchanged stale draft). In USE mode ($PICKED_MODE=use) this MUST be the assigned style name '${PICKED_STYLE}' verbatim; the orchestrator silently coerces drift back. In INVENT mode ($PICKED_MODE=invent) this MUST be a NEW snake_case style name not in the curated style block.
-   - new_style (object, REQUIRED iff INVENT mode produced a new name; OMIT or set null otherwise): {description (string), example (string), why_existing_didnt_fit (string), note (string, optional), target_chars (integer, REQUIRED)}. Same shape you passed to --new-style in step 3a. The post pipeline reads this and POSTs to /api/v1/engagement-styles/registry so the new style lands in engagement_styles_registry alongside Reddit/GitHub/Moltbook inventions. target_chars is the comment length THIS new style wins at, in characters. IMPORTANT: the example you write must be EXACTLY that length — the example IS the canonical length reference, and the hard ceiling is target_chars × 1.5. Write the example first, count its characters, then set target_chars to that count. Bias SHORT: one-liner style ~45, story-arc style up to ~180, never above 220.
-   - language (string): ISO 639-1 code (en, ja, zh, es, ...)
-   - has_landing_pages (bool): true iff the matched project has BOTH landing_pages.repo AND landing_pages.base_url set in config.json. Otherwise false.
-   - link_keyword (string, REQUIRED when has_landing_pages=true; OMIT otherwise): a SHORT 3-6 word phrase that captures the ESSENCE OF YOUR REPLY (not just the thread topic). Think: what would a reader search to find a useful page about what you just said?
-   - link_slug (string, REQUIRED when has_landing_pages=true; OMIT otherwise): kebab-case, alphanumeric+hyphens only, max 50 chars.
-   - search_topic (string, REQUIRED): normally the EXACT 'Search query' value from this candidate's block above, copied verbatim (do not paraphrase, normalise, or trim). EXCEPTION (cross-route): if the matched_project you chose for this candidate is DIFFERENT from the candidate's 'Project match' field (i.e. you re-routed the thread to a better-fitting project), set search_topic to an empty string \"\" instead. The origin query's topic belongs to the project that ISSUED that query, not the one you routed to; copying it onto the new project's post miscredits the new project's topic ranking and the issuing project's query bank. When matched_project equals the 'Project match' field, copy the topic verbatim as before. The shell stamps this onto posts.search_topic so the next cycle's Phase 1 can rank which topics convert (clicks per post) and evolve the universe accordingly.
-
-5. CLASSIFY EVERY PRE-SCORED CANDIDATE into ONE of THREE outcomes. There is NO post cap and NO per-project quota: post EVERY thread you judge genuinely on-brand.
-   (a) 'candidates' — an on-brand pick you are replying to this cycle (step 4 above). No cap.
-   (b) 'rejected' — ONLY for a PERMANENT, thread-intrinsic reason this thread should NEVER be replied to for the matched project: off-topic for the project, toxic / hateful, low-quality / spam / promo / shill, audience or ICP mismatch, our own account, or stale. Reason must be <=200 chars, plain text, no quotes. CRITICAL: the shell marks every 'rejected' entry status='skipped', and a skipped (thread, project) is filtered out of ALL future scans for this account PERMANENTLY. Only reject things that will never be a good fit.
-   (c) OMIT from BOTH arrays — for a TIMING-ONLY reason where the thread itself is fine but you are simply not posting to it right NOW. Omitting keeps it 'pending' so a later cycle can re-judge it. ALWAYS omit (NEVER reject) when your only reason is one of:
-       - you preferred a stronger candidate this cycle (there is no cap, so ideally just post this one too; if you still defer, omit it),
-       - it is a near-duplicate of another thread you are already picking THIS cycle,
-       - you already engaged this author / a similar thread this cycle and want to avoid back-to-back over-engagement.
-       These are DEFERRALS, not rejections. Putting any of them in 'rejected' would permanently blacklist a thread that is actually fine. Do NOT do that.
-   It is fine for 'candidates' to be empty (nothing on-brand) and fine for 'rejected' to be empty (nothing permanently unsuitable).
-   Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you omit or forget.
-
-5a. SELF-IMPROVING PROJECT-WIDE EXCLUSION LIST (optional, on rejected entries only):
-    When you put a candidate in 'rejected' BECAUSE of a stable, recurring CLASS of false-positive (not a one-off bad tweet), you MAY include a 'proposed_excludes' array of 1-3 specific keywords. If you do, the pipeline will (after a 2-distinct-batch activation gate) automatically append \`-keyword\` to ALL future Twitter searches for the matched_project, project-wide and persistent. This is the ONLY upstream block against the entire class of false-positive that a tighter Phase 1 query alone cannot prevent.
-
-    USE THIS POWER NARROWLY. False-negatives (legit tweets being filtered out) are far worse than the cost of seeing one more cricket tweet. Apply ALL of these rules:
-
-    - DO emit when: the false-positive is caused by a SPECIFIC ambiguous proper noun, brand, or domain term that has a wholly unrelated meaning collisional with the project. Example for Vipassana: an IPL/cricket thread surfaced because the search query included \`Goenka\` (the meditation teacher S.N. Goenka shares a surname with Sanjiv Goenka, owner of an IPL team). Right proposed_excludes: ['cricket','kohli','ipl','lsg','rcb']. WRONG proposed_excludes: ['goenka'] (would mute legit S.N. Goenka tweets).
-
-    - DO NOT emit when: the candidate is just personally low-quality (spam, low engagement, generic), the language is wrong, the author is bot-like, or the thread is just slightly off-topic. Those are one-offs, NOT classes. Use the 'reason' field instead.
-
-    - Each proposed term must be:
-      * a SINGLE token, lowercase, ascii letters/digits/hyphen only, no spaces, length 3-32. (e.g. 'cricket', 'kohli', 'ipl', 'lsg', 'rcb-fan', 'crypto', 'memecoin').
-      * SPECIFIC and unambiguous in the project's domain. Proper nouns, brand names, narrow jargon, sport/team/franchise terms preferred. Generic words like 'practice', 'retreat', 'meditation', 'work', 'tips', 'app', 'tool', 'help' are FORBIDDEN — they will produce false-negatives.
-      * NOT a core search topic of the matched_project (the validator rejects any term in the project's search_topics, so don't waste tokens proposing one).
-
-    - Cap: at most 3 terms per rejected entry. If you need more, you're probably proposing too generically — narrow the list.
-
-    - Activation gate: each term needs >=2 SEPARATE batches to propose it before it goes live, so a single false-rejection cannot mute a search. You don't need to think about this — propose if you'd be confident a future cycle's Claude would also propose it; if not, leave proposed_excludes off.
-
-    - When in doubt, omit the field entirely. The default behavior (no proposed_excludes) is safe; over-proposing is not.
-
-CRITICAL:
-- DO NOT post anything. The shell handles posting.
-- DO NOT call twitter_browser.py.
-- DO NOT call generate_page.py (the shell runs it AFTER your session, outside the lock).
-- DO NOT call log_post.py or campaign_bump.py.
-- Browser tools (from the BROWSER BACKEND block) are READ-ONLY in this step.
-- NEVER use em dashes. Use commas, periods, or regular dashes (-).
-- Reply in the SAME LANGUAGE as the parent tweet."
+# --- PREP_PROMPT assembly (2026-07-16): NO PROMPT TEXT IN SHELL --------------
+# The entire prep prompt (skeleton, arm-aware DRAFT DIRECTIVE, ACCOUNT VOICE
+# CORPUS, PROJECT ROUTING JSON, global learned preferences, Draft-B
+# divergence note) is rendered by scripts/draft_prompt_core.py, the single
+# source of truth shared with the Reddit draft lane. A drafting experiment is
+# implemented THERE (arm-aware rendering) and applies to every platform on
+# the same commit. Do NOT add prompt text back to this file: pass new dynamic
+# context as an ingredient file below and render it in the core.
+# Multiline blocks ride as files (printf builtin, immune to ARG_MAX); scalars
+# ride as S4L_PREP_* env vars; arm/lane/prefix come from the exported cycle
+# env (S4L_DRAFT_PROMPT_VARIANT / S4L_ACTIVE_LANE / TW_ENGINE_PREFIX).
+_PREP_ING_DIR=$(mktemp -d -t s4l_prep_ing_XXXXXX)
+printf '%s' "$CANDIDATE_BLOCK" > "$_PREP_ING_DIR/candidate_block"
+printf '%s' "$MEDIA_BLOCK" > "$_PREP_ING_DIR/media_block"
+printf '%s' "$TOP_REPORT" > "$_PREP_ING_DIR/top_report"
+printf '%s' "$TOP_REPORT_B" > "$_PREP_ING_DIR/top_report_b"
+printf '%s' "$STYLES_BLOCK" > "$_PREP_ING_DIR/styles_block"
+printf '%s' "$STYLES_BLOCK_B" > "$_PREP_ING_DIR/styles_block_b"
+printf '%s' "$RECENT_SELF_BLOCK" > "$_PREP_ING_DIR/recent_self_block"
+PREP_PROMPT=$(S4L_PREP_BATCH_ID="$BATCH_ID" \
+    S4L_PREP_SKILL_FILE="$SKILL_FILE" \
+    S4L_PREP_PICKED_STYLE="$PICKED_STYLE" \
+    S4L_PREP_PICKED_MODE="$PICKED_MODE" \
+    S4L_PREP_PICKED_STYLE_B="$PICKED_STYLE_B" \
+    S4L_PREP_PICKED_MODE_B="$PICKED_MODE_B" \
+    TW_ENGINE_PREFIX="$TW_ENGINE_PREFIX" \
+    python3 "$REPO_DIR/scripts/draft_prompt_core.py" render-twitter --ingredients-dir "$_PREP_ING_DIR" 2>>"$LOG_FILE")
+rm -rf "$_PREP_ING_DIR" 2>/dev/null || true
+if [ -z "$PREP_PROMPT" ]; then
+    log "FATAL: draft_prompt_core render-twitter returned an empty prompt; aborting before drafting (candidates stay pending for Phase 0 salvage)."
+    exit 1
+fi
 
 # Pipe the prep prompt via stdin instead of passing as a shell argument.
 # On Linux ARG_MAX is 2MB; the assembled prompt (config.json + top_report +
 # styles + schema + candidates) busts that on the VM, dying with E2BIG
 # "Argument list too long". stdin has no such cap.
-PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
+# --allowedTools: restore external fact-checking to the prep drafter (removed
+# 2026-06-26). --strict-mcp-config stays so the twitter-harness browser MCP is NOT
+# loaded: the model can search the web but can never touch the CDP Chrome that
+# Phase 2b-post drives (that would break the two-lock). The tools are passed as a
+# SINGLE comma-separated token on purpose: claude_job.py's queue parser (box
+# installs) treats --allowedTools as a one-value flag, so a space-separated second
+# tool would leak in as the prompt. On the box these flags ride through
+# claude_job.py; Desktop's own web search + the reworded prompt enable it there.
+# --- Prep-prompt snapshot (2026-07-11) ---------------------------------------
+# Persist the exact rendered PREP_PROMPT per batch so prompt-block presence is
+# verifiable after any release (grep the file), instead of reverse-engineering
+# it from package scripts. The queue's prompt-*.md files are transient work
+# files deleted on completion, and the generation trace deliberately carries
+# only the exemplar context, so this is the ONLY durable full-prompt record.
+# Local-only, newest 50 kept (file cleanup, not candidate-row retention; the
+# no-retention rule covers DB *_candidates rows). Never blocks the run.
+if [ "$PREGATE_SKIP" = "1" ]; then
+    # Virality pre-gate fired: skip the prompt snapshot (nothing is sent) and
+    # the whole Claude drafting session, and synthesize the empty envelope the
+    # plan parser already handles (identical outcome to "drafted, all picks
+    # dropped below bar": plan_count=0, candidates stay pending for salvage).
+    log "[virality_pregate] drafting session skipped; synthesizing empty prep envelope"
+    PREP_OUTPUT='{"type":"result","subtype":"success","is_error":false,"structured_output":{"candidates":[],"rejected":[]}}'
+else
+    PREP_PROMPT_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/prep-prompts"
+    if mkdir -p "$PREP_PROMPT_DIR" 2>/dev/null; then
+        _PP_FILE="$PREP_PROMPT_DIR/prep-prompt-$BATCH_ID.md"
+        if printf '%s' "$PREP_PROMPT" > "$_PP_FILE" 2>/dev/null; then
+            ls -t "$PREP_PROMPT_DIR"/prep-prompt-*.md 2>/dev/null | tail -n +51 | while IFS= read -r _pp_old; do
+                rm -f "$_pp_old"
+            done
+            log "[prep_prompt_snapshot] batch=$BATCH_ID bytes=$(wc -c < "$_PP_FILE" | tr -d ' ') path=$_PP_FILE"
+        else
+            log "WARN: prep-prompt snapshot write failed for batch=$BATCH_ID (non-fatal)"
+        fi
+    fi
+
+    PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" --allowedTools WebSearch,WebFetch -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
+fi
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
+
+# --- TOP-N POST CAP (2026-06-29) -------------------------------------------
+# The prep model still drafts EVERY on-brand candidate, but autopilot now posts
+# only the single highest-Virality one per cycle. This caps per-account reply
+# volume (the May-June ~10x ramp that collapsed per-post reach ~15x) while
+# keeping the strongest thread. Deferred picks are dropped from the plan so they
+# stay status='pending' (NOT 'skipped'); Phase 0 salvage re-judges them next
+# cycle and reuses their fresh drafts. (2026-06-30) The cap is now the SINGLE
+# standard for BOTH lanes: autopilot direct-post AND DRAFT_ONLY manual MCP review.
+# The old DRAFT_ONLY=1 -> POST_TOP_N=0 special-case was removed on purpose, so the
+# human reviews the exact same one highest-Virality draft the autopilot would post.
+# Override with S4L_TWITTER_POST_TOP_N (default 1; 0 = no cap, env opt-out only).
+# Sandbox default is 0 (no cap): the top-1 rule above exists so a human
+# reviewer sees exactly what autopilot would post, which is meaningless when
+# nothing is ever posted -- a sandbox test wants every model-approved draft
+# visible for comparison, not just the single highest-virality one. Still
+# overridable with S4L_TWITTER_POST_TOP_N if someone wants the production cap
+# reproduced in sandbox mode too.
+if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-0}"
+else
+    POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
+fi
+
+# --- ROLLING VIRALITY BAR (2026-07-02) --------------------------------------
+# Fetch THIS install's trailing-24h virality percentile so the parse step posts
+# the top-1 ONLY if it clears the bar. This holds the post rate near the target
+# (~10 / day as of 2026-07-13 reach-recovery: p0.99 replayed against the prior
+# week's picks yields ~12/day vs ~91/day at the old p0.90) with NO hard cap:
+# the bar is the Nth percentile of the install's
+# OWN recent candidate pool (via /api/v1/twitter-candidates/virality-threshold),
+# so it self-calibrates to cadence and niche instead of being a fixed number.
+# The bar applies to BOTH lanes (2026-07-03, per user instruction): the
+# autopilot lane drops below-bar picks before POSTING, and the DRAFT_ONLY lane
+# drops them before they become review cards, so human review time is never
+# spent on bottom-of-pool drafts. Dropped picks stay status='pending' (never
+# 'rejected'); Phase 0 salvages and re-judges them next cycle.
+# The bar is OFF (empty threshold) when:
+#   - Cold start: sample_count < min, so a fresh pool posts ungated until it fills.
+#     (This is also what keeps brand-new installs seeing every draft card.)
+#   - Fetch failure: fail-open, never silence posting on a transient API blip.
+# Virality percentile is HARDCODED to 0.99 here (raised from 0.90 on 2026-07-13,
+# reach-recovery: quality over volume): single source of truth, no env
+# var, no fallback, one path (every install behaves identically regardless of how
+# its plist was generated). Sample floor S4L_TWITTER_VIRALITY_MIN_SAMPLE default 200.
+# VIRALITY_THRESHOLD is fetched ONCE per cycle by the candidate-level
+# PREFILTER right after the candidate fetch (2026-07-17; before that by the
+# 2026-07-15 pre-draft gate; originally fetched here, post-draft). The parse
+# below reuses the value; with the prefilter active its below-bar drop should
+# never fire and remains as belt-and-suspenders. Sandbox runs carry an empty
+# threshold (bar OFF) from the same block.
 
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
 # 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
 # reason against every twitter_candidates row Claude reviewed but didn't pick.
-python3 -c "
-import json, sys
+S4L_CAND_VIR="$CANDIDATES" S4L_POST_TOP_N="$POST_TOP_N" VIRALITY_THRESHOLD="$VIRALITY_THRESHOLD" python3 -c "
+import json, sys, os
 text = sys.stdin.read().strip()
 try:
     env, _ = json.JSONDecoder().raw_decode(text)
@@ -1915,6 +2352,40 @@ if isinstance(so, str):
     except Exception: pass
 candidates = so.get('candidates', []) if isinstance(so, dict) else []
 rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
+# Build candidate_id -> virality_score from the pre-scored CANDIDATES block
+# (pipe cols: id|url|author|text|virality|delta|...). Shared by the top-N cap
+# and the rolling virality bar below.
+_vir = {}
+for _ln in (os.environ.get('S4L_CAND_VIR', '') or '').splitlines():
+    _p = _ln.split('|')
+    if len(_p) >= 5 and _p[0].isdigit():
+        try: _vir[int(_p[0])] = float(_p[4] or 0)
+        except Exception: pass
+# TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
+# S4L_POST_TOP_N=0 disables the cap (env opt-out only; the cap applies to both
+# autopilot and DRAFT_ONLY lanes as of 2026-06-30). Truncated picks are dropped
+# from the plan, so they stay status='pending' (NOT 'rejected'); Phase 0 salvages.
+_top_n = int(os.environ.get('S4L_POST_TOP_N', '1') or '1')
+_deferred = 0
+if _top_n > 0 and len(candidates) > _top_n:
+    candidates.sort(key=lambda c: _vir.get(c.get('candidate_id'), 0.0), reverse=True)
+    _deferred = len(candidates) - _top_n
+    candidates = candidates[:_top_n]
+# ROLLING VIRALITY BAR (2026-07-02): drop kept pick(s) below the trailing-24h
+# percentile of THIS install's candidate pool (VIRALITY_THRESHOLD, from /api/v1).
+# Empty env = bar OFF: DRAFT_ONLY (new users see every draft), cold start (thin
+# pool), or fetch failure. Below-bar picks are dropped like deferrals -> stay
+# 'pending', never 'rejected', so Phase 0 re-judges them next cycle.
+_bar = (os.environ.get('VIRALITY_THRESHOLD', '') or '').strip()
+_below_bar = 0
+if _bar and candidates:
+    try:
+        _thr = float(_bar)
+        _kept = [c for c in candidates if _vir.get(c.get('candidate_id'), 0.0) >= _thr]
+        _below_bar = len(candidates) - len(_kept)
+        candidates = _kept
+    except Exception:
+        pass
 # The picker assignment travels through the plan envelope so
 # twitter_post_plan.py can call validate_or_register(...) with the
 # original (assigned_style, assigned_mode) and coerce USE-mode drift
@@ -1923,12 +2394,76 @@ rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
 # post pipeline can't tell which style the picker actually assigned
 # vs. what the model picked. Empty string means INVENT mode (NULL
 # assigned_style in the registry-coercion contract).
+# Experiment/scenario arms (2026-07-07): stamped at the SOURCE. The arm
+# assignment lives in THIS cycle process (S4L_DRAFT_PROMPT_VARIANT above,
+# S4L_CYCLE_LANE from the wrapper, any S4L_EXP_*), so persist it onto every
+# candidate as the plan is written. This per-candidate record is the ONLY
+# source downstream: review cards render it and twitter_post_plan.py stamps
+# posts.draft_prompt_variant from it (env is NOT read at post time, so the
+# queue-review lane stamps identically to autopilot).
+sys.path.insert(0, os.path.join('$REPO_DIR', 'scripts'))
+try:
+    from active_experiments import collect as _collect_exps
+    _exps = _collect_exps()
+except Exception as _e:
+    _exps = {}
+    print(f'prep: experiments stamp failed: {_e}', file=sys.stderr)
+for _c in candidates:
+    _c['experiments'] = dict(_exps)
+    # Prompt-sandbox marker (2026-07-15): lets the review card + the menu bar
+    # approve flow tell a real live draft apart from a sandbox replay of a
+    # historical thread, so the latter can be flagged and blocked from ever
+    # triggering a real post. See the sandbox short-circuit near the top of
+    # this script for how S4L_SANDBOX_CANDIDATES_FILE gets here.
+    if os.environ.get('S4L_SANDBOX_CANDIDATES_FILE'):
+        _c['experiments']['sandbox'] = 'true'
+    # Two-draft cards (2026-07-07; no-recommendation redesign 2026-07-08):
+    # mirror Draft A onto the canonical single-draft fields (reply_text/
+    # engagement_style/new_style/reply_text_en/assigned_style/assigned_mode)
+    # so every existing downstream consumer (tail-link baking, dedup,
+    # translations, posting, drift coercion) keeps working unchanged by
+    # default. Draft A is always the default, the model is never asked to
+    # pick a favorite, only the reviewer's own click on the card overrides
+    # it. Additionally attach a 'drafts' array for the review card to offer
+    # a switch; reused/stale candidates (single draft, no draft_b) don't get
+    # a drafts array, so the card falls back to today's single-draft UI.
+    _rec = 'a'
+    _is_reused = bool(_c.get('is_reused_draft'))
+    _rec_text = _c.get(f'draft_{_rec}_text') or ''
+    _rec_style = _c.get(f'draft_{_rec}_style') or ''
+    _rec_new_style = _c.get(f'draft_{_rec}_new_style')
+    _rec_text_en = _c.get(f'draft_{_rec}_text_en')
+    _c['reply_text'] = _rec_text
+    _c['engagement_style'] = _rec_style
+    _c['new_style'] = _rec_new_style
+    if _rec_text_en:
+        _c['reply_text_en'] = _rec_text_en
+    _c['assigned_style'] = ('$PICKED_STYLE' or None) if _rec == 'a' else ('$PICKED_STYLE_B' or None)
+    _c['assigned_mode'] = ('$PICKED_MODE' or 'use') if _rec == 'a' else ('$PICKED_MODE_B' or 'use')
+    _draft_b_text = _c.get('draft_b_text')
+    if not _is_reused and _draft_b_text:
+        _c['drafts'] = [
+            {
+                'variant': 'a', 'text': _c.get('draft_a_text') or '',
+                'style': _c.get('draft_a_style') or '',
+                'text_en': _c.get('draft_a_text_en'),
+                'assigned_style': '$PICKED_STYLE' or None,
+                'assigned_mode': '$PICKED_MODE' or 'use',
+            },
+            {
+                'variant': 'b', 'text': _draft_b_text,
+                'style': _c.get('draft_b_style') or '',
+                'text_en': _c.get('draft_b_text_en'),
+                'assigned_style': '$PICKED_STYLE_B' or None,
+                'assigned_mode': '$PICKED_MODE_B' or 'use',
+            },
+        ]
 json.dump({'candidates': candidates,
            'session_id': '$CLAUDE_SESSION_ID',
            'assigned_style': '$PICKED_STYLE' or None,
            'assigned_mode': '$PICKED_MODE' or 'use'}, open('$PLAN_FILE', 'w'), indent=2)
 json.dump({'skips': rejected}, open('$SKIP_FILE', 'w'), indent=2)
-print(f'prep: wrote {len(candidates)} candidates and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
+print(f'prep: wrote {len(candidates)} candidate(s) (deferred {_deferred} lower-virality, {_below_bar} below bar) and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
 " <<< "$PREP_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
 
 PREP_PARSE_EXIT=${PIPESTATUS[0]:-1}
@@ -1954,30 +2489,39 @@ if [ "$PREP_PARSE_EXIT" -eq 0 ] && [ -f "$PLAN_FILE" ]; then
 fi
 log "Phase 2b-prep complete. plan_count=$PLAN_COUNT"
 
-# Determine if Phase 2b-gen will be a no-op. When TWITTER_PAGE_GEN_RATE=0
-# globally, scripts/twitter_gen_links.py rewrites the plan with plain URLs in
-# <1s. In that case the release-now + re-acquire-after-gen dance is pure waste:
-# under cycle overlap the re-acquire can sit in the FIFO ticket queue for
-# 30-90s behind the very `engage-twitter` / next `run-twitter-cycle` we just
-# handed the lock to. We keep the lock through 2b-gen instead and skip the
-# dance entirely.
-GEN_RATE_RAW="${TWITTER_PAGE_GEN_RATE:-0.0}"
-GEN_IS_NOOP=false
-case "$GEN_RATE_RAW" in
-  0|0.0|0.00|0.000|"") GEN_IS_NOOP=true ;;
-esac
+# On-demand project-winners usage marker (2026-07-10). top_performers.py
+# appends a JSON line to the state-dir ledger on every --project call (the
+# draft prompt tells the model to pass --invoked-by "$BATCH_ID"). Count this
+# batch's lines and log a greppable marker so "did the drafting session
+# actually use the per-project query" is answerable from the cycle log alone.
+# Stderr-marker convention: format is load-bearing elsewhere; keep it stable.
+TP_ONDEMAND=$(python3 -c "
+import json, os, sys
+path = os.path.join(os.environ.get('S4L_STATE_DIR', os.path.expanduser('~/.social-autoposter-mcp')), 'top-performers-invocations.jsonl')
+n, projects = 0, []
+try:
+    for line in open(path):
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get('invoked_by') == '$BATCH_ID':
+            n += 1
+            p = r.get('project')
+            if p and p not in projects:
+                projects.append(p)
+except OSError:
+    pass
+print(f'{n} projects={projects}')
+" 2>/dev/null || echo "0 projects=[]")
+log "[project_top_performers] batch=$BATCH_ID on_demand_invocations=$TP_ONDEMAND"
 
-# Release the lock unless (a) plan is non-empty AND (b) gen is a no-op. The
-# empty-plan early-exit below still needs the release for a clean handoff, so
-# we cannot just skip when GEN_IS_NOOP=true unconditionally.
-if [ "${PLAN_COUNT:-0}" = "0" ] || ! $GEN_IS_NOOP; then
-    log "Releasing twitter-browser lock (gen step is lock-free)..."
-    release_lock "twitter-browser" 2>>"$LOG_FILE"
-    # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
-    # in twitter_browser.py now. Do NOT re-add. See Phase 1 note + docs/twitter_browser_lock.md.
-else
-    log "Keeping twitter-browser lock through Phase 2b-gen (TWITTER_PAGE_GEN_RATE=$GEN_RATE_RAW, gen is a no-op; skipping release/re-acquire dance)"
-fi
+# twitter-browser lock was already released right after thread-media capture
+# (before the Claude drafting call above), since nothing from there through
+# Phase 2b-gen touches the browser. Phase 2b-post re-acquires unconditionally
+# below. (2026-06-16) session-lock rm removed (defect b); dead holders
+# self-reclaim in twitter_browser.py now. Do NOT re-add. See Phase 1 note +
+# docs/twitter_browser_lock.md.
 
 if [ "${PLAN_COUNT:-0}" = "0" ]; then
     log "Empty plan from prep step. Exiting cycle without posting (pending rows salvaged next cycle)."
@@ -2015,13 +2559,54 @@ fi
 # phase2b-gen has the longest budget (60 min) because the SEO landing-page
 # build can legitimately run 10-40 min. Stamping it here is what protects
 # this cycle from being salvaged out from under itself.
-python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-gen 2>&1 | tee -a "$LOG_FILE" || true
+# Same sandbox short-circuit as the phase2b-prep advance above.
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-gen 2>&1 | tee -a "$LOG_FILE" || true
+fi
 log "Phase 2b-gen: generating SEO pages for $PLAN_COUNT candidate(s) without holding the browser lock..."
 python3 "$REPO_DIR/scripts/twitter_gen_links.py" --plan "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"
 GEN_EXIT=${PIPESTATUS[0]:-1}
 if [ "$GEN_EXIT" -ne 0 ]; then
     log "WARN: twitter_gen_links.py exited $GEN_EXIT, continuing with whatever links it set (per-candidate fallback to plain project URL on gen failure)."
 fi
+
+# Two-draft cards: twitter_gen_links.py (above, locked/untouched) bakes the
+# tail link into reply_text in place for Draft A only (the canonical default),
+# it never looks at the 'drafts' array. Sync the same suffix onto Draft B so
+# switching to it on the review card still posts with the link.
+# link_tail.py's apply_tail_link is documented APPEND-ONLY (concatenates the
+# bridge sentence onto the unmodified reply_text, never rewrites it), so
+# diffing the appended suffix and re-applying it verbatim is safe.
+python3 -c "
+import json
+plan_path = '$PLAN_FILE'
+try:
+    with open(plan_path) as f:
+        plan = json.load(f)
+except Exception as e:
+    print(f'[gen] drafts-link-sync: plan read failed: {e}')
+    raise SystemExit(0)
+changed = 0
+for c in plan.get('candidates') or []:
+    drafts = c.get('drafts')
+    if not isinstance(drafts, list) or len(drafts) != 2:
+        continue
+    rec_idx = 0  # Draft A is always the canonical default reply_text mirrors
+    other_idx = 1
+    rec_draft = drafts[rec_idx]
+    other_draft = drafts[other_idx]
+    baked = (c.get('reply_text') or '')
+    original = (rec_draft.get('text') or '')
+    if baked and original and baked != original and baked.startswith(original):
+        suffix = baked[len(original):]
+        rec_draft['text'] = baked
+        other_draft['text'] = (other_draft.get('text') or '') + suffix
+        changed += 1
+if changed:
+    with open(plan_path, 'w') as f:
+        json.dump(plan, f, indent=2)
+print(f'[gen] drafts-link-sync: synced tail link onto the non-recommended draft for {changed} candidate(s)')
+" 2>&1 | tee -a "$LOG_FILE"
 
 # --- DRAFT_ONLY gate: stop after drafting for human review (MCP manual mode) -
 # When DRAFT_ONLY=1 the cycle runs scan -> score -> draft -> link-gen, leaves the
@@ -2048,6 +2633,17 @@ if [ "${DRAFT_ONLY:-0}" = "1" ]; then
         --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START )) 2>/dev/null || true
     _SA_RUN_SUMMARY_EMITTED=1
+    # Sandbox runs have no MCP wrapper watching stdout for this marker to hand
+    # the plan off to merge_review_queue.py (that handoff normally happens
+    # outside this script), so a sandbox plan would otherwise just rot on
+    # disk -- found live 2026-07-15, had to hand-reconstruct one after the
+    # fact. $PLAN_FILE already carries the fully-transformed candidates
+    # (reply_text/drafts/experiments.sandbox stamp, same shape any real draft
+    # gets), so this is a straight, no-transform call into the same merge
+    # step everything else uses.
+    if [ -n "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+        python3 "$REPO_DIR/scripts/merge_review_queue.py" --plan "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"
+    fi
     # IMPORTANT: do NOT rm -f "$PLAN_FILE" here; the reviewer needs it. Print a
     # machine-readable marker so the MCP wrapper can locate the plan deterministically.
     echo "DRAFT_ONLY_PLAN=$PLAN_FILE"
@@ -2058,19 +2654,22 @@ fi
 # Stamp phase2b-post (15-min budget) before the browser-side reply loop. After
 # 2b-gen's potentially long run, peer cycles' 20-min phase2a fallback would
 # already be tripping if we left the row at phase2a.
-python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
-# Re-acquire only if we actually released for gen (see GEN_IS_NOOP above).
-# When the lock was kept through 2b-gen there's nothing to re-acquire.
-if ! $GEN_IS_NOOP; then
-    log "Re-acquiring twitter-browser lock for Phase 2b-post..."
-    acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+# Same sandbox short-circuit as the phase2b-prep advance above.
+if [ -z "${S4L_SANDBOX_CANDIDATES_FILE:-}" ]; then
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
 fi
+# Always re-acquire: the lock was released right after thread-media capture
+# (before Claude drafting), well before 2b-gen, so it is never still held here.
+log "Re-acquiring twitter-browser lock for Phase 2b-post..."
+acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 2b-post"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
-ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+[ "$_ensure_rc" != "0" ] && log "WARNING: twitter-harness bootstrap failed (rc=$_ensure_rc); continuing anyway, downstream posting may fail"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
-POST_OUTPUT=$(python3 "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
+POST_OUTPUT=$("${S4L_PYTHON:-python3}" "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
 echo "$POST_OUTPUT" >> "$LOG_FILE"
 
 # The post helper prints a JSON summary on its last stdout line.
@@ -2087,8 +2686,8 @@ rm -f "$PLAN_FILE"
 # Generation trace tempfile cleanup. By now every post in this cycle that
 # made it to log_post.py has the trace persisted to posts.generation_trace
 # JSONB, so the on-disk JSON is redundant. Best-effort delete.
-if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
-    rm -f "$SAPS_TWITTER_GEN_TRACE_PATH"
+if [ -n "$S4L_TWITTER_GEN_TRACE_PATH" ] && [ -f "$S4L_TWITTER_GEN_TRACE_PATH" ]; then
+    rm -f "$S4L_TWITTER_GEN_TRACE_PATH"
 fi
 
 # --- No end-of-cycle expire ------------------------------------------------

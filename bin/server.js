@@ -27,12 +27,70 @@ const platform = require('./platform');
 const scheduler = require('./scheduler');
 const auth = require('./auth');
 
+// Best-effort Sentry init (mirrors scripts/sentry_init.py + mcp/src/telemetry.ts,
+// same DSN, org `mediar-n5`). Every pq() failure gets captured here instead of
+// only console.error'd to a local log file nobody was tailing — that silence
+// is exactly what let an ~18h Cloud SQL connectivity incident (2026-07-08) run
+// undetected. Must never throw into the request path.
+let Sentry = null;
+try {
+  Sentry = require('@sentry/node');
+  Sentry.init({
+    dsn: process.env.S4L_SENTRY_DSN || 'https://4d44ac907262c6545cf8681703528d04@o4507617161314304.ingest.us.sentry.io/4511598804336640',
+    environment: process.env.NODE_ENV === 'development' ? 'development' : 'production',
+    tracesSampleRate: 0,
+    sendDefaultPii: false,
+    serverName: 'social-autoposter-dashboard',
+  });
+} catch {
+  Sentry = null;
+}
+function captureDbError(e, tags) {
+  if (!Sentry) return;
+  try {
+    Sentry.withScope((scope) => {
+      for (const [k, v] of Object.entries(tags || {})) scope.setTag(k, v);
+      Sentry.captureException(e);
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 const DEST = path.join(os.homedir(), 'social-autoposter');
 const LOG_DIR = path.join(DEST, 'skill', 'logs');
+// S4L plugin runtime log dir (2026-07-06). The queue-backed twitter-cycle
+// kicker (com.m13v.social-twitter-cycle) runs from the packaged runtime and
+// writes its per-run logs there, NOT into the repo's skill/logs — which left
+// the Status tab showing lastRun=null for a live pipeline. Every log listing
+// merges this dir in (repo wins on filename collision) and every log read
+// resolves across both dirs.
+const S4L_PKG_LOG_DIR = path.join(os.homedir(), '.social-autoposter-mcp', 'repo', 'package', 'skill', 'logs');
+function listLogDir() {
+  let names = [];
+  try { names = fs.readdirSync(LOG_DIR); } catch {}
+  let pkg = [];
+  try { pkg = fs.readdirSync(S4L_PKG_LOG_DIR); } catch {}
+  if (pkg.length) {
+    const seen = new Set(names);
+    for (const f of pkg) if (!seen.has(f)) names.push(f);
+  }
+  return names;
+}
+function resolveLogPath(fname) {
+  const repoPath = path.join(LOG_DIR, fname);
+  if (fs.existsSync(repoPath)) return repoPath;
+  const pkgPath = path.join(S4L_PKG_LOG_DIR, fname);
+  if (fs.existsSync(pkgPath)) return pkgPath;
+  return repoPath;
+}
 const SCHED_KIND = platform.scheduler();
-const UNIT_DIR = path.join(DEST, SCHED_KIND === 'systemd' ? 'systemd' : 'launchd');
+const UNIT_DIR = path.join(DEST, 'launchd');
 const AGENT_DIR = platform.agentsDir();
-const driver = scheduler.driverFor();
+// CLIENT_MODE runs on Cloud Run (Linux container, no launchd) and never
+// touches local job scheduling; resolving a driver there throws (systemd
+// support was removed, leaving only launchd), crashing the process on boot.
+const driver = auth.CLIENT_MODE ? null : scheduler.driverFor();
 const CONFIG_FILE = path.join(DEST, 'config.json');
 const ENV_FILE = path.join(DEST, '.env');
 const PORT = parseInt(process.env.PORT || '3141', 10);
@@ -48,7 +106,7 @@ function agentPath(job) {
 // Matrix: rows = job types, columns = platforms
 // Each cell is a job (or null if that combo doesn't exist)
 const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub', 'Instagram'];
-const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Stats', 'Post Audit', 'Octolens'];
+const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Presence', 'Stats', 'Post Audit', 'Octolens'];
 
 const JOBS = [
   // Post Threads row (original threads/posts)
@@ -97,6 +155,8 @@ const JOBS = [
   // backfill-post) and engage-linkedin.sh, exactly like the Twitter rail.
   { label: 'com.m13v.social-link-edit-moltbook', name: 'Link Edit MoltBook', type: 'Link Edit', platform: 'MoltBook', script: 'link-edit-moltbook.sh', logPrefix: 'link-edit-moltbook-', plist: 'com.m13v.social-link-edit-moltbook.plist' },
   { label: 'com.m13v.social-link-edit-github', name: 'Link Edit GitHub', type: 'Link Edit', platform: 'GitHub', script: 'link-edit-github.sh', logPrefix: 'link-edit-github-', plist: 'com.m13v.social-link-edit-github.plist' },
+  // Presence row (read-only session maintenance)
+  { label: 'com.m13v.social-linkedin-presence', name: 'LinkedIn Presence', type: 'Presence', platform: 'LinkedIn', script: 'linkedin-presence.sh', logPrefix: 'linkedin-presence-', plist: 'com.m13v.social-linkedin-presence.plist' },
   // Stats row
   { label: 'com.m13v.social-stats-reddit', name: 'Stats Reddit', type: 'Stats', platform: 'Reddit', script: 'stats-reddit.sh', logPrefix: 'stats-reddit-', plist: 'com.m13v.social-stats-reddit.plist' },
   { label: 'com.m13v.social-stats-twitter', name: 'Stats Twitter', type: 'Stats', platform: 'Twitter', script: 'stats-twitter.sh', logPrefix: 'stats-twitter-', plist: 'com.m13v.social-stats-twitter.plist' },
@@ -243,9 +303,7 @@ function buildBatchSnapshot() {
   }
   const { loadedLabels, pidByLabel } = driver.list();
 
-  const logFiles = (() => {
-    try { return fs.readdirSync(LOG_DIR); } catch { return []; }
-  })();
+  const logFiles = listLogDir();
 
   const lockHolders = readLockHoldersFromTmp();
 
@@ -371,7 +429,9 @@ function lastLogFromSnapshot(snap, job) {
   const matches = snap.logFiles.filter(f => {
     if (!f.endsWith('.log')) return false;
     if (f.startsWith('launchd-')) return false;
-    if (logPrefix) return f.startsWith(logPrefix);
+    // Require the per-run timestamp suffix so helper logs sharing the prefix
+    // (e.g. twitter-cycle-singleton.log) can't shadow the newest real run.
+    if (logPrefix) return f.startsWith(logPrefix) && /\d{4}-\d{2}-\d{2}_\d{6}\.log$/.test(f);
     return /^\d{4}-\d{2}-\d{2}_/.test(f);
   }).sort().reverse();
   if (!matches.length) return { file: null, time: null };
@@ -392,10 +452,12 @@ function getPlistInterval(unitPath) {
 
 function getLastLog(job) {
   try {
-    const files = fs.readdirSync(LOG_DIR).filter(f => {
+    const files = listLogDir().filter(f => {
       if (!f.endsWith('.log')) return false;
       if (f.startsWith('launchd-')) return false;
-      if (job.logPrefix) return f.startsWith(job.logPrefix);
+      // Require the per-run timestamp suffix so helper logs sharing the prefix
+      // (e.g. twitter-cycle-singleton.log) can't shadow the newest real run.
+      if (job.logPrefix) return f.startsWith(job.logPrefix) && /\d{4}-\d{2}-\d{2}_\d{6}\.log$/.test(f);
       // Post job: files starting with a digit (YYYY-MM-DD_...)
       return /^\d{4}-\d{2}-\d{2}_/.test(f);
     }).sort().reverse();
@@ -504,6 +566,7 @@ async function pq(query, params) {
     // every pq() returned null without context).
     const snippet = (query || '').replace(/\s+/g, ' ').trim().slice(0, 140);
     console.error('[pq] query failed:', e.message, '| SQL:', snippet);
+    captureDbError(e, { component: 'pq', sql_snippet: snippet.slice(0, 100) });
     return null;
   }
 }
@@ -778,6 +841,36 @@ const LENGTH_VARIANT_DEFS = {
   control:   { label: 'Unconstrained',     desc: 'no length target (legacy, longer replies)' },
 };
 
+// twitter draft-prompt variant defs. RESET to v4 on 2026-07-15: the arm value
+// was versioned to '..._v4' in run-twitter-cycle.sh so the experiment restarts
+// from zero. v1 ('treatment'/'control', decoupled-product-pivot), v2
+// ('*_v2', skeleton-ban), and v3 ('*_v3', style-as-form) are retired but their
+// rows stay in the DB; the dashboard only counts the '_v4' arms below. v3
+// tested whether the assigned engagement style should be a binding FORM; v4
+// replaces that wholesale with a bigger claim: the account's own real voice
+// (corpus + voice.examples + learned_preferences, all human-verified) should
+// dominate the draft over every other competing signal, including the style
+// block (now demoted to an optional idea) and the per-style top_performers
+// exemplar report (skipped entirely on treatment). v4 is retiring v3 rather
+// than running alongside it because it directly manipulates the same
+// style-block-bindingness variable v3 owned; independent axes would have
+// produced literal contradictions in the same prompt, not just an
+// interaction to control for. Also applied GLOBALLY now (both lanes), not
+// personal_brand-only. Per-CYCLE arm; lives on posts.draft_prompt_variant.
+// Tunable via TWITTER_DRAFT_PROMPT_AB_RATE (code default 0.5). Keep keys in
+// sync with the arm strings printed in run-twitter-cycle.sh AND the
+// DESCRIPTIONS registry in scripts/active_experiments.py (the review card's
+// details popover reads that).
+const DRAFT_PROMPT_VARIANT_DEFS = {
+  treatment_v4: { label: 'Voice-first', desc: 'account corpus + voice.examples + learned_preferences dominate; style demoted to an optional idea; skips the per-style top-performers report; applies to both lanes' },
+  control_v4:   { label: 'Current',     desc: 'plain draft directive, uniform length clamp, no voice-priority order' },
+  // Retired arms kept ONLY so DRAFT_PROMPT_VARIANT_DEFS[v] lookups for a
+  // straggler card from an old plan still resolve to a label/desc instead of
+  // undefined; dpVariants below (the aggregate readout) counts v4 only.
+  treatment_v3: { label: 'v3, retired: Style-as-form', desc: 'assigned style is the binding FORM (defining move + per-style length + self-check); learned preferences apply inside it; kept the v2 skeleton ban' },
+  control_v3:   { label: 'v3, retired: Current',       desc: 'plain draft directive, uniform length clamp, no structure ban' },
+};
+
 // Standalone jobs with no platform axis. script_name -> display label.
 const STANDALONE_JOBS = {
   serp_seo: { job_type: 'seo', job_label: 'SERP SEO' },
@@ -791,9 +884,10 @@ const STANDALONE_JOBS = {
   daily_report: { job_type: 'report', job_label: 'Daily Report' },
   deploy_status: { job_type: 'report', job_label: 'Deploy Status' },
   precompute_stats: { job_type: 'report', job_label: 'Precompute Stats' },
-  // Invent Topics: hourly cron (com.m13v.social-invent-topics) that picks one
-  // project, invents new Twitter search_topic seeds via the MCP-tool Claude
-  // session, supply-tests their queries. result.invent carries the per-run
+  // Invent Topics: kicker-driven job (run-draft-and-publish.sh, every
+  // S4L_INVENT_EVERY_HOURS; queue-native since 2026-07-06) that picks one
+  // project, invents new Twitter search_topic seeds via queue-routed Claude
+  // turns, supply-tests their queries. result.invent carries the per-run
   // stats (project, topics, queries, queries_w_supply, qpt[]).
   invent_topics: { job_type: 'invent', job_label: 'Invent Topics' },
 };
@@ -815,8 +909,7 @@ const JOB_HISTORY_HIDDEN_SCRIPTS = new Set([
 // completed log_run.py entries that already use canonical names.
 const SCRIPT_ALIASES = {
   run_twitter_cycle:           'post_twitter',
-  run_twitter_cycle_singleton: 'post_twitter',
-  run_twitter_cycle_launchd:   'post_twitter',
+  run_draft_and_publish:       'post_twitter',
   run_twitter_threads:       'thread_twitter',
   run_linkedin:              'post_linkedin',
   run_reddit_threads:        'thread_reddit',
@@ -868,6 +961,7 @@ function classifyScript(script) {
     match(/^engage_(\w+)$/, 'engage', 'Engage') ||
     match(/^dm_outreach_(\w+)$/, 'dm-outreach', 'DM Outreach') ||
     match(/^dm_replies_(\w+)$/, 'dm-replies', 'DM Replies') ||
+    match(/^presence_(\w+)$/, 'presence', 'Presence') ||
     match(/^scan_(\w+?)_(?:replies|followups|mentions)$/, 'check-replies', 'Check Replies') ||
     match(/^octolens_(\w+)$/, 'octolens', 'Octolens') ||
     match(/^stats_(\w+)$/, 'stats', 'Stats') ||
@@ -1558,15 +1652,15 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   // Patterns. Each compute-style marker is captured ONCE (first occurrence).
   // Lock acquires accumulate so we can sum waits across the 2-3 acquire/release
   // dances in a single cycle (Phase 1 → release → Phase 2b-post → release).
-  const RE_CYCLE_START   = /^\[(\d{2}):(\d{2}):(\d{2})\] === Twitter Cycle/;
-  const RE_LOCK_ACQ      = /^\[lock\] acquired twitter-browser pid=\d+ at (\d{2}):(\d{2}):(\d{2}) waited=(\d+)s/;
-  const RE_PHASE1_START  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 1: drafting/;
-  const RE_PHASE1_END    = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 1 complete/;
-  const RE_RIPEN_SLEEP   = /^\[(\d{2}):(\d{2}):(\d{2})\] Variant \w: sleeping (\d+)s before T1/;
-  const RE_PHASE2A       = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2a: re-polling/;
-  const RE_PHASE2B_PREP  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep: Claude reading/;
-  const RE_PHASE2B_PREP_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep complete/;
-  const RE_PHASE2B_GEN   = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-gen:/;
+  const RE_CYCLE_START   = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] === Twitter Cycle/;
+  const RE_LOCK_ACQ      = /^\[lock\] acquired twitter-browser pid=\d+ at (?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z? waited=(\d+)s/;
+  const RE_PHASE1_START  = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 1: drafting/;
+  const RE_PHASE1_END    = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 1 complete/;
+  const RE_RIPEN_SLEEP   = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Variant \w: sleeping (\d+)s before T1/;
+  const RE_PHASE2A       = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2a: re-polling/;
+  const RE_PHASE2B_PREP  = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-prep: Claude reading/;
+  const RE_PHASE2B_PREP_END = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-prep complete/;
+  const RE_PHASE2B_GEN   = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-gen:/;
   // End-of-gen marker. The script logs this immediately after the gen step
   // returns and BEFORE it sits in mkdir/ticket-queue waiting for the browser
   // lock to re-acquire for posting. Using `Phase 2b-post: posting` as the gen
@@ -1575,9 +1669,9 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   // surfaced on 2026-05-26 when an 08:45 cycle with TWITTER_PAGE_GEN_RATE=0
   // (gen truly ran in <1s) showed "Phase 2b-gen: 1m 11s" because 69s of lock
   // re-acquire wait was attributed to gen instead of to lock wait (pre-post).
-  const RE_PHASE2B_GEN_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Re-acquiring twitter-browser lock for Phase 2b-post/;
-  const RE_PHASE2B_POST  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-post: posting/;
-  const RE_CYCLE_END     = /^\[(\d{2}):(\d{2}):(\d{2})\] === Cycle complete/;
+  const RE_PHASE2B_GEN_END = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Re-acquiring twitter-browser lock for Phase 2b-post/;
+  const RE_PHASE2B_POST  = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] Phase 2b-post: posting/;
+  const RE_CYCLE_END     = /^\[(?:\d{4}-\d{2}-\d{2}T)?(\d{2}):(\d{2}):(\d{2})Z?\] === Cycle complete/;
   let m;
   for (const line of body.split('\n')) {
     if (cycleStartMs == null && (m = line.match(RE_CYCLE_START))) cycleStartMs = tsToMs(m[1], m[2], m[3]);
@@ -1719,7 +1813,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // salvage marker we need for the salvaged pill. Read once per enricher call.
   let logFiles = [];
   try {
-    logFiles = fs.readdirSync(LOG_DIR).filter(f => f.startsWith('twitter-cycle-') && f.endsWith('.log'));
+    logFiles = listLogDir().filter(f => f.startsWith('twitter-cycle-') && f.endsWith('.log'));
   } catch { /* empty */ }
   const cycleFileTs = (name) => {
     const m = name.match(/^twitter-cycle-(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.log$/);
@@ -2004,7 +2098,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
     let phaseDurations = null;
     if (chosenLog) {
       try {
-        const body = fs.readFileSync(path.join(LOG_DIR, chosenLog), 'utf8');
+        const body = fs.readFileSync(resolveLogPath(chosenLog), 'utf8');
         const m = body.match(phase0SalvageRe);
         if (m) salvageAttempted = parseInt(m[1], 10);
         // Count every [stale_age_skip] marker in the cycle log. The marker is
@@ -2110,11 +2204,16 @@ async function enrichPostCommentsTwitterRuns(runs) {
         batchPostedUrls.add(c.tweet_url);
       }
     }
+    // treatment_v4 Twitter posts carry no real style, stamped 'voice_first'
+    // (must match draft_prompt_core.STYLE_SENTINEL_TREATMENT) instead of
+    // NULL. Excluded from this tally so it doesn't dominate the per-cycle
+    // "styles used" pill breakdown at ~half of Twitter volume.
+    const isRealStyle = (s) => !!s && s !== 'voice_first';
     const stylesMapTx = {};
     const topicsMapTx = {};
     for (const p of twitterPostNorm) {
       if (!p.threadUrl || !batchPostedUrls.has(p.threadUrl)) continue;
-      if (p.style) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+      if (isRealStyle(p.style)) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
       if (p.topic) topicsMapTx[p.topic] = (topicsMapTx[p.topic] || 0) + 1;
     }
     // Fall back to time-window if batch URL matching found nothing (e.g. old
@@ -2122,7 +2221,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
     if (!Object.keys(stylesMapTx).length && !Object.keys(topicsMapTx).length && !ownBatchId) {
       for (const p of twitterPostNorm) {
         if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
-        if (p.style) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+        if (isRealStyle(p.style)) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
         if (p.topic) topicsMapTx[p.topic] = (topicsMapTx[p.topic] || 0) + 1;
       }
     }
@@ -2366,7 +2465,7 @@ async function enrichPostCommentsRedditRuns(runs) {
   const redditSearchMarkerRe = /^\[reddit_search\] .*? raw=(\d+) returned=(\d+)/;
   const planFailedRe = /Plan phase: Claude failed/;
   const planRateRe = /Plan phase: rate-limited/;
-  const iterationRe = /^\[\d{2}:\d{2}:\d{2}\] --- Iteration \d+\//;
+  const iterationRe = /^\[(?:\d{4}-\d{2}-\d{2}T)?\d{2}:\d{2}:\d{2}Z?\] --- Iteration \d+\//;
   // New 4-phase pipeline markers (discover/ripen/draft/post split).
   // 2026-05-08: discover output is logged as either "Discover found N" (legacy)
   // or "Discover harvested N candidate(s) from dump dir" (current opaque-mode
@@ -3233,6 +3332,7 @@ const _PHASE_FAMILY = {
   engage_linkedin:      ['engage-linkedin-phaseA', 'engage-linkedin-phaseB'],
   dm_replies_linkedin:  ['engage-dm-replies'],
   dm_outreach_linkedin: ['dm-outreach-linkedin'],
+  presence_linkedin:    ['linkedin-presence'],
   // link_edit_linkedin retired + removed 2026-05-29 (link embedded at composition like Twitter).
   // GitHub
   post_github:          ['post_github'],
@@ -4492,6 +4592,155 @@ async function handleApi(req, res) {
     });
   }
 
+  // PUBLIC: raw client log relay. The open-source .mcpb client tees the verbatim
+  // stdout/stderr of every pipeline subprocess here (telemetry.ts batcher). This
+  // handler does ONE thing: console.log() each line as structured JSON so Cloud
+  // Run's runtime ships it to Cloud Logging automatically. No database, no
+  // service-account key on the client — the relay is the only thing authed to
+  // GCP, implicitly via its Cloud Run runtime identity. Query/filter by
+  // jsonPayload.install_id in Log Explorer; Error Reporting + Log Analytics
+  // (BigQuery SQL) work over it for free.
+  //
+  // Auth is the same X-Installation lane as the Vercel /api/v1/installations/*
+  // routes: base64-encoded JSON carrying an install_id UUID (no signature). We
+  // parse it only to tag the line; a malformed/absent header is rejected rather
+  // than logged anonymously. Must live ABOVE the Firebase auth gate.
+  if (p === '/api/v1/installations/logs' && req.method === 'POST') {
+    return readBody(req).then(async body => {
+      // Parse the X-Installation header (base64 JSON -> { install_id, ... }).
+      const rawHeader = (req.headers['x-installation'] || '').trim();
+      let installId = null;
+      if (rawHeader) {
+        try {
+          const decoded = Buffer.from(rawHeader, 'base64').toString('utf8');
+          const payload = JSON.parse(decoded);
+          const id = String(payload && payload.install_id || '').trim();
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            installId = id;
+          }
+        } catch { /* malformed header -> installId stays null */ }
+      }
+      if (!installId) return json(res, { error: 'x_installation_required' }, 401);
+
+      let payload;
+      try { payload = JSON.parse(body); }
+      catch (e) { return json(res, { error: 'invalid_json' }, 400); }
+
+      const rawLines = payload && payload.lines;
+      if (!Array.isArray(rawLines) || rawLines.length === 0 || rawLines.length > 200) {
+        return json(res, { error: 'lines must be an array of 1-200 items' }, 400);
+      }
+
+      const STREAMS = new Set(['stdout', 'stderr']);
+      let accepted = 0;
+      for (const item of rawLines) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        if (typeof item.line !== 'string') continue;
+        const stream = STREAMS.has(item.stream) ? item.stream : 'stdout';
+        const ctx = (typeof item.context === 'string' ? item.context : '').slice(0, 200);
+        const ts = (typeof item.ts === 'string' && Number.isFinite(Date.parse(item.ts)))
+          ? new Date(item.ts).toISOString()
+          : new Date().toISOString();
+        const line = item.line.slice(0, 8192);
+        // Cloud Run parses JSON on stdout into Cloud Logging structured fields.
+        // `severity`/`message` are special-cased by the agent; install_id is a
+        // label so Log Explorer can filter on it directly.
+        console.log(JSON.stringify({
+          severity: stream === 'stderr' ? 'WARNING' : 'INFO',
+          message: line,
+          logType: 'client-pipeline',
+          install_id: installId,
+          context: ctx || undefined,
+          stream,
+          client_ts: ts,
+          'logging.googleapis.com/labels': { install_id: installId, log_type: 'client-pipeline' },
+        }));
+        accepted += 1;
+      }
+      return json(res, { accepted });
+    }).catch(e => {
+      console.error('[installations/logs] handler error:', e.message);
+      return json(res, { error: e.message }, 400);
+    });
+  }
+
+  // PUBLIC: onboarding milestone relay. The .mcpb client's onboarding ledger
+  // (onboarding.ts) batches redacted milestone events here (attempt/completed/
+  // blocked/doctor per step: runtime_ready, x_connected, topics_seeded,
+  // draft_verified, ...). Like /logs, this handler ONLY console.log()s each
+  // event as structured JSON so Cloud Run ships it to Cloud Logging — filter
+  // jsonPayload.logType="onboarding-milestone" and jsonPayload.install_id in
+  // Log Explorer to see exactly where an install got stuck (the Karol case).
+  // Replaces the dead Vercel route that INSERTed into installation_onboarding_
+  // events (a table that was never created). No database. Above the Firebase gate.
+  if (p === '/api/v1/installations/onboarding-events' && req.method === 'POST') {
+    return readBody(req).then(async body => {
+      const rawHeader = (req.headers['x-installation'] || '').trim();
+      let installId = null;
+      if (rawHeader) {
+        try {
+          const decoded = Buffer.from(rawHeader, 'base64').toString('utf8');
+          const payload = JSON.parse(decoded);
+          const id = String(payload && payload.install_id || '').trim();
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            installId = id;
+          }
+        } catch { /* malformed header -> installId stays null */ }
+      }
+      if (!installId) return json(res, { error: 'x_installation_required' }, 401);
+
+      let payload;
+      try { payload = JSON.parse(body); }
+      catch (e) { return json(res, { error: 'invalid_json' }, 400); }
+
+      const events = payload && payload.events;
+      if (!Array.isArray(events) || events.length === 0 || events.length > 50) {
+        return json(res, { error: 'events must be an array of 1-50 items' }, 400);
+      }
+
+      const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+      let accepted = 0;
+      for (const ev of events) {
+        if (!ev || typeof ev !== 'object' || Array.isArray(ev)) continue;
+        const milestone = str(ev.milestone, 80);
+        if (!milestone) continue; // a milestone is the minimum useful event
+        const type = str(ev.type, 40);
+        const status = str(ev.status, 40);
+        // blocked milestones are the signal we care about most -> surface as
+        // WARNING so Error Reporting / severity filters catch stuck installs.
+        const severity = (type === 'blocked' || status === 'blocked') ? 'WARNING' : 'INFO';
+        const ts = (typeof ev.occurred_at === 'string' && Number.isFinite(Date.parse(ev.occurred_at)))
+          ? new Date(ev.occurred_at).toISOString()
+          : new Date().toISOString();
+        // metadata is already redacted client-side to a bounded vocabulary; pass
+        // it through as-is (cap the serialized size as a backstop).
+        let metadata = (ev.metadata && typeof ev.metadata === 'object' && !Array.isArray(ev.metadata))
+          ? ev.metadata : undefined;
+        try { if (metadata && JSON.stringify(metadata).length > 4096) metadata = { truncated: true }; }
+        catch { metadata = undefined; }
+        console.log(JSON.stringify({
+          severity,
+          message: `onboarding ${milestone} ${type || ''}${status ? ' ' + status : ''}`.trim(),
+          logType: 'onboarding-milestone',
+          install_id: installId,
+          milestone,
+          type,
+          status,
+          code: str(ev.code, 80),
+          attempt: Number.isFinite(ev.attempt) ? ev.attempt : undefined,
+          metadata,
+          client_ts: ts,
+          'logging.googleapis.com/labels': { install_id: installId, log_type: 'onboarding-milestone', milestone },
+        }));
+        accepted += 1;
+      }
+      return json(res, { accepted });
+    }).catch(e => {
+      console.error('[installations/onboarding-events] handler error:', e.message);
+      return json(res, { error: e.message }, 400);
+    });
+  }
+
   // Auth: no-op when CLIENT_MODE is unset (local operator use).
   // When CLIENT_MODE=1, require a Firebase Bearer token and enforce admin/project claims.
   const av = await auth.verifyAuth(req, p);
@@ -4841,7 +5090,7 @@ async function handleApi(req, res) {
   if (p === '/api/logs' && req.method === 'GET') {
     const jobFilter = url.searchParams.get('job');
     try {
-      let files = fs.readdirSync(LOG_DIR)
+      let files = listLogDir()
         .filter(f => f.endsWith('.log') && !f.startsWith('launchd-'))
         .sort().reverse();
       if (jobFilter) {
@@ -4878,7 +5127,7 @@ async function handleApi(req, res) {
     const fname = decodeURIComponent(logFileMatch[1]);
     // Prevent path traversal
     if (fname.includes('..') || fname.includes('/')) return json(res, { error: 'Invalid' }, 400);
-    const fpath = path.join(LOG_DIR, fname);
+    const fpath = resolveLogPath(fname);
     try {
       const content = fs.readFileSync(fpath, 'utf8');
       // Return last 500 lines
@@ -4895,14 +5144,14 @@ async function handleApi(req, res) {
       'Connection': 'keep-alive',
     });
     // Find the most recent log file
-    const files = fs.readdirSync(LOG_DIR)
+    const files = listLogDir()
       .filter(f => f.endsWith('.log') && !f.startsWith('launchd-'))
       .sort().reverse();
     if (!files.length) {
       res.write('data: No log files found\n\n');
       return;
     }
-    const logFile = path.join(LOG_DIR, files[0]);
+    const logFile = resolveLogPath(files[0]);
     let pos = 0;
     try {
       const stat = fs.statSync(logFile);
@@ -5275,7 +5524,13 @@ async function handleApi(req, res) {
       "ORDER BY 1 DESC LIMIT 500) r";
     return (async () => {
       const rows = await pq(q);
-      let events = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      // See the comment on /api/activity/stats: pq() returns null specifically
+      // on a DB error, distinct from a genuinely empty result. Report that
+      // distinction instead of silently rendering "no activity".
+      if (rows === null) {
+        return json(res, { events: [], dbError: true });
+      }
+      let events = (rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
       // Non-admin: drop events not tagged with an allowed project (including
       // octolens mentions, which have no project column). Strip Claude cost
       // fields; cost is operator-internal (API spend not charged to clients).
@@ -5402,6 +5657,103 @@ async function handleApi(req, res) {
       );
       const row = rows && rows[0];
       return json(res, { row, action: row && row.inserted ? 'inserted' : 'updated' }, row && row.inserted ? 201 : 200);
+    }).catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // GET /api/installations/posting-mode
+  // Per-install posting-volume control (2026-07-13). Lists installs with
+  // twitter-candidate activity in the trailing 7 days, their stored
+  // posting_mode (high|medium|low|null = driver default), and a per-mode
+  // estimated posts/day: batches whose top candidate clears the mode's pool
+  // percentile, divided by 7 (matches the cycle's top-1-vs-bar mechanism).
+  // Mode -> percentile mapping lives in the website API
+  // (src/lib/api/posting-mode.ts); the numbers here are display-only.
+  // Scope is enforced IN SQL: admin sees all installs, a CLIENT_MODE user
+  // sees only installs whose git_email matches their login email.
+  if (p === '/api/installations/posting-mode' && req.method === 'GET') {
+    return (async () => {
+      const isAdmin = !!(req.user && req.user.admin);
+      const email = req.user && req.user.email ? String(req.user.email) : '';
+      if (!isAdmin && !email) return json(res, { rows: [] });
+      const rows = await pq(
+        "WITH pool AS ( " +
+        '  SELECT install_id::text AS iid, batch_id, virality_score AS v ' +
+        '  FROM twitter_candidates ' +
+        "  WHERE discovered_at > NOW() - INTERVAL '7 days' " +
+        '    AND virality_score IS NOT NULL AND install_id IS NOT NULL ' +
+        '), thr AS ( ' +
+        '  SELECT iid, ' +
+        '    percentile_cont(0.9)   WITHIN GROUP (ORDER BY v) AS t_high, ' +
+        '    percentile_cont(0.97)  WITHIN GROUP (ORDER BY v) AS t_medium, ' +
+        '    percentile_cont(0.995) WITHIN GROUP (ORDER BY v) AS t_low, ' +
+        '    COUNT(*)::int AS pool_n ' +
+        '  FROM pool GROUP BY iid ' +
+        '), bmax AS ( ' +
+        '  SELECT iid, batch_id, MAX(v) AS mx FROM pool GROUP BY iid, batch_id ' +
+        '), est AS ( ' +
+        '  SELECT b.iid, COUNT(*)::int AS batch_n, ' +
+        '    COUNT(*) FILTER (WHERE b.mx >= t.t_high)::int   AS pass_high, ' +
+        '    COUNT(*) FILTER (WHERE b.mx >= t.t_medium)::int AS pass_medium, ' +
+        '    COUNT(*) FILTER (WHERE b.mx >= t.t_low)::int    AS pass_low ' +
+        '  FROM bmax b JOIN thr t ON t.iid = b.iid ' +
+        '  GROUP BY b.iid ' +
+        ') ' +
+        'SELECT i.install_id, i.hostname, i.git_email, i.app_version, ' +
+        '  i.last_seen_at, i.posting_mode, t.pool_n, e.batch_n, ' +
+        '  e.pass_high, e.pass_medium, e.pass_low ' +
+        'FROM installations i ' +
+        'JOIN thr t ON t.iid = i.install_id ' +
+        'JOIN est e ON e.iid = i.install_id ' +
+        'WHERE ($1::text IS NULL OR lower(i.git_email) = lower($1)) ' +
+        'ORDER BY i.last_seen_at DESC NULLS LAST LIMIT 100',
+        [isAdmin ? null : email],
+      );
+      const out = (rows || []).map(r => ({
+        install_id: r.install_id,
+        hostname: r.hostname,
+        git_email: r.git_email,
+        app_version: r.app_version,
+        last_seen_at: r.last_seen_at,
+        // No user-visible "default" state (2026-07-14): unset = Steady.
+        mode: r.posting_mode || 'medium',
+        batch_count: Number(r.batch_n) || 0,
+        pool_count: Number(r.pool_n) || 0,
+        est_per_day: {
+          high: Math.round((Number(r.pass_high) / 7) * 10) / 10,
+          medium: Math.round((Number(r.pass_medium) / 7) * 10) / 10,
+          low: Math.round((Number(r.pass_low) / 7) * 10) / 10,
+        },
+      }));
+      return json(res, { rows: out, can_edit: true });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // POST /api/installations/posting-mode
+  // Body: { install_id, mode: 'high'|'medium'|'low'|null }. null clears the
+  // mode (driver default applies). Same SQL-enforced scope as the GET: a
+  // non-admin can only flip installs whose git_email matches their login.
+  if (p === '/api/installations/posting-mode' && req.method === 'POST') {
+    return readBody(req).then(async raw => {
+      let body;
+      try { body = JSON.parse(raw || '{}'); }
+      catch { return json(res, { error: 'invalid JSON' }, 400); }
+      const installId = String(body.install_id || '').trim();
+      const mode = body.mode === null || body.mode === undefined || body.mode === '' ? null : String(body.mode);
+      if (!installId) return json(res, { error: 'install_id required' }, 400);
+      if (mode !== null && !['high', 'medium', 'low'].includes(mode)) {
+        return json(res, { error: 'mode must be high | medium | low | null' }, 400);
+      }
+      const isAdmin = !!(req.user && req.user.admin);
+      const email = req.user && req.user.email ? String(req.user.email) : '';
+      if (!isAdmin && !email) return json(res, { error: 'forbidden' }, 403);
+      const rows = await pq(
+        'UPDATE installations SET posting_mode = $1 ' +
+        'WHERE install_id = $2 AND ($3::text IS NULL OR lower(git_email) = lower($3)) ' +
+        'RETURNING install_id, posting_mode',
+        [mode, installId, isAdmin ? null : email],
+      );
+      if (!rows || !rows.length) return json(res, { error: 'install not found or not yours' }, 404);
+      return json(res, { install_id: rows[0].install_id, mode: rows[0].posting_mode || null });
     }).catch(e => json(res, { error: e.message }, 500));
   }
 
@@ -5622,7 +5974,7 @@ async function handleApi(req, res) {
               ['RESEND_API_KEY missing in .env', drId]
             );
           } else {
-            const fromAddr = 'Social Autoposter <matt@mail.omi.me>';
+            const fromAddr = 'S4L <matt@mail.omi.me>';
             const subj = 'Deletion request: ' + (platform || 'unknown') + ' / ' +
               (project || 'unknown') + ' / ' + (kind || 'unknown') + ' #' + (recordId || '?');
             const occurredStr = occurredAt ? occurredAt.toISOString() : '(unknown)';
@@ -5777,6 +6129,11 @@ async function handleApi(req, res) {
         "GROUP BY pl2.post_id" +
       ") pl ON pl.post_id = posts.id " +
       "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+      // treatment_v4 Twitter posts carry no real style; they're stamped
+      // 'voice_first' (must match draft_prompt_core.STYLE_SENTINEL_TREATMENT)
+      // instead of NULL. Excluded here so it doesn't dominate this table at
+      // ~half of Twitter volume under a meaningless bucket.
+      "AND engagement_style IS DISTINCT FROM 'voice_first' " +
       platformFilter + projectFilter +
       "GROUP BY engagement_style ORDER BY posts DESC) r";
     // Return the full list of active platforms/projects in the window so the pill
@@ -6082,7 +6439,16 @@ async function handleApi(req, res) {
       ") u" + platformWhere + " GROUP BY type, platform ORDER BY type, platform) r";
     return (async () => {
       const rows = await pq(q);
-      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      // pq() returns null specifically on a DB error (vs [] for a genuinely
+      // empty result set) — see pq()'s comment. Conflating the two here used
+      // to cache a DB timeout as a confident "0 events" for 5 minutes and
+      // render it identically to a real quiet window (2026-07-08 incident:
+      // this is what made a live Cloud SQL outage look like normal dashboard
+      // data). Only cache and report zero on an actual successful query.
+      if (rows === null) {
+        return json(res, { windowHours, rows: [], dbError: true });
+      }
+      const value = (rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
       activityStatsCache.set(cacheKey, { at: Date.now(), value });
       return json(res, { windowHours, rows: value });
     })().catch(e => json(res, { error: e.message }, 500));
@@ -6464,6 +6830,108 @@ async function handleApi(req, res) {
           // Log but don't break the whole response if the tail-link block
           // fails; the first experiment is still useful on its own.
           console.error('[api/experiments] tail-link block failed:', e2 && e2.message || e2);
+        }
+
+        // twitter-draft-prompt (running 2026-06-29). Per-CYCLE arm assigned in
+        // run-twitter-cycle.sh; variant lives on posts.draft_prompt_variant.
+        // Whole prep batch shares one arm, so (like tail-link) there is no
+        // candidate-funnel axis: n_candidates == n_posted. Click attribution
+        // joins post_links + post_link_clicks (is_bot=false). 30-day window,
+        // mirroring the tail-link block exactly.
+        try {
+          const dpRows = await pq(`
+            SELECT p.draft_prompt_variant AS variant,
+                   COUNT(*) AS n_posts,
+                   AVG(p.views) AS avg_views,
+                   AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
+                   AVG(p.comments_count) AS avg_replies,
+                   COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+                   AVG(LENGTH(p.our_content)) AS avg_chars,
+                   STDDEV_POP(LENGTH(p.our_content)) AS sd_chars,
+                   COUNT(DISTINCT p.engagement_style) AS n_styles,
+                   MIN(p.posted_at) AS started_at
+            FROM posts p
+            LEFT JOIN (
+              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
+              FROM post_links pl2
+              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
+              WHERE pl2.post_id IS NOT NULL
+              GROUP BY pl2.post_id
+            ) pl ON pl.post_id = p.id
+            WHERE p.draft_prompt_variant IS NOT NULL
+              AND p.posted_at > NOW() - INTERVAL '30 days'
+              AND LOWER(CASE WHEN LOWER(p.platform)='x' THEN 'twitter' ELSE p.platform END) = 'twitter'
+              AND p.our_content <> '(mention - no original post)'
+            GROUP BY p.draft_prompt_variant
+          `, []);
+          const dpDefs = DRAFT_PROMPT_VARIANT_DEFS;
+          const dpVariants = ['treatment_v4', 'control_v4'].map(k => {
+            const row = (dpRows || []).find(r => r.variant === k) || {};
+            const n = Number(row.n_posts || 0);
+            return {
+              key: k,
+              label: dpDefs[k].label,
+              desc: dpDefs[k].desc,
+              n_candidates: n,
+              n_batches: null,
+              n_posted: n,
+              n_skipped: 0,
+              n_expired: 0,
+              n_pending: 0,
+              post_rate_pct: null,
+              thread_age_min_p50: null,
+              avg_views: row.avg_views != null ? Number(row.avg_views) : null,
+              avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
+              avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
+              avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              // Form-variance readout: the v3 hypothesis is that styles shape
+              // output, so per-arm length spread and style diversity are the
+              // leading indicators before engagement accumulates.
+              avg_chars: row.avg_chars != null ? Number(row.avg_chars) : null,
+              sd_chars: row.sd_chars != null ? Number(row.sd_chars) : null,
+              n_styles: row.n_styles != null ? Number(row.n_styles) : null,
+              started_at: row.started_at || null,
+            };
+          });
+          const dpTotals = dpVariants.reduce((acc, v) => {
+            acc.n_candidates += v.n_candidates;
+            acc.n_posted += v.n_posted;
+            return acc;
+          }, { n_candidates: 0, n_posted: 0, n_batches: null });
+          // Assignment weight read LIVE from .env (fraction to 'treatment').
+          // SAME source + SAME default as the actual routing in
+          // run-twitter-cycle.sh (TWITTER_DRAFT_PROMPT_AB_RATE, code default 0.5 =
+          // 50/50 everywhere so the control arm is always collected; changed from
+          // 1 on 2026-07-06 after the .env pin silently failed to propagate to the
+          // running env and dropped the holdback), so display and logic never
+          // diverge.
+          const dpRate = (() => {
+            const raw = (loadEnv().TWITTER_DRAFT_PROMPT_AB_RATE || '').trim();
+            if (raw === '') return 0.5;
+            const n = Number(raw);
+            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
+          })();
+          const dpWeightTreatment = Math.round(dpRate * 1000) / 10;
+          const dpWeightControl = Math.round((1 - dpRate) * 1000) / 10;
+          dpVariants.forEach(v => {
+            // Arm keys are versioned on experiment resets (treatment_v2, ...),
+            // so match by prefix, not equality.
+            v.weight_pct = /^treatment/.test(String(v.key)) ? dpWeightTreatment : dpWeightControl;
+          });
+          const dpStartedAt = dpVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+          experiments.push({
+            id: 'twitter-draft-prompt',
+            name: 'Twitter draft prompt v3 (style-as-form)',
+            status: 'running',
+            started_at: dpStartedAt,
+            hypothesis: 'Drafts converged to one shape regardless of assigned engagement style. v3 makes the style block load-bearing: the assigned style is the binding FORM (defining move, per-style length target, end-of-block self-check) and learned preferences apply INSIDE that form instead of overriding it; the v2 skeleton ban is kept in the treatment. If styles actually shape output, treatment should show more shape variance and better engagement (views, likes, replies). v2 (retired) only banned the antithesis skeleton; v1 (retired) only decoupled the product pivot. Reset to zero 2026-07-10.',
+            primary_metric: 'avg_replies',
+            progress: null,  // no fixed target
+            totals: dpTotals,
+            variants: dpVariants,
+          });
+        } catch (e4) {
+          console.error('[api/experiments] draft-prompt block failed:', e4 && e4.message || e4);
         }
 
         // Third experiment: ai-disclosure-suffix (campaigns.id=3,
@@ -8533,9 +9001,24 @@ async function handleApi(req, res) {
     // platforms_disabled is an explicit deny list (e.g. paperback-expert opts
     // out of moltbook because the HN audience isn't its ICP).
     const isDisabled = (p, plat) => Array.isArray(p.platforms_disabled) && p.platforms_disabled.includes(plat);
-    // search_topics is the single source of truth (post 2026-04-24 unified
-    // migration; legacy per-platform topic lists were removed 2026-04-30).
-    const hasSearchTopics = p => Array.isArray(p.search_topics) && p.search_topics.length > 0;
+    // Eligibility for the query-drafting platforms (twitter/linkedin/github) is
+    // gated on the LIVE topic universe the picker actually reads
+    // (project_search_topics, status='active'), NOT config.json's search_topics[]
+    // seed. The two can disagree: the seed can be present while the DB is empty
+    // (seed never mirrored into the DB) or the reverse (every topic decayed or
+    // excluded). The runtime picks on the DB (scripts/pick_project.py
+    // _eligible_pool -> topics_for_project), so the dashboard must too, or it
+    // shows a project as ready while the cycle silently skips it. (Capstacker
+    // 2026-06: config carried 33 topics, the DB had zero, the dashboard showed it
+    // eligible, and nothing ever posted.)
+    const topicRows = await pq(
+      "SELECT project_name, COUNT(*)::int AS n FROM project_search_topics " +
+      "WHERE status = 'active' GROUP BY project_name"
+    ) || [];
+    const activeTopicProjects = new Set(
+      topicRows.filter(r => Number(r.n) > 0).map(r => r.project_name)
+    );
+    const hasSearchTopics = p => activeTopicProjects.has(p.name);
     const platformEligible = {
       github:   p => !isDisabled(p, 'github')   && hasSearchTopics(p),
       twitter:  p => !isDisabled(p, 'twitter')  && hasSearchTopics(p),
@@ -8840,7 +9323,7 @@ const HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Social Autoposter</title>
+<title>S4L Admin</title>
 <script>
   // Apply persisted theme before first paint to avoid FOUC.
   (function() {
@@ -9564,6 +10047,7 @@ const HTML = `<!DOCTYPE html>
   .stats-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
   .stats-title { font-size: 13px; font-weight: 600; color: var(--text); text-transform: uppercase; letter-spacing: 0.05em; }
   .stats-total { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .stats-db-error { font-size: 12px; font-weight: 600; color: var(--text); background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; }
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
   .stat-card {
     background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
@@ -9847,7 +10331,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 
 <div class="header">
-  <h1>Social Autoposter</h1>
+  <h1>S4L Admin</h1>
   <div style="display:flex;align-items:center;gap:12px;">
     <button class="theme-toggle" id="global-refresh-btn" onclick="refreshAllData()" title="Refresh all data" aria-label="Refresh all data">
       <span id="global-refresh-icon" style="font-size:14px;line-height:1;">↻</span>
@@ -10011,6 +10495,7 @@ const HTML = `<!DOCTYPE html>
       <span class="stats-title" id="stats-title">Last 24 hours</span>
       <span class="stats-total" id="stats-total"></span>
     </div>
+    <div class="stats-db-error" id="stats-db-error" style="display:none">Database query failed &mdash; counts below may be stale or incomplete, not actually zero.</div>
     <div class="stats-grid" id="stats-grid"></div>
   </div>
   <details class="style-stats-section" id="cohort-stats" open>
@@ -10095,6 +10580,15 @@ const HTML = `<!DOCTYPE html>
       <span class="style-stats-total" id="subreddit-stats-total"></span>
     </summary>
     <div id="subreddit-stats-body">
+      <div class="style-stats-empty">Loading\u2026</div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="posting-volume">
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25b6</span>Posting Volume</span>
+      <span class="style-stats-total" id="posting-volume-total"></span>
+    </summary>
+    <div id="posting-volume-body">
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
@@ -10622,7 +11116,7 @@ function fmtInterval(secs) {
 
 let _initialized = false;
 const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub', 'Instagram'];
-const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Stats', 'Post Audit', 'Octolens'];
+const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Presence', 'Stats', 'Post Audit', 'Octolens'];
 
 function renderToggle(label, loaded) {
   return '<label class="toggle-switch" data-field="toggle" title="' + (loaded ? 'On — click to disable' : 'Off — click to enable') + '">' +
@@ -10900,6 +11394,42 @@ function renderResult(run) {
       pill('touched', r.total, 'var(--text)') +
       pill('success', r.success, '#9b9b9b') +
       pill('skipped', r.skipped, '#b2b2b2')
+    );
+  }
+  if (run.job_type === 'presence') {
+    const scanned = r.scanned || 0;
+    const checked = r.checked || 0;
+    const scan = (r.scan && typeof r.scan === 'object') ? r.scan : {};
+    const pages = scan.pages || scanned || 0;
+    const scrolls = scan.scrolls || 0;
+    const failed = r.failed || 0;
+    const reasons = Array.isArray(r.failure_reasons) ? r.failure_reasons : [];
+    const PNL = String.fromCharCode(10);
+    const tooltip =
+      '**Read-only presence pass**' + PNL +
+      PNL +
+      '• **pages:** ' + pages + PNL +
+      '• **scrolls:** ' + scrolls + PNL +
+      '• **checked:** ' + checked + PNL +
+      '• **failed:** ' + failed;
+    const renderFailedPill = () => {
+      if (!failed && !reasons.length) return '';
+      const top = reasons[0];
+      const tt = reasons.length
+        ? '**Failure reasons**' + PNL +
+          reasons.map(function (x) { return '• ' + x.reason + ' x **' + x.count + '**'; }).join(PNL)
+        : 'failed (no reason logged)';
+      const label = top ? ('failed: ' + top.reason) : 'failed';
+      return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        label + ' <span style="color: #686868;font-weight:600;">' + (failed || 1) + '</span></span>';
+    };
+    return (
+      '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
+        pill('pages', pages, pages > 0 ? 'var(--text)' : 'var(--muted)') +
+        pill('scrolls', scrolls, scrolls > 0 ? '#9b9b9b' : 'var(--muted)') +
+        renderFailedPill() +
+      '</span>'
     );
   }
   if (r.type === 'check-replies') {
@@ -12545,6 +13075,12 @@ async function loadExperiments() {
       // avg_clicks is populated only for the tail-link experiment; the
       // cycle_variant rows don't compute it and show "—".
       const clicks = v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014';
+      // avg_chars/sd_chars/n_styles come from the draft-prompt experiment
+      // (form-variance readout); other experiments leave them null.
+      const chars = v.avg_chars != null
+        ? Math.round(v.avg_chars) + (v.sd_chars != null ? '\u00b1' + Math.round(v.sd_chars) : '')
+        : '\u2014';
+      const styles = v.n_styles != null ? fmtIntK(v.n_styles) : '\u2014';
       // weight_pct is the configured assignment share (33.33 for ripen
       // ABC, 50 for the two coin-flip experiments). Shown next to the
       // actual share row above the table so operators can spot drift.
@@ -12562,6 +13098,8 @@ async function loadExperiments() {
           '<td class="num">' + fmtIntK(v.n_posted) + '</td>' +
           '<td class="num">' + postRate + '</td>' +
           '<td class="num">' + threadAge + '</td>' +
+          '<td class="num">' + chars + '</td>' +
+          '<td class="num">' + styles + '</td>' +
           '<td class="num">' + views + '</td>' +
           '<td class="num">' + likes + '</td>' +
           '<td class="num">' + replies + '</td>' +
@@ -12652,6 +13190,8 @@ async function loadExperiments() {
             '<th class="num">Posted</th>' +
             '<th class="num">Post rate</th>' +
             '<th class="num">Thread age @discover (p50)</th>' +
+            '<th class="num">Len avg±sd</th>' +
+            '<th class="num">Styles</th>' +
             '<th class="num">Views/post</th>' +
             '<th class="num">Likes/post</th>' +
             '<th class="num">Replies/post</th>' +
@@ -13434,7 +13974,17 @@ function syncStatusHeadings() {
 function renderActivityStats(payload) {
   const grid = document.getElementById('stats-grid');
   const totalEl = document.getElementById('stats-total');
+  const dbErrorEl = document.getElementById('stats-db-error');
   if (!grid) return;
+  // A DB query failure reports rows:[] with dbError:true (see /api/activity/stats).
+  // Treating that as "0 events" is exactly the 2026-07-08 masking bug: leave
+  // whatever was already on screen (stale-but-real data, or the loading state)
+  // and just surface the banner, instead of overwriting it with a confident zero.
+  if (payload && payload.dbError) {
+    if (dbErrorEl) dbErrorEl.style.display = '';
+    return;
+  }
+  if (dbErrorEl) dbErrorEl.style.display = 'none';
   const rows = (payload && payload.rows) || [];
   const hours = (payload && payload.windowHours) || 24;
   const byType = {};
@@ -13555,7 +14105,7 @@ async function loadActivityStats(force) {
     if (proj && proj !== 'all') params.push('project='  + encodeURIComponent(proj));
     const res = await fetch('/api/activity/stats?' + params.join('&'));
     const data = await res.json();
-    if (data && !data.error) statsCacheSet('activity', cacheKey, data);
+    if (data && !data.error && !data.dbError) statsCacheSet('activity', cacheKey, data);
     renderActivityStats(data);
   } catch {} finally {
     if (!haveStale && grid) grid.classList.remove('is-loading');
@@ -20367,6 +20917,81 @@ _saInstallDeleteListener();
   });
 })();
 
+// Posting Volume (2026-07-13): per-install 3-mode throttle for the twitter
+// cycle's virality bar. Modes are displayed as estimated posts/day (computed
+// per install from its own trailing-7d pool); the percentile mapping is
+// server-side. Setting a mode takes effect on the install's next cycle.
+async function loadPostingVolume() {
+  if (saAuthNotReady()) return;
+  const body = document.getElementById('posting-volume-body');
+  const total = document.getElementById('posting-volume-total');
+  if (!body) return;
+  try {
+    const res = await fetch('/api/installations/posting-mode');
+    const data = await res.json();
+    if (data.error) { body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(String(data.error)) + '</div>'; return; }
+    const rows = data.rows || [];
+    if (total) total.textContent = rows.length ? (rows.length + ' active install' + (rows.length === 1 ? '' : 's')) : '';
+    if (!rows.length) { body.innerHTML = '<div class="style-stats-empty">No installs with twitter activity in the last 7 days.</div>'; return; }
+    const fmtRate = v => (v === null || v === undefined || isNaN(v)) ? '?' : ('~' + (v >= 10 ? Math.round(v) : v) + '/day');
+    // User-facing names (2026-07-14): internal values stay high|medium|low
+    // (DB CHECK + API enum); only the labels are branded.
+    const modeLabel = { high: 'Aggressive', medium: 'Steady', low: 'Chill' };
+    const html = rows.map(r => {
+      const who = escapeHtml(r.hostname || r.install_id.slice(0, 8)) + (r.git_email ? ' <span style="color:var(--text-muted)">' + escapeHtml(r.git_email) + '</span>' : '');
+      const seen = r.last_seen_at ? new Date(r.last_seen_at).toISOString().slice(0, 10) : '?';
+      const opts = ['high', 'medium', 'low'].map(m => {
+        const label = modeLabel[m] + ' ' + fmtRate(r.est_per_day[m]);
+        const sel = r.mode === m ? ' selected' : '';
+        return '<option value="' + m + '"' + sel + '>' + label + '</option>';
+      }).join('');
+      const chips =
+        '<span class="style-stats-pill">aggressive ' + fmtRate(r.est_per_day.high) + '</span> ' +
+        '<span class="style-stats-pill">steady ' + fmtRate(r.est_per_day.medium) + '</span> ' +
+        '<span class="style-stats-pill">chill ' + fmtRate(r.est_per_day.low) + '</span>';
+      return '<div class="per-project-row" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border);">' +
+        '<span class="per-project-label" style="min-width:220px">' + who + '</span>' +
+        '<select data-install="' + escapeHtml(r.install_id) + '" class="posting-volume-select">' + opts + '</select>' +
+        '<span style="font-size:12px;color:var(--text-muted)">' + chips + ' · seen ' + seen + '</span>' +
+        '</div>';
+    }).join('');
+    body.innerHTML = '<div style="padding:4px 0 8px;font-size:12px;color:var(--text-muted)">Estimates replay each install’s last 7 days of cycles against its own candidate pool; a mode takes effect on the next cycle.</div>' + html;
+    body.querySelectorAll('.posting-volume-select').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const installId = sel.getAttribute('data-install');
+        const mode = sel.value || null;
+        sel.disabled = true;
+        try {
+          const r2 = await fetch('/api/installations/posting-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ install_id: installId, mode }),
+          });
+          const d2 = await r2.json();
+          if (d2.error) alert('Failed: ' + d2.error);
+          try { window.posthog && window.posthog.capture('posting_volume_change', { mode: mode || 'default' }); } catch (er) {}
+        } catch (e) {
+          alert('Failed: ' + (e && e.message || e));
+        } finally {
+          sel.disabled = false;
+          loadPostingVolume();
+        }
+      });
+    });
+  } catch (e) {
+    body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(String(e && e.message || e)) + '</div>';
+  }
+}
+
+(function wirePostingVolume() {
+  const el = document.getElementById('posting-volume');
+  if (!el) return;
+  el.addEventListener('toggle', () => {
+    try { window.posthog && window.posthog.capture('section_toggle', { section: 'posting-volume', open: !!el.open }); } catch (er) {}
+    if (el.open) loadPostingVolume();
+  });
+})();
+
 (function wireCostStats() {
   const el = document.getElementById('cost-stats');
   if (!el) return;
@@ -20790,9 +21415,32 @@ function _selfGet(host, port, reqPath, timeoutMs) {
 // python child per call; job-runs blocks the loop). One at a time keeps the
 // warm pass from starving real requests.
 async function _warmSequential(host, port, paths, timeoutMs) {
+  const summary = {
+    total: paths.length,
+    ok: 0,
+    fail: 0,
+    slow: 0,
+    failures: [],
+    elapsedMs: 0,
+  };
+  const started = Date.now();
   for (const reqPath of paths) {
-    try { await _selfGet(host, port, reqPath, timeoutMs); } catch {}
+    const reqStarted = Date.now();
+    let code = 0;
+    try { code = await _selfGet(host, port, reqPath, timeoutMs); } catch {}
+    const reqElapsed = Date.now() - reqStarted;
+    if (reqElapsed > 10000) summary.slow += 1;
+    if (code >= 200 && code < 400) {
+      summary.ok += 1;
+    } else {
+      summary.fail += 1;
+      if (summary.failures.length < 5) {
+        summary.failures.push({ path: reqPath, code, elapsedMs: reqElapsed });
+      }
+    }
   }
+  summary.elapsedMs = Date.now() - started;
+  return summary;
 }
 
 // Trends + Experiments: async-DB / child-process heavy but NOT main-thread
@@ -20806,7 +21454,7 @@ async function warmTrendsAndExperiments(host, port) {
     paths.push(`/api/funnel/per-day?days=${d}`);
     paths.push(`/api/cost/per-day?days=${d}`);
   }
-  await _warmSequential(host, port, paths, 120000);
+  return _warmSequential(host, port, paths, 120000);
 }
 
 // Job history: the cost-breakdown pass is O(runs*sessions) synchronous JS, so a
@@ -20815,19 +21463,46 @@ async function warmTrendsAndExperiments(host, port) {
 // pills (24h / 7d / 14d / 30d = 24 / 168 / 336 / 720 hours).
 async function warmJobRunsCache(host, port) {
   const paths = [24, 168, 336, 720].map(h => `/api/job-runs?hours=${h}`);
-  await _warmSequential(host, port, paths, 120000);
+  return _warmSequential(host, port, paths, 120000);
 }
 
 function startDashboardWarmers(host, port) {
   if (auth.CLIENT_MODE) return; // local operator dashboard only
-  const safe = (fn) => () => { try { fn(host, port).catch(() => {}); } catch {} };
+  const warmerSetting = String(process.env.S4L_DASHBOARD_WARMERS || '0').trim().toLowerCase();
+  if (['0', 'false', 'off', 'no'].includes(warmerSetting)) {
+    console.log('[warmer] dashboard cache warmers disabled by S4L_DASHBOARD_WARMERS');
+    return;
+  }
+  const inFlight = new Map();
+  const runWarmPass = (name, fn) => async () => {
+    const previous = inFlight.get(name);
+    if (previous) {
+      console.warn(`[warmer] ${name} skip; previous pass still running age=${Date.now() - previous}ms`);
+      return;
+    }
+    const started = Date.now();
+    inFlight.set(name, started);
+    try {
+      const summary = await fn(host, port);
+      const failures = summary && summary.failures && summary.failures.length
+        ? ` failures=${JSON.stringify(summary.failures)}`
+        : '';
+      const line = `[warmer] ${name} done elapsed=${Date.now() - started}ms total=${summary && summary.total || 0} ok=${summary && summary.ok || 0} fail=${summary && summary.fail || 0} slow=${summary && summary.slow || 0}${failures}`;
+      if (summary && summary.fail) console.warn(line);
+      else console.log(line);
+    } catch (e) {
+      console.warn(`[warmer] ${name} error elapsed=${Date.now() - started}ms: ${e && e.message || e}`);
+    } finally {
+      if (inFlight.get(name) === started) inFlight.delete(name);
+    }
+  };
   // Initial warm shortly after boot (staggered so they don't pile up).
-  setTimeout(safe(warmTrendsAndExperiments), 6000);
-  setTimeout(safe(warmJobRunsCache), 12000);
+  setTimeout(runWarmPass('trends-experiments', warmTrendsAndExperiments), 6000);
+  setTimeout(runWarmPass('job-runs', warmJobRunsCache), 12000);
   // Re-warm before the per-request caches expire. Trends/experiments use 5-min
   // caches -> refresh every 4 min. Job-runs uses a 10-min cache -> every 8 min.
-  setInterval(safe(warmTrendsAndExperiments), 4 * 60 * 1000);
-  setInterval(safe(warmJobRunsCache), 8 * 60 * 1000);
+  setInterval(runWarmPass('trends-experiments', warmTrendsAndExperiments), 4 * 60 * 1000);
+  setInterval(runWarmPass('job-runs', warmJobRunsCache), 8 * 60 * 1000);
   console.log('[warmer] dashboard cache warmers started (job-history, trends, experiments)');
 }
 
@@ -20876,7 +21551,7 @@ function tryListen(port, maxAttempts = 10) {
   const host = auth.CLIENT_MODE ? '0.0.0.0' : '127.0.0.1';
   server.listen(port, host, () => {
     const actualPort = server.address().port;
-    console.log(`Social Autoposter dashboard running at http://${host}:${actualPort}`);
+    console.log(`S4L Admin dashboard running at http://${host}:${actualPort}`);
     if (!auth.CLIENT_MODE) {
       const { platform } = os;
       const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';

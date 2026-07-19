@@ -35,7 +35,7 @@ mkdir -p "$LOG_DIR"
 PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.11}"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="/usr/bin/python3"
 
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_DIR/web-chat.log"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG_DIR/web-chat.log"; }
 
 # Step 1: query Postgres for unread threads.
 CHATS=$("$PYTHON_BIN" "$SCRIPTS_DIR/check_unread_web_chats.py" 2>>"$LOG_DIR/web-chat.log")

@@ -57,12 +57,21 @@ import audience_pages as audience_pages_mod  # noqa: E402
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 GENERATE_PAGE = os.path.join(REPO_DIR, "seo", "generate_page.py")
+LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 GEN_TIMEOUT_SEC = 3600  # 60 min per page; observed legit runs take 45-50 min
                         # (pre-Claude inventory + decision + improve/new pipeline +
                         # deploy verify). Don't lower without re-measuring.
 MAX_AB_HITS_PER_CYCLE = 2  # cap cumulative gen budget at ~2 x 60 min worst case
                            # so cycle has room under the 180-min watchdog cap.
+
+# Per-candidate tail-link bridge call budget (see apply_tail_link below). This
+# stage already has a 60-min phase budget (SEO page-gen alone can take 10-40
+# min), so a few minutes of queue latency per candidate fits comfortably even
+# in the degenerate case where every call times out waiting for the s4l-worker
+# scheduled task (~N x this value, bounded and still well under 60 min for a
+# normal-sized batch).
+LINK_TAIL_TIMEOUT_SEC = 180
 
 # A/B gate: per-candidate coin flip for the page-gen lane. 0.25 means 25% of
 # eligible candidates (project has landing_pages config + LLM provided
@@ -94,6 +103,134 @@ def load_projects() -> dict:
     with open(CONFIG_PATH) as f:
         cfg = json.load(f)
     return {p["name"]: p for p in cfg.get("projects", [])}
+
+
+def parse_last_json_object(text):
+    """Extract the last balanced top-level JSON object from a string.
+
+    Mirrors twitter_post_plan.py's helper of the same name (link_tail.py's
+    only contract is "print one JSON object to stdout"; this defends against
+    stray log lines sharing stdout).
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+    matches = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    matches.append(text[start:i + 1])
+                    start = None
+    for cand in reversed(matches):
+        try:
+            return json.loads(cand)
+        except Exception:
+            continue
+    return None
+
+
+def _tail_link_rate() -> float:
+    # DRAFT_ONLY=1 candidates always go through a human-approval review card
+    # (run-draft-and-publish.sh exports DRAFT_ONLY before invoking the cycle
+    # that calls this script). Force rate=1.0 there so a hand-approved draft
+    # never drops the link the user already saw baked into the card text —
+    # ported from the old post-time override in mcp/src/index.ts
+    # (`TWITTER_TAIL_LINK_RATE: "1.0"` on the approve_drafts path), which no
+    # longer fires now that the decision happens here, before the card is
+    # ever shown. The autonomous DRAFT_ONLY=0 lane keeps running the real A/B
+    # experiment at the configured rate.
+    if os.environ.get("DRAFT_ONLY") == "1":
+        return 1.0
+    try:
+        return float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
+    except ValueError:
+        return 0.5
+
+
+def apply_tail_link(candidate: dict, link_url: str) -> None:
+    """Fold `link_url` into candidate['reply_text'] via the Claude bridge
+    (scripts/link_tail.py), moved here from twitter_post_plan.py's post-time
+    path on 2026-07-06.
+
+    Why here: this is Phase 2b-gen, which already runs BEFORE the DRAFT_ONLY
+    gate (both the review-card path and the autonomous-post path pass through
+    twitter_gen_links.py first) and already budgets long waits (SEO page-gen
+    alone can take 10-40 min). twitter_post_plan.py's post-time call was a bad
+    fit for the queue-backed pipeline: approve_drafts is a synchronous MCP call
+    the user is actively waiting on after clicking Approve, while the
+    s4l-worker scheduled task claims one job per minute and doesn't overlap a
+    multi-minute drafting turn — so a queue-routed call there could stall an
+    approval for minutes. Doing it here means the review card already shows
+    the finalized text (bridge + link, or intentionally no link on the
+    no_link A/B arm) and post time just ships it verbatim.
+
+    Stamps tail_link_variant + link_tail_outcome on `candidate` so
+    twitter_post_plan.py can detect this candidate is already finalized and
+    skip its own (now fallback-only) tail-link block.
+
+    Idempotent: a candidate that already carries tail_link_variant is a
+    no-op. Guards against any re-run of this stage over the same candidate
+    (retry, salvage, plan re-merge) re-rolling the decision and re-appending
+    link_url onto a reply_text that already has it baked in.
+    """
+    if not link_url or candidate.get("tail_link_variant"):
+        return
+    rate = _tail_link_rate()
+    add_link = random.random() < rate
+    candidate["tail_link_variant"] = "link" if add_link else "no_link"
+    if not add_link:
+        print(f"[gen] candidate_id={candidate.get('candidate_id')} "
+              f"tail_link: ab_no_link (rate={rate})", flush=True)
+        return
+    reply_text = (candidate.get("reply_text") or "").strip()
+    cmd = [
+        "python3", LINK_TAIL,
+        "--reply-text", reply_text,
+        "--link-url", link_url,
+        "--thread-text", candidate.get("thread_text") or "",
+        "--project", candidate.get("matched_project") or "",
+        "--platform", "twitter",
+        "--timeout", str(LINK_TAIL_TIMEOUT_SEC),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=LINK_TAIL_TIMEOUT_SEC + 30)
+        rc, out = r.returncode, r.stdout
+    except subprocess.TimeoutExpired:
+        candidate["reply_text"] = f"{reply_text} {link_url}".strip()
+        candidate["link_tail_outcome"] = "hard_timeout"
+        print(f"[gen] candidate_id={candidate.get('candidate_id')} "
+              f"link_tail: hard_timeout; keeping mechanical concat", flush=True)
+        return
+    obj = parse_last_json_object(out) or {}
+    if obj.get("text"):
+        candidate["reply_text"] = obj["text"]
+        if obj.get("model_call_ok") and not obj.get("fallback_used"):
+            outcome = "bridge_generated"
+        else:
+            outcome = f"fallback:{(obj.get('error') or 'unknown')[:60]}"
+    else:
+        # link_tail.py is supposed to ALWAYS return JSON; if we got nothing,
+        # hard-fall-back to the mechanical concat so the card still shows a
+        # complete draft (link still present) instead of a bare reply.
+        candidate["reply_text"] = f"{reply_text} {link_url}".strip()
+        outcome = f"hard_fallback_no_json:rc={rc}"
+    candidate["link_tail_outcome"] = outcome
+    print(f"[gen] candidate_id={candidate.get('candidate_id')} "
+          f"link_tail: {outcome} (elapsed={obj.get('elapsed_sec')}s)", flush=True)
 
 
 def run_generate(product: str, keyword: str, slug: str) -> tuple[str, str]:
@@ -171,6 +308,14 @@ def resolve_link(candidate: dict, projects: dict, page_gen_rate: float) -> tuple
     """
     proj_name = candidate.get("matched_project") or ""
     proj = projects.get(proj_name) or {}
+    # Personal-brand (persona) lane is link-free by definition. Self-promotion
+    # mode is pure organic engagement: no company, no signup, no profile URL. Any
+    # `website`/`url` a persona project happens to carry (some installs got the
+    # user's own X profile written there) must NEVER become a tail link. Enforce
+    # it here at the single source so no downstream surface (review card, manual
+    # approve_drafts) has to strip a link that should never have been generated.
+    if proj.get("persona"):
+        return ("", "persona_no_link")
     plain_url = proj.get("website") or proj.get("url") or ""
     has_lp = bool(candidate.get("has_landing_pages"))
     keyword = (candidate.get("link_keyword") or "").strip()
@@ -268,6 +413,7 @@ def main() -> int:
         c["link_source"] = source
         print(f"[gen] candidate_id={c.get('candidate_id')} "
               f"link_url={link_url!r} source={source}", flush=True)
+        apply_tail_link(c, link_url)
 
     plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
     print(f"[gen] plan rewritten with link_url for {len(candidates)} candidates",

@@ -15,8 +15,8 @@ Why a separate rail and not piggyback on post_links:
 
 Schema mirrors post_links shape:
   newsletter_links: one row per (broadcast x recipient x URL). Code is
-    the short-link primary key. broadcast_id is opaque to SAPS (analytics
-    owns it; SAPS just stores it). recipient_email_hash = sha256(lower(email))[:16]
+    the short-link primary key. broadcast_id is opaque to S4L (analytics
+    owns it; S4L just stores it). recipient_email_hash = sha256(lower(email))[:16]
     so we keep per-recipient attribution without storing raw emails.
   newsletter_link_clicks: one row per /r/<code> hit. Same is_bot split
     as post_link_clicks / dm_link_clicks.

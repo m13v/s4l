@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 const { spawnSync } = require('child_process');
 
-const platform = require('./platform');
 const scheduler = require('./scheduler');
 const { formatDoctorReport, runDoctorSync } = require('../mcp/shared/doctor.cjs');
 const { recordDoctorReport } = require('../mcp/shared/onboarding-ledger.cjs');
@@ -84,7 +83,7 @@ function findUvBin() {
   return found && fs.existsSync(found) ? found : '';
 }
 
-// Locate the Python the MCP server is actually configured to run (SAPS_PYTHON).
+// Locate the Python the MCP server is actually configured to run (S4L_PYTHON).
 // mcp/install.mjs picks /opt/homebrew/bin/python3 (or /usr/local/bin/python3)
 // and stamps it into the MCP config, so Python deps MUST be installed into that
 // SAME interpreter. Bare `pip3`/`python3` on macOS usually resolves to the
@@ -428,6 +427,53 @@ function installBrowserHarness() {
     if (reset.status !== 0) {
       console.warn('    WARNING: could not reset browser-harness clone to pinned commit; using existing checkout.');
     }
+    // Vendored fix on top of the pin (keep in sync with runtime.ts): loopback
+    // CDP requests must never route through a proxy — macOS system proxy
+    // settings leak into urllib's default opener and a box-wide forwarder
+    // 403s every 127.0.0.1 probe (2026-07-13). Applied at install time since
+    // we don't control the upstream repo. If it stops applying, upstream has
+    // either merged the fix (detected; fine) or refactored (warn); never fail
+    // the install over it.
+    // Vendored fixes applied on top of the pin (we don't control upstream).
+    // Each: patch file + a sentinel (file, substring) that means "already
+    // present" (upstream merged it, or we applied it) so a non-applying patch
+    // only warns when the fix is genuinely absent. NEVER fail the install.
+    const vendoredPatches = [
+      {
+        file: 'browser-harness-loopback-cdp-proxy.patch',
+        sentinelFile: path.join('src', 'browser_harness', 'admin.py'),
+        sentinelStr: 'cdp_urlopen',
+        label: 'loopback-proxy',
+        absentWarn: 'CDP probes may 403 behind a system proxy',
+      },
+      {
+        // Suppress OS-focus-stealing Target.activateTarget on offscreen
+        // automation harnesses (twitter/reddit/linkedin) — the shared fix for
+        // the 2026-07 Chrome focus-pops. See helpers.py _is_offscreen_harness.
+        file: 'browser-harness-focus-and-observability.patch',
+        sentinelFile: path.join('src', 'browser_harness', 'helpers.py'),
+        sentinelStr: '_is_offscreen_harness',
+        label: 'focus-suppression + tab-event observability',
+        absentWarn: 'harness Chrome may steal OS focus on every tab switch',
+      },
+    ];
+    for (const p of vendoredPatches) {
+      const patchPath = path.join(PKG_ROOT, 'scripts', 'patches', p.file);
+      if (!fs.existsSync(patchPath)) continue;
+      const chk = spawnSync('git', ['-C', harnessDir, 'apply', '--check', patchPath], { stdio: 'pipe' });
+      if (chk.status === 0) {
+        spawnSync('git', ['-C', harnessDir, 'apply', patchPath], { stdio: 'inherit' });
+        console.log(`    applied ${p.label} patch to browser-harness`);
+      } else {
+        let present = false;
+        try {
+          present = fs.readFileSync(path.join(harnessDir, p.sentinelFile), 'utf-8').includes(p.sentinelStr);
+        } catch { /* file moved — fall through to the warning */ }
+        if (!present) {
+          console.warn(`    WARNING: browser-harness ${p.label} patch no longer applies and the fix is absent upstream; ${p.absentWarn}.`);
+        }
+      }
+    }
   };
   if (!fs.existsSync(harnessDir)) {
     fs.mkdirSync(path.dirname(harnessDir), { recursive: true });
@@ -487,7 +533,7 @@ function installBrowserHarness() {
 
   // Step 4: ensure mcp Python package available (server.py uses `from mcp.server.fastmcp ...`).
   // server.py is shebanged through `uv run --with mcp ...` so this is belt-and-suspenders;
-  // we install it into the SAPS_PYTHON interpreter (the same Homebrew python the MCP
+  // we install it into the S4L_PYTHON interpreter (the same Homebrew python the MCP
   // server is configured to use), NOT bare pip3 which targets the Xcode CLT system python.
   const harnessPython = findPythonBin();
   console.log(`    ensuring mcp>=1.0.0 Python package is importable (${harnessPython})...`);
@@ -591,9 +637,9 @@ function generatePlists() {
       stderrLog: `${DEST}/skill/logs/launchd-self-update-stderr.log`,
     },
     {
-      // On-screen overlay watcher supervisor. The overlay (harness status banner
-      // + interactive draft sidebar) only renders WHILE harness_overlay.py watch
-      // runs. The supervisor is idempotent (pgrep guard), so a 60s StartInterval
+      // On-screen overlay watcher supervisor. The overlay (harness status banner)
+      // only renders WHILE harness_overlay.py watch runs. The supervisor is
+      // idempotent (pgrep guard), so a 60s StartInterval
       // is a no-op while the watcher is up and re-spawns it within a minute if it
       // ever dies. RunAtLoad starts it right after install. This is what makes the
       // overlay appear on headless / remote installs (Lane A); the MCP covers the
@@ -606,92 +652,25 @@ function generatePlists() {
       stdoutLog: `${DEST}/skill/logs/launchd-overlay-watch-stdout.log`,
       stderrLog: `${DEST}/skill/logs/launchd-overlay-watch-stderr.log`,
     },
+    {
+      // Read-only LinkedIn presence lane. Uses the same linkedin-harness Chrome
+      // and browser locks as the main LinkedIn pipelines, but only views first-
+      // party surfaces and performs bounded scroll passes.
+      file: 'com.m13v.social-linkedin-presence.plist',
+      label: 'com.m13v.social-linkedin-presence',
+      script: `${DEST}/skill/linkedin-presence.sh`,
+      interval: 7200,
+      runAtLoad: false,
+      stdoutLog: `${DEST}/skill/logs/launchd-linkedin-presence-stdout.log`,
+      stderrLog: `${DEST}/skill/logs/launchd-linkedin-presence-stderr.log`,
+    },
   ];
 
   const driver = scheduler.driverFor();
   const env = driver.defaultEnv({ home: HOME, nodeBin });
-  const kind = platform.scheduler();
-  const outDir = path.join(DEST, kind === 'systemd' ? 'systemd' : 'launchd');
+  const outDir = path.join(DEST, 'launchd');
   driver.generate({ jobs, outDir, env });
-  console.log(`  generated ${kind} units at ${outDir}`);
-}
-
-// On Linux we translate every shipped launchd plist into a systemd
-// .service + .timer pair at install time. Plists remain the source of truth
-// so the macOS pipeline is untouched; the systemd/ dir is derived.
-function generateSystemdFromPlists() {
-  const launchdDriver = scheduler.driverFor('launchd');
-  const systemdDriver = scheduler.driverFor('systemd');
-  const srcDir = path.join(DEST, 'launchd');
-  const outDir = path.join(DEST, 'systemd');
-  if (!fs.existsSync(srcDir)) return 0;
-  const plists = fs.readdirSync(srcDir).filter(f => f.endsWith('.plist'));
-  const nodeBin = path.dirname(process.execPath);
-  const env = systemdDriver.defaultEnv({ home: HOME, nodeBin });
-
-  const jobs = [];
-  let skipped = 0;
-  for (const f of plists) {
-    const xml = fs.readFileSync(path.join(srcDir, f), 'utf8');
-    const { label, scriptPath } = launchdDriver.parseUnit(xml);
-    if (!label || !scriptPath) { skipped++; continue; }
-    const sched = launchdDriver.scheduleFromUnit(xml);
-    if (!sched.intervalSecs) {
-      console.log(`  skip ${f}: calendar schedule not yet translated to OnCalendar`);
-      skipped++;
-      continue;
-    }
-    // Plists ship with the publisher's absolute paths baked in. Rebuild
-    // paths against the current user's DEST so any user on any host gets
-    // correct units without us having to re-ship plists per install target.
-    const scriptBase = path.basename(scriptPath);
-    const stdoutMatch = (xml.match(/<key>StandardOutPath<\/key>\s*<string>([^<]+)<\/string>/) || [])[1];
-    const stderrMatch = (xml.match(/<key>StandardErrorPath<\/key>\s*<string>([^<]+)<\/string>/) || [])[1];
-    const shortLabel = label.replace(/^com\.m13v\.social-/, '');
-    const stdout = `${DEST}/skill/logs/${stdoutMatch ? path.basename(stdoutMatch) : `launchd-${shortLabel}-stdout.log`}`;
-    const stderr = `${DEST}/skill/logs/${stderrMatch ? path.basename(stderrMatch) : `launchd-${shortLabel}-stderr.log`}`;
-    const runAtLoad = /<key>RunAtLoad<\/key>\s*<true\s*\/>/.test(xml);
-    jobs.push({
-      file: f,
-      label,
-      script: `${DEST}/skill/${scriptBase}`,
-      interval: sched.intervalSecs,
-      runAtLoad,
-      stdoutLog: stdout,
-      stderrLog: stderr,
-    });
-  }
-  systemdDriver.generate({ jobs, outDir, env });
-  console.log(`  translated ${jobs.length} launchd plists -> systemd units (skipped ${skipped})`);
-  return jobs.length;
-}
-
-// Link every DEST/systemd/*.{service,timer} into ~/.config/systemd/user/ and
-// reload the user daemon. Caller is expected to `systemctl --user enable --now
-// <timer>` for each timer they actually want running; this mirrors how macOS
-// setup leaves loading to the user via the SKILL.md wizard.
-function installSystemdUnits() {
-  const driver = scheduler.driverFor('systemd');
-  const unitDir = path.join(DEST, 'systemd');
-  const agentsDir = platform.agentsDir();
-  if (!fs.existsSync(unitDir)) return;
-  fs.mkdirSync(agentsDir, { recursive: true });
-  const services = fs.readdirSync(unitDir).filter(f => f.endsWith('.service'));
-  let linked = 0;
-  for (const f of services) {
-    if (driver.install(path.join(unitDir, f), agentsDir)) linked++;
-  }
-  const r = spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8' });
-  if (r.status === 0) {
-    console.log(`  linked ${linked} unit pair(s) into ${agentsDir}; systemctl --user daemon-reload OK`);
-  } else {
-    console.warn(`  linked ${linked} unit pair(s); daemon-reload failed: ${(r.stderr || '').trim()}`);
-  }
-  const linger = spawnSync('loginctl', ['show-user', os.userInfo().username, '--property=Linger'], { encoding: 'utf8' });
-  if (!/Linger=yes/.test(linger.stdout || '')) {
-    console.log('  note: run `sudo loginctl enable-linger $USER` so timers fire when nobody is logged in');
-  }
-  console.log('  next: systemctl --user enable --now <timer> for each job you want scheduled');
+  console.log(`  generated launchd units at ${outDir}`);
 }
 
 function init() {
@@ -714,13 +693,6 @@ function init() {
 
   // Generate launchd plists with user's actual HOME
   generatePlists();
-
-  // On Linux, derive systemd units from every plist and link them into
-  // ~/.config/systemd/user/. macOS install is unchanged.
-  if (platform.scheduler() === 'systemd') {
-    generateSystemdFromPlists();
-    installSystemdUnits();
-  }
 
   // Provision the browser-harness toolchain BEFORE writing harness configs so
   // findUvBin() picks up a freshly-installed uv on first run.
@@ -768,7 +740,7 @@ function init() {
   console.log('');
   console.log('Done! Next steps:');
   console.log('  1. Fully quit and relaunch Claude so the MCP loads');
-  console.log('  2. Tell your Claude agent: "set me up on social-autoposter end to end"');
+  console.log('  2. Tell your Claude agent: "set me up on social-autoposter plugin end to end"');
   console.log('     The agent will configure the product, connect X, seed topics, and verify a draft cycle');
   console.log('  3. Posts and all pipeline state sync via the s4l.ai HTTP API (no Postgres required)');
 }
@@ -800,12 +772,6 @@ function update() {
 
   // Regenerate launchd plists with correct paths
   generatePlists();
-
-  // Refresh systemd units on Linux so plist changes propagate.
-  if (platform.scheduler() === 'systemd') {
-    generateSystemdFromPlists();
-    installSystemdUnits();
-  }
 
   // Provision browser-harness (uv + clone + uv tool install + mcp pkg + server.py).
   // Idempotent: skips steps that are already done.
@@ -852,7 +818,7 @@ function installPythonDeps() {
   const args = fs.existsSync(reqPath)
     ? ['-r', reqPath, '-q']
     : ['-q', 'playwright'];
-  // Install into the SAME interpreter the MCP server runs (SAPS_PYTHON =
+  // Install into the SAME interpreter the MCP server runs (S4L_PYTHON =
   // Homebrew python), NOT bare pip3 which on macOS targets the Xcode CLT system
   // python — deps installed there are invisible to the scripts at runtime.
   // pipInstall() also gates --break-system-packages on pip>=23 so it doesn't
@@ -903,6 +869,29 @@ function installMcp() {
     console.log('  stamped MCP version', pkgVersion);
   } catch (e) {
     console.warn('  WARNING: could not stamp MCP version:', e && e.message);
+  }
+  // Auto-opt a fresh install into the staging channel when the version being
+  // installed is itself a pre-release (-rc.N) — e.g. `npx social-autoposter@
+  // X.Y.Z-rc.N init`. Without this, channel.json stays absent, which
+  // scripts/s4l_channel.py's fail-safe default reads as "stable", so the box
+  // would install this one rc and then silently stop tracking staging (never
+  // pick up the next rc). Mirrors the same one-time write in
+  // mcp/src/runtime.ts's provision() for the .mcpb (Desktop) install path.
+  // Only writes when no channel marker exists yet — never overrides an
+  // existing preference (e.g. a user who already opted back out).
+  try {
+    const pkgVersion = require('../package.json').version;
+    if (pkgVersion.includes('-rc.')) {
+      const stateDir = process.env.S4L_STATE_DIR || path.join(os.homedir(), '.social-autoposter-mcp');
+      const channelPath = path.join(stateDir, 'channel.json');
+      if (!fs.existsSync(channelPath)) {
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.writeFileSync(channelPath, JSON.stringify({ channel: 'staging' }, null, 2) + '\n');
+        console.log('  pre-release install detected -> opted into the staging channel');
+      }
+    }
+  } catch (e) {
+    console.warn('  WARNING: could not set staging channel:', e && e.message);
   }
   console.log('  installing MCP runtime deps (npm install --omit=dev in mcp/)');
   const npmRes = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
@@ -1000,8 +989,10 @@ function installRuntime() {
 // autoposter-mcp), packaged Chrome profiles + imported cookies, the browser-
 // harness clone/CLI/server.py, the global npm package, and the MCP registration.
 // DEFAULT IS A DRY RUN (prints what WOULD be removed); pass --yes to apply, and
-// --deep to also remove the shared uv toolchain + Chromium cache. Forwarding to
-// the shell script keeps npm and .mcpb installs behaving identically.
+// --deep to also remove the shared uv toolchain + Chromium cache. The script's
+// one standard path quits Claude Desktop, wipes, settles, then relaunches
+// Claude Desktop fresh. Forwarding to the shell script keeps npm and .mcpb
+// installs behaving identically.
 function reset() {
   const script = path.join(PKG_ROOT, 'scripts', 'reset-test-machine.sh');
   if (!fs.existsSync(script)) {

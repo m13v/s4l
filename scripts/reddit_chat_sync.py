@@ -48,17 +48,16 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-OUR_USERNAME = "Deep_Ad1959"
-_config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
-if os.path.exists(_config_path):
-    try:
-        with open(_config_path) as f:
-            _cfg = json.load(f)
-        OUR_USERNAME = (
-            _cfg.get("accounts", {}).get("reddit", {}).get("username", OUR_USERNAME)
-        )
-    except Exception:
-        pass
+# Our Reddit username via the ONE resolver (env -> reddit_account login truth ->
+# accounts.reddit.username). "" means "unknown account" rather than impersonating
+# the repo owner when no reddit account is configured.
+try:
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from account_resolver import resolve as _resolve_account
+    OUR_USERNAME = _resolve_account("reddit") or ""
+except Exception:
+    OUR_USERNAME = ""
 
 _LOCK_SESSION_ID = f"python:{os.getpid()}"
 

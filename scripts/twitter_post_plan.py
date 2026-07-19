@@ -43,15 +43,93 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_DIR = os.path.expanduser("~/social-autoposter")
+
+def _neuter_stream(stream) -> None:
+    """Point a dead pipe's fd at /dev/null so later writes (including the
+    interpreter-shutdown flush) can't raise BrokenPipeError again."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stream.fileno())
+        os.close(devnull)
+    except Exception:
+        pass
+
+
+_builtin_print = print
+
+
+def print(*args, **kwargs):  # noqa: A001 -- deliberate builtins.print shadow
+    # When the parent (cycle shell tree or MCP server) is killed mid-batch, our
+    # stdout/stderr pipes close and the next print raises BrokenPipeError. The
+    # old behavior unwound through excepthook (Sentry S4L-8), killing the batch
+    # BETWEEN posting a reply and recording it — which is how live tweets ended
+    # up unlogged and candidates re-feedable. Output to a dead parent is
+    # worthless; the bookkeeping (log_post, update_candidate, audit JSONL) is
+    # not. Swallow the error, neuter the fds, keep going.
+    try:
+        _builtin_print(*args, **kwargs)
+    except BrokenPipeError:
+        _neuter_stream(sys.stdout)
+        _neuter_stream(sys.stderr)
+
+
+# Graceful SIGTERM: the MCP approve_drafts timeout (and anything else that asks
+# nicely before SIGKILL) sends SIGTERM. Dying instantly reopens the same
+# posted-but-unrecorded window as the broken pipe, so instead flag the loop to
+# stop at the next candidate boundary: current candidate finishes its
+# bookkeeping, the summary and audit line still get written, exit stays 0.
+_terminate_requested = False
+
+
+def _on_sigterm(signum, frame):
+    global _terminate_requested
+    _terminate_requested = True
+    print("[post] SIGTERM received; stopping after current candidate", flush=True)
+
+
+signal.signal(signal.SIGTERM, _on_sigterm)
+
+# This pipeline ONLY posts (never scans), so mark every twitter_browser.py reply
+# subprocess it spawns as the high-priority "post" lock role. run_subprocess
+# inherits this process env, so the child twitter_browser.py reads S4L_LOCK_ROLE
+# at import and will PREEMPT a live scan holding the browser lock instead of
+# losing the 45s wait. Covers BOTH the MCP approve path and the cron post path,
+# since both shell out to this script. Set before any child is spawned.
+os.environ["S4L_LOCK_ROLE"] = "post"
+
+# Resolve the repo root the way the rest of the pipeline does (run_claude.sh,
+# identity.py): S4L_REPO_DIR when the caller sets it, else this script's own
+# parent tree. The old hardcoded ~/social-autoposter pointed OUTSIDE the
+# managed package on customer boxes, so every child spawned below
+# (twitter_browser.py, log_post.py, ...) ran code auto-update could never
+# reach (S4L-4H triage 2026-07-12, Karol's install).
+REPO_DIR = (
+    os.environ.get("S4L_REPO_DIR")
+    or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 TWITTER_BROWSER = os.path.join(REPO_DIR, "scripts", "twitter_browser.py")
 LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
+
+# Interpreter every child subprocess (twitter_browser.py reply, log_post.py,
+# campaign_bump.py, link_tail.py) must run under. The reply path is the only
+# Playwright importer in the pipeline, so a bare "python3" here silently
+# resolved to the user's system python (no Playwright) and every post died
+# with no_reply_json (Karol, 2026-06-22). Honor the authoritative pin the rest
+# of the runtime uses — S4L_PYTHON (set by the launchd plist) — then fall back
+# to sys.executable (the interpreter THIS process already runs under, which the
+# MCP's runPython resolves to the owned uv runtime). Never the literal
+# "python3": that re-rolls the PATH dice. Re-exported so grandchildren inherit.
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 
 # DATABASE_URL was previously used to issue ad-hoc `psql -c "..."` calls for
 # the pre-post dedup probe and the candidate status updates. As of the
@@ -82,6 +160,18 @@ try:
     from engagement_styles import validate_or_register  # noqa: E402
 except Exception:
     validate_or_register = None  # type: ignore[assignment]
+
+# Reasons that signal an OPERATIONAL post failure (browser/session/API broke),
+# as opposed to a content-judgment skip ("off-topic ..."). Some of these are
+# bucketed as `skipped` in the run summary (e.g. reply_box_not_found) so they do
+# not pollute the dashboard "failed" pill, but for remote observability they ARE
+# the signal that a user "approved but couldn't post" — so we capture them to
+# Sentry regardless of which summary bucket they land in.
+MACHINE_FAIL_REASONS = {
+    "no_reply_json", "reply_failed", "timeout", "unknown", "exception",
+    "log_post_no_id", "reply_box_not_found", "rate_limited", "tweet_not_found",
+    "no_reply_url_captured", "empty_reply_text", "session_invalid",
+}
 
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
 TOP_LEVEL_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
@@ -390,15 +480,35 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     outcome: 'posted' | 'skipped' | 'failed'
     reason:  short failure key when outcome != 'posted', else ''.
 
-    picker_assignment: optional {assigned_style, assigned_mode} dict
-        sourced from the plan envelope. When present, drives the
-        validate_or_register call below so USE-mode drift coerces back
-        and INVENT-mode new_style blocks land in
+    picker_assignment: optional {assigned_style, assigned_mode} dict for
+        THIS candidate (per-candidate override when the plan carries one,
+        else the plan-level fallback, see call site in main()). When
+        present, drives the validate_or_register call below so USE-mode
+        drift coerces back and INVENT-mode new_style blocks land in
         engagement_styles_registry. None means legacy behaviour
         (uncoerced; whatever the model said is what gets logged).
     """
     cid = int(c["candidate_id"])
     candidate_url = c["candidate_url"]
+    # Prompt-sandbox hard stop (2026-07-15): a sandbox replay of historical
+    # threads (run-twitter-cycle.sh's S4L_SANDBOX_CANDIDATES_FILE) must NEVER
+    # reach a real post, full stop -- unconditionally, regardless of
+    # DRAFT_ONLY. Found live: a direct interactive invocation without
+    # DRAFT_ONLY=1 ran straight through to this function and only missed a
+    # real post because already_posted_to_thread() below happened to catch
+    # it (the specific historical candidate had already been replied to for
+    # real in the past); a --status pending sandbox candidate would NOT have
+    # been caught by that check and WOULD have posted for real. This check
+    # is the actual gate; the menu-bar "block Approve on sandbox cards" rail
+    # only protects the DRAFT_ONLY/human-review path and never covers this
+    # direct-post path at all.
+    if (c.get("experiments") or {}).get("sandbox"):
+        print(
+            f"[post] candidate {cid}: sandbox candidate, refusing to post "
+            f"(thread={candidate_url})",
+            flush=True,
+        )
+        return ("skipped", "sandbox_no_post")
     reply_text = (c.get("reply_text") or "").strip()
     link_url = (c.get("link_url") or "").strip()
     project = c["matched_project"]
@@ -406,7 +516,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     thread_text = c.get("thread_text") or ""
     # Engagement-style enforcement (2026-05-22 cutover). Twitter is now
     # symmetric with Reddit/GitHub/Moltbook: the draft phase pre-picks an
-    # assignment via saps_pick_style; the post phase calls
+    # assignment via s4l_pick_style; the post phase calls
     # validate_or_register(decision, assigned_style=..., assigned_mode=...)
     # which coerces USE drift back to the assigned name OR registers
     # INVENT inventions into engagement_styles_registry via
@@ -502,59 +612,69 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         update_candidate(cid, "skipped")
         return ("skipped", "duplicate_thread_pre_post")
 
-    # CTA bridge generation: instead of bolting `link_url` onto `reply_text`
-    # with a space (the old `f"{reply_text} {link_url}"`), call link_tail.py
-    # which spawns one Claude call (default smart model, NOT Haiku) to write
-    # a 1-sentence bridge that names a concrete benefit and ends in the URL.
-    # On any failure (timeout, model error, output fails sanity gate) the
-    # script returns the mechanical concat as a fallback, so this code path
-    # is always tolerant of model failure.
-    #
-    # AB TEST — tail link on/off:
-    # TWITTER_TAIL_LINK_RATE (float 0..1, default 0.5) controls the fraction
-    # of posts that receive a tail link. Setting it to 1.0 restores old
-    # behavior (always add link). Setting it to 0.0 disables links entirely.
-    # tail_link_variant is logged to posts.tail_link_variant so the dashboard
-    # can compare engagement across arms.
-    _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
-    _add_tail_link = link_url and (random.random() < _tail_link_rate)
-    tail_link_variant: str | None = None
-    if link_url:
-        tail_link_variant = "link" if _add_tail_link else "no_link"
+    # CTA bridge generation. 2026-07-06: moved from HERE (post time) to
+    # twitter_gen_links.py's Phase 2b-gen step (draft time). Phase 2b-gen runs
+    # BEFORE the DRAFT_ONLY gate for every candidate, so both the review-card
+    # path and the autonomous-post path already carry a stamped
+    # tail_link_variant + finalized reply_text by the time they reach here.
+    # Post time is a bad fit for the queue-backed Claude call: approve_drafts is
+    # a synchronous MCP call the user is actively waiting on after clicking
+    # Approve, while the s4l-worker scheduled task claims one job per minute
+    # and doesn't overlap a multi-minute drafting turn, so a queue-routed call
+    # here could stall an approval for minutes. This block is now a FALLBACK
+    # for a candidate that somehow reaches post time unstamped (e.g. a plan
+    # already in flight from before this change).
+    tail_link_variant = c.get("tail_link_variant")
     full_text = reply_text
-    link_tail_outcome = "skipped_no_link"
-    if _add_tail_link:
-        rc, out, err = run_subprocess(
-            ["python3", LINK_TAIL,
-             "--reply-text", reply_text,
-             "--link-url", link_url,
-             "--thread-text", thread_text or "",
-             "--project", project,
-             "--platform", "twitter",
-             "--timeout", "120"],
-            timeout_sec=180,
-        )
-        tail_obj = parse_last_json_object(out) or {}
-        if tail_obj.get("text"):
-            full_text = tail_obj["text"]
-            if tail_obj.get("model_call_ok") and not tail_obj.get("fallback_used"):
-                link_tail_outcome = "bridge_generated"
+    if tail_link_variant is not None:
+        link_tail_outcome = c.get("link_tail_outcome") or "applied_at_draft_time"
+        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+              f"(already finalized at draft time, tail_link_variant={tail_link_variant})",
+              flush=True)
+    else:
+        # AB TEST — tail link on/off:
+        # TWITTER_TAIL_LINK_RATE (float 0..1, default 0.5) controls the fraction
+        # of posts that receive a tail link. Setting it to 1.0 restores old
+        # behavior (always add link). Setting it to 0.0 disables links entirely.
+        # tail_link_variant is logged to posts.tail_link_variant so the dashboard
+        # can compare engagement across arms.
+        _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
+        _add_tail_link = link_url and (random.random() < _tail_link_rate)
+        if link_url:
+            tail_link_variant = "link" if _add_tail_link else "no_link"
+        link_tail_outcome = "skipped_no_link"
+        if _add_tail_link:
+            rc, out, err = run_subprocess(
+                [PYTHON, LINK_TAIL,
+                 "--reply-text", reply_text,
+                 "--link-url", link_url,
+                 "--thread-text", thread_text or "",
+                 "--project", project,
+                 "--platform", "twitter",
+                 "--timeout", "120"],
+                timeout_sec=180,
+            )
+            tail_obj = parse_last_json_object(out) or {}
+            if tail_obj.get("text"):
+                full_text = tail_obj["text"]
+                if tail_obj.get("model_call_ok") and not tail_obj.get("fallback_used"):
+                    link_tail_outcome = "bridge_generated"
+                else:
+                    link_tail_outcome = f"fallback:{tail_obj.get('error', 'unknown')[:60]}"
             else:
-                link_tail_outcome = f"fallback:{tail_obj.get('error', 'unknown')[:60]}"
-        else:
-            # link_tail.py is supposed to ALWAYS return JSON; if we got
-            # nothing, hard-fall-back to the mechanical concat to preserve
-            # prior behavior (post still ships, link still on the wire).
-            full_text = f"{reply_text} {link_url}".strip()
-            link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
-        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
-              f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
-    elif link_url and not _add_tail_link:
-        # No-link arm of the AB test: post the reply text as-is (no CTA bridge,
-        # no URL). Log the outcome so the dashboard can tally the arm.
-        link_tail_outcome = "ab_no_link"
-        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
-              f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
+                # link_tail.py is supposed to ALWAYS return JSON; if we got
+                # nothing, hard-fall-back to the mechanical concat to preserve
+                # prior behavior (post still ships, link still on the wire).
+                full_text = f"{reply_text} {link_url}".strip()
+                link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
+            print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+                  f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
+        elif link_url and not _add_tail_link:
+            # No-link arm of the AB test: post the reply text as-is (no CTA bridge,
+            # no URL). Log the outcome so the dashboard can tally the arm.
+            link_tail_outcome = "ab_no_link"
+            print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+                  f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
 
     # URL-wrap the text BEFORE handing it to twitter_browser. The browser
     # script appends the campaign suffix internally; suffixes are plain
@@ -589,7 +709,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
 
     print(f"[post] candidate {cid} -> posting (link={link_url!r})", flush=True)
     rc, out, err = run_subprocess(
-        ["python3", TWITTER_BROWSER, "reply", candidate_url, full_text],
+        [PYTHON, TWITTER_BROWSER, "reply", candidate_url, full_text],
         timeout_sec=600,
     )
     if err:
@@ -603,7 +723,14 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     if not parsed.get("ok"):
         reason = parsed.get("error") or "no_reply_json"
         print(f"[post] candidate {cid} reply failed: {reason}", flush=True)
-        if reason in ("rate_limited", "tweet_not_found", "reply_box_not_found"):
+        if reason in ("rate_limited", "tweet_not_found", "reply_box_not_found",
+                      "reply_restricted", "tweet_unavailable", "blocked_by_author"):
+            # reply_restricted / tweet_unavailable / blocked_by_author are
+            # PERMANENT, thread-intrinsic conditions (the author limits who can
+            # reply, the tweet is gone, or the author has blocked our account):
+            # record the specific skip_reason so discovery can suppress the thread
+            # (and, for restrictions/blocks, the author) and never burn another
+            # draft re-attempting it.
             update_candidate(cid, "skipped", reason)
             return ("skipped", reason)
         # everything else (incl. timeout, parse errors): the reply did NOT
@@ -615,6 +742,18 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
 
     reply_url = parsed.get("reply_url") or ""
     final_text = parsed.get("final_text") or full_text
+    # Edited-tweet redirect (2026-07-06): reply_to_tweet may have followed the
+    # "See the latest post" banner and replied to a NEWER status id than the
+    # candidate's. Its payload carries the URL it actually replied to; adopt it
+    # so posts.thread_url, the top-replies snapshot, and the
+    # already_posted_to_thread dedup guard all key to the REAL thread instead
+    # of the stale pre-edit permalink.
+    _replied_url = parsed.get("tweet_url") or ""
+    if _replied_url and _replied_url != candidate_url:
+        print(f"[post] candidate {cid} reply landed on edited-tweet latest "
+              f"version: {_replied_url} (candidate had {candidate_url})",
+              flush=True)
+        candidate_url = _replied_url
     applied_campaigns = parsed.get("applied_campaigns") or []
     # Snapshot the top human replies on the thread at post-success time.
     # twitter_browser.reply_to_tweet scrapes them while the page is still on
@@ -633,11 +772,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
             flush=True,
         )
     else:
-        print(
-            f"[like] candidate {cid} parent tweet NOT liked: "
-            f"{like_result.get('error', 'unknown')}",
-            flush=True,
-        )
+        err = str(like_result.get("error", "unknown")).splitlines()[0]
+        print(f"[like] candidate {cid} parent tweet not liked (non-fatal): {err}", flush=True)
 
     if not reply_url or not REPLY_URL_RE.match(reply_url):
         # Reply was likely sent (browser action returned ok=True with verified)
@@ -655,6 +791,11 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         update_candidate(cid, "skipped", "no_reply_url_captured")
         return ("skipped", "no_reply_url_captured")
 
+    # Stash the live URL on the candidate NOW, before the posts-row INSERT:
+    # main() needs it for candidate_results and the durable audit line even
+    # when log_post.py fails below (the reply is already live on X).
+    c["our_url"] = reply_url
+
     # Insert the post row.
     # Pass --account explicitly so log_post.py stamps posts.our_account with
     # this machine's configured Twitter handle (e.g. `m13v_` on the local
@@ -666,7 +807,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     from twitter_account import resolve_handle as _resolve_twitter_handle
 
     log_args = [
-        "python3", LOG_POST,
+        PYTHON, LOG_POST,
         "--platform", "twitter",
         "--thread-url", candidate_url,
         "--our-url", reply_url,
@@ -690,19 +831,30 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         log_args += ["--search-topic", search_topic]
     if tail_link_variant:
         log_args += ["--tail-link-variant", tail_link_variant]
+    # Draft-prompt A/B arm: assigned ONCE per cycle in run-twitter-cycle.sh and
+    # persisted onto the plan candidate's `experiments` dict at plan-write time
+    # (scripts/active_experiments.py). That stamp is the ONLY source here — env
+    # is deliberately NOT consulted (2026-07-07): this poster runs in two homes,
+    # inside the cycle (autopilot) and spawned by the MCP server for approved
+    # cards (no cycle env), and reading env made the queue-review lane stamp
+    # NULL while autopilot stamped the arm, silently dropping the human-review
+    # lane from the experiment readout.
+    draft_prompt_variant = (c.get("experiments") or {}).get("draft_prompt")
+    if draft_prompt_variant:
+        log_args += ["--draft-prompt-variant", draft_prompt_variant]
     # LENGTH A/B concluded 2026-06-04; future production posts are no longer
     # stamped into posts.length_arm so the archived experiment readout stays
     # frozen to the actual test window.
     # Generation trace: run-twitter-cycle.sh writes a snapshot of the
     # cycle's few-shot context (top_performers, top_queries, supply
     # signal, dud queries) to a tempfile and exports the path via
-    # SAPS_TWITTER_GEN_TRACE_PATH. Forward to log_post.py so every
+    # S4L_TWITTER_GEN_TRACE_PATH. Forward to log_post.py so every
     # post landed this cycle gets posts.generation_trace JSONB pointing
     # to the same snapshot. Same trace for every post in this run
     # because they all saw the same Phase 2b-prep context. The env var
     # is missing/empty when run-twitter-cycle.sh's trace step failed —
     # in that case we just skip the flag and the row gets NULL trace.
-    trace_path = os.environ.get("SAPS_TWITTER_GEN_TRACE_PATH") or ""
+    trace_path = os.environ.get("S4L_TWITTER_GEN_TRACE_PATH") or ""
     if trace_path and os.path.isfile(trace_path):
         log_args += ["--generation-trace", trace_path]
 
@@ -749,7 +901,23 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         # logging outages (e.g. the /api/v1/posts 5000/24h rate-limit cap)
         # behind a benign-looking metric.
         update_candidate(cid, "skipped", "log_post_no_id")
-        return ("failed", "log_post_no_id")
+        # 2026-07-06 incident hardening: the server-side 'skipped' flip alone
+        # did NOT stop retries — the menu-bar card lane re-fed the batch
+        # because nothing told it the reply was live (8 approved cards were
+        # re-posted into X's duplicate guard after a posts-API 400).
+        # Three belts now:
+        #   1. Stash the exact log_post.py argv so the posts row can be
+        #      replayed once the API accepts it (restores the
+        #      already_posted_to_thread dedup guard).
+        #   2. Print the "posted as" line the mcp outcome parsers (old and
+        #      new) recognize, so the CARD is marked posted and never re-fed.
+        #   3. Return the posted_unlogged sentinel: main() still counts it in
+        #      `failed` (the dashboard must surface the logging outage) but
+        #      reports the card as posted in candidate_results.
+        _stash_pending_post_log(cid, reply_url, log_args, out, err)
+        print(f"[post] candidate {cid} posted as {reply_url} "
+              f"(post_id=unlogged; posts-row backfill pending)", flush=True)
+        return ("posted_unlogged", "log_post_no_id")
 
     # Stamp post_links.post_id for the URLs minted at wrap time. Idempotent;
     # no-op when minted_session is None (no URLs in the original text).
@@ -764,7 +932,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # Campaign attribution.
     for ccid in applied_campaigns:
         rc, out, err = run_subprocess(
-            ["python3", CAMPAIGN_BUMP, "--table", "posts",
+            [PYTHON, CAMPAIGN_BUMP, "--table", "posts",
              "--id", str(post_id), "--campaign-id", str(ccid)],
             timeout_sec=30,
         )
@@ -776,7 +944,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # Mark link_edited_at: link is embedded in primary reply, no self-reply
     # will follow. Prevents link-edit-twitter sweep from re-attempting.
     rc, out, err = run_subprocess(
-        ["python3", LOG_POST,
+        [PYTHON, LOG_POST,
          "--mark-self-reply",
          "--post-id", str(post_id),
          "--self-reply-url", reply_url,
@@ -792,6 +960,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
                             matched_project=project, search_topic=search_topic)
     print(f"[post] candidate {cid} posted as {reply_url} (post_id={post_id})",
           flush=True)
+    # (our_url was already stashed on the candidate right after reply_url
+    # validation, so the audit line has it even on log_post failure paths.)
 
     # Persist the human-top-replies snapshot via the s4l.ai routes. We POST
     # even when top_replies is empty so posts.top_replies_captured_at is
@@ -841,6 +1011,69 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     return ("posted", "")
 
 
+def _stash_pending_post_log(cid, reply_url, log_args, out, err) -> None:
+    """The reply landed on X but the posts-API INSERT failed, so the posts row
+    (and with it the already_posted_to_thread dedup guard + stats) is missing.
+    Persist the exact log_post.py argv so the row can be replayed later —
+    log_post.py is idempotent per thread (DUPLICATE_THREAD returns the existing
+    post_id), so replaying is always safe. Best-effort: never affects the run.
+
+    Replay: <runtime python> scripts/log_post.py <argv...> from the package dir.
+    """
+    try:
+        path = os.path.join(REPO_DIR, "skill", "logs", "pending-post-logs.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "at": datetime.now(timezone.utc).isoformat(),
+                "candidate_id": cid,
+                "reply_url": reply_url,
+                # Drop the interpreter; keep script path + flags.
+                "log_post_argv": [str(a) for a in log_args[1:]],
+                "stdout_tail": (out or "")[-500:],
+                "stderr_tail": (err or "")[-500:],
+            }) + "\n")
+        print(f"[post] candidate {cid} pending posts-row logged to {path}",
+              flush=True)
+    except Exception as e:
+        print(f"[post] candidate {cid} WARNING: pending-post-log stash failed "
+              f"({e})", flush=True)
+
+
+def _s4l_state_dir() -> str:
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".social-autoposter-mcp")
+
+
+def _write_activity(label: str) -> None:
+    """Best-effort live status for the S4L menu bar, which polls
+    <state_dir>/activity.json. Mirrors the Node server's writeActivity shape so
+    the menu-bar spinner renders our per-post progress ("posting +3 · 4/10",
+    then "posting +3 ✓ · 4/10"). Purely cosmetic: a failure here never affects
+    posting."""
+    try:
+        sd = _s4l_state_dir()
+        os.makedirs(sd, exist_ok=True)
+        payload = {"state": "working", "label": label,
+                   "since": datetime.now(timezone.utc).isoformat()}
+        with open(os.path.join(sd, "activity.json"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def _clear_activity() -> None:
+    """Remove our status so neither an early exit nor the cron path (which does
+    NOT go through the MCP runTool's clear) leaves a stale 'posting/posted' stuck
+    in the menu bar. Double-clearing with runTool is harmless."""
+    try:
+        p = os.path.join(_s4l_state_dir(), "activity.json")
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True,
@@ -874,13 +1107,14 @@ def main() -> int:
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     # Pull the picker assignment from the plan envelope (written by
-    # run-twitter-cycle.sh after saps_pick_style). Shared across every
-    # candidate in the batch because the picker fires once per cycle.
-    # Falls back to None on legacy plans (pre-2026-05-22 envelopes that
-    # don't carry these keys); post_one then runs the legacy uncoerced
-    # path. Empty assigned_style + assigned_mode='invent' means the
-    # picker rolled INVENT this cycle; validate_or_register treats that
-    # as "register if the model produced a well-formed new_style block".
+    # run-twitter-cycle.sh after s4l_pick_style). This is the PLAN-LEVEL
+    # fallback, used verbatim for legacy plans (pre-2026-05-22 envelopes, or
+    # any candidate missing a per-candidate assignment) and as the last
+    # resort in the per-candidate override below. Falls back to None on
+    # legacy plans that don't carry these keys; post_one then runs the
+    # legacy uncoerced path. Empty assigned_style + assigned_mode='invent'
+    # means the picker rolled INVENT this cycle; validate_or_register treats
+    # that as "register if the model produced a well-formed new_style block".
     picker_assignment = {
         "assigned_style": plan.get("assigned_style") or None,
         "assigned_mode":  plan.get("assigned_mode")  or None,
@@ -892,6 +1126,12 @@ def main() -> int:
               flush=True)
 
     posted = skipped = failed = 0
+    # Per-candidate outcome rows for the summary JSON. The MCP layer
+    # (mcp/src/index.ts approve_drafts) prefers summary.candidate_results over
+    # regex-parsing our stdout; this is the authoritative channel that marks
+    # review-queue cards posted/terminal so a card is never re-fed to a poster
+    # after its reply already landed (2026-07-06 duplicate-retry incident).
+    candidate_results: list[dict] = []
     # Split skip vs fail reasons. The dashboard renders `failure_reasons` as
     # a "failed: <reason>" pill, so intentional skips (duplicate_thread_pre_post,
     # empty_reply_text, rate_limited, tweet_not_found, reply_box_not_found,
@@ -920,26 +1160,186 @@ def main() -> int:
                   f"approved in plan (pass --post-unapproved to override)", flush=True)
         candidates = _kept
 
-    for c in candidates:
+    # Hard preflight: the reply path (twitter_browser.py) imports Playwright,
+    # the only such importer in the pipeline. If the resolved interpreter can't
+    # import it, EVERY post dies with no_reply_json because the owned runtime is
+    # missing or half-provisioned (Karol, 2026-06-22). Fail LOUD here with a
+    # distinct signal instead of attempting posts that silently no-op. Gated on
+    # there being real work, so a no-op / all-skipped plan still exits clean.
+    if candidates:
+        _chk = subprocess.run(
+            [PYTHON, "-c", "import playwright"],
+            capture_output=True, text=True,
+        )
+        if _chk.returncode != 0:
+            print(f"[post] FATAL runtime_incomplete: interpreter {PYTHON!r} cannot "
+                  f"import playwright — the owned Python runtime is missing or "
+                  f"unprovisioned. Run the `runtime` install (action:'install') "
+                  f"before posting. stderr: {(_chk.stderr or '').strip()[:300]}",
+                  file=sys.stderr, flush=True)
+            print(json.dumps({
+                "posted": 0,
+                "skipped": 0,
+                "failed": len(candidates),
+                "failure_reasons": "runtime_incomplete",
+                "skip_reasons": "",
+            }), flush=True)
+            return 3
+
+    _total = len(candidates)
+
+    # ---- Batch-level browser-lock hold (cross-process posting priority) --------
+    # Hold the Twitter browser lock for the WHOLE approved batch instead of
+    # re-acquiring it per candidate. Per-candidate acquisition freed the lock in
+    # the gap between replies (dominated by link_tail's `claude -p` call, ~5-20s),
+    # and the autopilot scan fires every 60s, so a scan kept slipping into that gap
+    # and seizing the browser mid-batch -- the exact "posting gets cut off" symptom
+    # on the remote box. Acquiring ONCE here PREEMPTS any live scan (role:"post"
+    # priority) and, by exporting our session id as S4L_LOCK_OWNER, makes every
+    # child twitter_browser.py reply INHERIT this hold rather than contend for it,
+    # closing the gap. The hold is bounded by the posting-specific POST_LOCK_EXPIRY
+    # failsafe in twitter_browser (a hung poster self-clears in <=180s; a crashed
+    # one frees instantly via dead-pid reclaim), so it can never wedge the browser
+    # indefinitely. Best-effort: if the import or acquire fails we simply fall back
+    # to the legacy per-candidate acquisition (children still preempt scans one by
+    # one), so posting degrades gracefully and is never blocked by this addition.
+    _tb = None
+    _batch_lock_held = False
+    if candidates:
         try:
-            outcome, reason = post_one(c, picker_assignment=picker_assignment)
-        except Exception as e:
-            print(f"[post] candidate {c.get('candidate_id')} crashed: {e}",
+            import twitter_browser as _tb  # S4L_LOCK_ROLE=post already set above
+            _tb._acquire_browser_lock()    # preempts a live scan; sys.exit(1) if contended
+            # _MUTEX.session_id, NOT the pre-2026-07-14 module global
+            # _LOCK_SESSION_ID: the mutex refactor (db02eed1) removed that
+            # symbol, and the stale reference made this line raise
+            # AttributeError on EVERY batch. The parent then held the lock it
+            # had just acquired while its own children (unable to inherit,
+            # forbidden to preempt a post-role holder) each burned the full
+            # 45s wait and failed, until the 180s POST_LOCK_EXPIRY freed the
+            # tail: operator-box posting fell ~95% for two days (S4L-62).
+            os.environ["S4L_LOCK_OWNER"] = _tb._MUTEX.session_id
+            _batch_lock_held = True
+            print(f"[post] batch lock held by {_tb._MUTEX.session_id} (role=post); "
+                  f"{_total} candidate(s) inherit it", flush=True)
+        except SystemExit:
+            # _acquire_browser_lock exits when a LIVE non-preemptable peer (another
+            # poster) holds the lock past LOCK_WAIT_MAX. Don't abort the whole run:
+            # drop to per-candidate acquisition (each child still preempts scans).
+            print("[post] batch lock contended; per-candidate acquisition in effect",
                   flush=True)
-            outcome, reason = ("failed", "exception")
-            cid = c.get("candidate_id")
-            if isinstance(cid, int):
-                update_candidate(cid, "skipped", "exception")
-        if outcome == "posted":
-            posted += 1
-        elif outcome == "skipped":
-            skipped += 1
-            if reason:
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-        else:
-            failed += 1
-            if reason:
-                fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+        except Exception as _e:
+            print(f"[post] batch lock setup skipped ({_e}); per-candidate "
+                  "acquisition in effect", flush=True)
+
+    try:
+        for _idx, c in enumerate(candidates, start=1):
+            if _terminate_requested:
+                print(f"[post] stopping early on SIGTERM: {_idx - 1}/{_total} "
+                      f"candidates processed, posted={posted}", flush=True)
+                break
+            # Live per-post status for the S4L menu bar. LEAD with `posted` (the
+            # REAL count of replies that actually landed), not `_idx` (the loop
+            # position). _idx races through already-posted / deleted cards as instant
+            # dedup-skips, so a bare "posting 88/139" looked like 88 were sent when
+            # 0 were — misleading on every restart. "+{posted}" keeps the honest
+            # number in front; the position is secondary context. The label MUST
+            # keep the "posting" prefix: the menu bar detects a live drain by that
+            # substring (s4l_menubar _compute_posting_label / _spin).
+            _write_activity(f"posting +{posted} · {_idx}/{_total}")
+            # Re-stamp the batch hold at each candidate boundary so the
+            # POST_LOCK_EXPIRY failsafe measures silence from the LAST real
+            # progress, not from batch start. Insurance on top of the child's own
+            # inherit-refresh: keeps the hold fresh even across a candidate that
+            # skips before ever spawning a reply subprocess (empty_reply_text,
+            # pre-post dedup). Cheap; never raises.
+            if _batch_lock_held and _tb is not None:
+                try:
+                    _tb._refresh_browser_lock()
+                except Exception:
+                    pass
+            try:
+                # Two-draft cards (2026-07-07): each candidate may carry its OWN
+                # (assigned_style, assigned_mode) reflecting whichever draft is
+                # actually posting, either the recommended one (stamped at
+                # plan-write time) or the other one (stamped by the MCP
+                # approve_drafts edits path when a human switched drafts on the
+                # review card). Without this, every card would coerce back to
+                # ONE cycle-wide style even when it posted under the other
+                # style, silently corrupting the engagement_style label the
+                # picker's performance stats are learned from. Falls back to
+                # the plan-level assignment for any candidate/plan that
+                # predates this (assigned_mode key absent).
+                if "assigned_mode" in c:
+                    _cand_assignment = {
+                        "assigned_style": c.get("assigned_style"),
+                        "assigned_mode": c.get("assigned_mode"),
+                    }
+                else:
+                    _cand_assignment = picker_assignment
+                outcome, reason = post_one(c, picker_assignment=_cand_assignment)
+            except Exception as e:
+                print(f"[post] candidate {c.get('candidate_id')} crashed: {e}",
+                      flush=True)
+                outcome, reason = ("failed", "exception")
+                cid = c.get("candidate_id")
+                if isinstance(cid, int):
+                    update_candidate(cid, "skipped", "exception")
+            if outcome == "posted":
+                posted += 1
+                # Flash the confirmation with a short dwell so the menu bar shows
+                # it before the next iteration's "posting" overwrites the label.
+                # `posted` was just incremented, so it reflects the reply that landed.
+                _write_activity(f"posting +{posted} ✓ · {_idx}/{_total}")
+                time.sleep(0.6)
+            elif outcome == "skipped":
+                skipped += 1
+                if reason:
+                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            else:
+                # 'failed' and 'posted_unlogged' both count as failed for the
+                # dashboard: posted_unlogged means the reply IS live on X but
+                # the posts-row INSERT failed, which is a logging outage that
+                # must stay visible (posted=0, failed=N), not a silent skip.
+                failed += 1
+                if reason:
+                    fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+            # Card-level outcome: posted_unlogged maps to 'posted' so the MCP
+            # layer marks the card done and never re-posts a live reply.
+            candidate_results.append({
+                "candidate_id": c.get("candidate_id"),
+                "outcome": "posted" if outcome == "posted_unlogged" else outcome,
+                "reason": reason or "",
+                "our_url": c.get("our_url") or "",
+            })
+            # Per-candidate durable record: the run-level audit at the bottom of
+            # main() is lost if this process is SIGKILLed mid-batch (browser-lock
+            # hijack), leaving no local trace of what already posted. Separate
+            # file from post-results.jsonl on purpose: that one is run-level and
+            # the menu bar/dashboard parse it; don't mix schemas.
+            try:
+                _prog_path = os.path.join(
+                    REPO_DIR, "skill", "logs", "post-candidates.jsonl")
+                with open(_prog_path, "a", encoding="utf-8") as _pf:
+                    _pf.write(json.dumps({
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "plan": plan_path.name,
+                        **candidate_results[-1],
+                    }) + "\n")
+            except Exception:
+                pass
+    finally:
+        _clear_activity()
+        # Release the batch hold so the next scan/post can take the browser
+        # immediately (don't make peers wait out POST_LOCK_EXPIRY). _tb's atexit
+        # is a backstop if we somehow skip this; clearing S4L_LOCK_OWNER stops a
+        # late child from re-inheriting a lock we just dropped.
+        if _batch_lock_held and _tb is not None:
+            try:
+                _tb._release_browser_lock()
+            except Exception:
+                pass
+            os.environ.pop("S4L_LOCK_OWNER", None)
+            print("[post] batch lock released", flush=True)
 
     summary = {
         "posted": posted,
@@ -947,7 +1347,68 @@ def main() -> int:
         "failed": failed,
         "failure_reasons": ",".join(f"{k}:{v}" for k, v in fail_reasons.items()),
         "skip_reasons":    ",".join(f"{k}:{v}" for k, v in skip_reasons.items()),
+        # Authoritative per-candidate outcomes for the MCP card layer (see the
+        # candidate_results declaration above). Outcome 'posted' here includes
+        # posted-but-unlogged replies so cards are never re-fed.
+        "candidate_results": candidate_results,
     }
+    # Remote observability: a handled post failure returns a reason instead of
+    # raising, so the global Sentry excepthook never sees it. On customer .mcpb
+    # installs the cycle log lives only on their machine, so an explicit capture
+    # here is the ONLY channel that surfaces "approved but didn't post" to us.
+    # Fires only on operational/machine reasons (content-judgment skips like
+    # "off-topic ..." are excluded), so it never alerts on a healthy dedup cycle.
+    try:
+        machine = dict(fail_reasons)
+        for _k, _v in skip_reasons.items():
+            if _k in MACHINE_FAIL_REASONS:
+                machine[_k] = machine.get(_k, 0) + _v
+        if machine:
+            import sentry_init
+            _top = max(machine, key=machine.get)
+            sentry_init.capture_message(
+                "twitter post pipeline issues: "
+                f"posted={posted} failed={failed} attempted={len(candidates)} "
+                f"reasons={','.join(f'{k}:{v}' for k, v in machine.items())}",
+                # error only when a REAL failure happened (failed > 0). A batch
+                # that's all benign operational skips (tweet_not_found because
+                # the target vanished before we replied, rate_limited, etc.)
+                # with posted==0 is not a problem, it's a batch of 1 that had
+                # nothing postable. Conflating "nothing posted" with "broken"
+                # used to file a fresh Sentry error for every such skip.
+                level=("error" if failed > 0 else "warning"),
+                tags={
+                    "component": "twitter_post",
+                    "posted": str(posted),
+                    "failed": str(failed),
+                    "attempted": str(len(candidates)),
+                    "top_reason": _top,
+                },
+            )
+            sentry_init.flush(2.0)
+    except Exception:
+        pass
+
+    # Persist a durable audit line so "did it post, and how many — and where?" is
+    # answerable after the fact. The shell harvests the json on stdout, but when
+    # the menu bar launches this directly it captures-then-discards stdout, leaving
+    # no record of what posted. Append a timestamped JSONL row (with the live URLs)
+    # the menu bar / dashboard can read. Best-effort: never affects the post outcome.
+    try:
+        posted_urls = [c.get("our_url") for c in candidates if c.get("our_url")]
+        audit = dict(summary)
+        audit["plan"] = plan_path.name
+        audit["at"] = datetime.now(timezone.utc).isoformat()
+        audit["urls"] = posted_urls
+        audit_path = os.path.join(REPO_DIR, "skill", "logs", "post-results.jsonl")
+        os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(audit) + "\n")
+        print(f"[post] result: posted={posted} skipped={skipped} failed={failed}"
+              f"{' urls=' + ','.join(posted_urls) if posted_urls else ''} "
+              f"(audit: {audit_path})", flush=True)
+    except Exception as e:
+        print(f"[post] audit-log write failed (non-fatal): {e}", flush=True)
     # The shell harvests this as the last json line in our stdout.
     print(json.dumps(summary), flush=True)
     return 0

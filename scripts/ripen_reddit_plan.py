@@ -391,7 +391,7 @@ def main():
     # 2026-05-10: top-k cap removed. The cap was disabled (--top-k 0) since
     # 2026-05-08 because trimming survivors before the LLM relevance gate threw
     # away potentially-good fits below the engagement-velocity cutoff. The
-    # final cap now lives in _post_iteration via SAPS_REDDIT_MAX_POSTS_PER_CYCLE
+    # final cap now lives in _post_iteration via S4L_REDDIT_MAX_POSTS_PER_CYCLE
     # (default 10), which sorts decisions by ripen composite DESC.
 
     # ---- HTML lock pre-flight for delta-gate survivors ----------------------

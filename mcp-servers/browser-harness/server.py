@@ -142,8 +142,8 @@ def _chrome_exists(p: str) -> bool:
 
 def _venv_python() -> str | None:
     """The runtime venv interpreter (has playwright). Mirrors runtime.ts:
-    <SAPS_STATE_DIR|~/.social-autoposter-mcp>/runtime/.venv/bin/python3."""
-    state_dir = Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
+    <S4L_STATE_DIR|~/.social-autoposter-mcp>/runtime/.venv/bin/python3."""
+    state_dir = Path(os.environ.get("S4L_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
     if sys.platform == "win32":
         cand = state_dir / "runtime" / ".venv" / "Scripts" / "python.exe"
     else:

@@ -28,14 +28,26 @@
 
 set -euo pipefail
 
-[ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
 
-REPO_DIR="$HOME/social-autoposter"
+# Honor S4L_REPO_DIR (customer boxes run the materialized package copy, not
+# ~/social-autoposter; the MCP-managed launchd plist bakes S4L_REPO_DIR in).
+# Fallback keeps the operator Mac's hand-built plist working unchanged.
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
+
+[ -f "$REPO_DIR/.env" ] && source "$REPO_DIR/.env"
+
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run-reddit-search-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Reddit Search Post Run: $(date) ==="
 
@@ -80,7 +92,7 @@ _parse_post_results() {
         # Bug observed 2026-05-08: a leaked "[14:57:04] Post phase: ..." line
         # produced "TOTAL_POSTED + [14:57:04]: syntax error" and `set -e` aborted
         # the script BEFORE the discover lane ran.
-        echo "[$(date +%H:%M:%S)] Post phase: exit code $rc; counting as failed." >> "$LOG_FILE"
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Post phase: exit code $rc; counting as failed." >> "$LOG_FILE"
         echo "0 1"
     fi
 }
@@ -198,6 +210,52 @@ trap '_sa_emit_run_summary_oneshot; _sa_release_lease_oneshot; _sa_release_locks
 BATCH_ID="rdcycle-$(date +%Y%m%d-%H%M%S)"
 log "Cycle batch_id=$BATCH_ID"
 
+# --- Lane env (2026-07-17, mirrors run-draft-and-publish.sh) ----------------
+# personal_brand lane force-injects the persona project into the discover
+# phase (S4L_FORCE_PROJECT + S4L_ACTIVE_LANE=personal_brand); promotion-only
+# exports S4L_CYCLE_LANE=promotion and nothing else (normal weighted pick).
+# Both lanes on = weighted per-cycle coin flip inside s4l_mode.py, same as X.
+# Discover STAMPS the lane onto the plan JSON (post_reddit.py), so the draft
+# phase and the env-less MCP approval poster read the plan, never this env.
+eval "$(python3 "$REPO_DIR/scripts/s4l_mode.py" env 2>/dev/null || true)"
+
+# --- Draft-only mode (2026-07-14, mirrors run-draft-and-publish.sh) ---------
+# The ONE mode flag (scripts/s4l_mode.py draft-only, stdout 1/0) now governs
+# Reddit exactly like the X cycle: when ON, both lanes stop after the draft
+# phase and merge their drafted decisions into the menu-bar review cards
+# (merge_review_queue.py --reddit-plan); posting then happens one approved
+# card at a time via the plugin's approve_drafts tool, which reconstructs a
+# one-decision plan and reuses `post_reddit.py --phase post` unchanged. When
+# OFF (operator opt-out), the lanes post autonomously below as always.
+# Fail-safe default is 1 (draft-only) — same posture as the X wrapper.
+DRAFT_ONLY_FLAG="$(python3 "$REPO_DIR/scripts/s4l_mode.py" draft-only 2>/dev/null || echo 1)"
+log "Draft-only flag: $DRAFT_ONLY_FLAG"
+
+# Posting-active defer (2026-07-14, mirrors run-draft-and-publish.sh): an
+# MCP-approval poster mid-drain owns the ONE shared harness tab; running the
+# cycle's discovery/prefetch now would navigate the tab out from under it and
+# false-positive the poster's comment-form check. The backend-level defer
+# hook can't cover THIS script (its ensure failure falls back to
+# ensure_browser_healthy and proceeds), so check explicitly and skip the
+# whole fire; launchd re-fires in 15 minutes. Stale flags (heartbeat older
+# than 120s) never block.
+_S4L_PA_FILE="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/reddit-posting-active.json"
+if [ -f "$_S4L_PA_FILE" ]; then
+    _S4L_PA_AGE=$(( $(date +%s) - $(stat -f %m "$_S4L_PA_FILE" 2>/dev/null || echo 0) ))
+    if [ "$_S4L_PA_AGE" -lt 120 ]; then
+        log "Reddit posting-active (age ${_S4L_PA_AGE}s); skipping this cycle fire."
+        exit 0
+    fi
+fi
+
+# Merge a drafted plan into the review cards (draft-only lanes). $1 = plan
+# file, $2 = lane label. merge_review_queue consumes (deletes) the plan file.
+_merge_reddit_drafts_to_cards() {
+    local _plan_file="$1" _lane="$2"
+    log "$_lane lane: draft-only ON; merging drafted decision(s) into review cards (no autonomous post)."
+    python3 "$REPO_DIR/scripts/merge_review_queue.py" --reddit-plan "$_plan_file" 2>&1 | tee -a "$LOG_FILE" || true
+}
+
 # Export the same id as SA_CYCLE_ID so every Claude session spawned downstream
 # (post_reddit.py → run_claude(), run_claude.sh → claude -p, log_claude_session.py)
 # stamps claude_sessions.cycle_id with this cycle. Without this, concurrent
@@ -235,8 +293,14 @@ python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30
 # old ensure_browser_healthy "reddit" ps-scan-for-MCP-Chrome path; the harness is
 # the single browser the whole Reddit pipeline now rides (REDDIT_CDP_URL points
 # every child Python proc at it). Falls back to ensure_browser_healthy on failure.
-if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
-    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+if [ "$_ensure_rc" = "78" ]; then
+    python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+fi
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    log "WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
@@ -335,6 +399,10 @@ fi
 # entire batch (~30 min for 10 rows) while peers sat blocked. The pre-flight
 # at the top of this script already did the one-shot ensure_browser_healthy
 # work; per-row acquires inside Python handle the rest.
+if [ "$HAS_SALVAGE" = "1" ] && [ "$DRAFT_ONLY_FLAG" = "1" ]; then
+    _merge_reddit_drafts_to_cards "$SALVAGE_DRAFT_FILE" "Salvage"
+    HAS_SALVAGE=0
+fi
 if [ "$HAS_SALVAGE" = "1" ]; then
     log "Salvage lane: posting $SALVAGE_COUNT candidate(s) (per-row reddit-browser lease)..."
 
@@ -370,7 +438,7 @@ fi
 # discover phase logs `[project_excludes] platform=reddit project=...
 # active_subs=N active_keywords=N subs=[...] keywords=[...]` for visibility.
 # Enforcement happens server-side inside reddit_tools._load_comment_blocked_
-# subs via the SAPS_REDDIT_PROJECT env var that post_reddit.py exports below.
+# subs via the S4L_REDDIT_PROJECT env var that post_reddit.py exports below.
 # Claude's draft prompt can propose new subreddit:<slug> excludes when it
 # rejects a thread; they accumulate in project_search_excludes and go live
 # after >=2 distinct batch_ids propose them (activation gate). See
@@ -419,8 +487,8 @@ esac
 # Ranking + capping now happens inside post_reddit.py --phase discover
 # (_discover_iteration): candidates are scored by topical overlap (query vs.
 # thread title+selftext) to fight the sort=relevance leak, then capped to the
-# top SAPS_REDDIT_DISCOVER_CAP (default 25). The final post cap is still
-# enforced by _post_iteration (SAPS_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
+# top S4L_REDDIT_DISCOVER_CAP (default 25). The final post cap is still
+# enforced by _post_iteration (S4L_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
 # RIPEN_FILE is kept as a passthrough alias so the draft/cleanup paths below
 # stay unchanged.
 if [ "$HAS_DISCOVER" = "1" ]; then
@@ -458,6 +526,10 @@ fi
 # Same per-row lease pattern as the salvage block above (see comment there for
 # rationale). The lease is acquired/released around each post_via_cdp call
 # inside `_post_iteration`, NOT around the whole --phase post invocation.
+if [ "$HAS_DISCOVER" = "1" ] && [ "$DRAFT_ONLY_FLAG" = "1" ]; then
+    _merge_reddit_drafts_to_cards "$DISCOVER_DRAFT_FILE" "Discover"
+    HAS_DISCOVER=0
+fi
 if [ "$HAS_DISCOVER" = "1" ]; then
     log "Discover lane: posting $SURVIVORS survivor(s) (per-row reddit-browser lease)..."
 

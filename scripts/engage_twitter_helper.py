@@ -144,6 +144,59 @@ def _render_media_block(media) -> str:
     )
 
 
+def _build_chain_block(row) -> str:
+    """Conversation chain reconstructed from replies.parent_reply_id linkage.
+
+    Walks ancestors bottom-up via GET /api/v1/replies/:id and renders the
+    chain root-first, each hop showing the inbound comment and (when we
+    responded) our reply. Empty string when the row has no parent linkage:
+    the root post itself already rides PENDING_DATA via the posts JOIN
+    (our_content / thread_title), so a chain block would add nothing.
+
+    Like counterparty_history_block, the block is self-titled and lands
+    inline in PENDING_DATA — no shell-side prompt change needed.
+    """
+    parent_id = row.get("parent_reply_id")
+    if not parent_id:
+        return ""
+    hops = []
+    seen = set()
+    cur = parent_id
+    for _ in range(10):
+        if not cur or cur in seen:
+            break
+        seen.add(cur)
+        try:
+            resp = api_get(f"/api/v1/replies/{cur}")
+        except Exception:
+            break
+        r = (resp.get("data") or {}).get("reply") or {}
+        if not r:
+            break
+        hops.append(r)
+        cur = r.get("parent_reply_id")
+    if not hops:
+        return ""
+
+    def _one_line(text):
+        return " ".join((text or "").split())
+
+    lines = [
+        "## Conversation chain (reconstructed from our DB; root first — "
+        "the row you are drafting for replies to the LAST message)"
+    ]
+    for r in reversed(hops):
+        lines.append(f"@{r.get('their_author') or '?'}: {_one_line(r.get('their_content'))}")
+        ours = _one_line(r.get("our_reply_content"))
+        if ours:
+            lines.append(f"  our reply: {ours}")
+    lines.append(
+        f"@{row.get('their_author') or '?'}: {_one_line(row.get('their_content'))}"
+        "   <- you are replying to this"
+    )
+    return "\n".join(lines)
+
+
 def cmd_pending_data(batch_size: int) -> int:
     try:
         from account_resolver import resolve as _resolve_account  # noqa: WPS433
@@ -173,38 +226,50 @@ def cmd_pending_data(batch_size: int) -> int:
     # top slot then and get enriched.
     ENRICH_TOP_N = 60
     history_blocks = [""] * len(rows)
+    chain_blocks = [""] * len(rows)
     try:
         from concurrent.futures import ThreadPoolExecutor
         from counterparty_history import get_counterparty_history_block
 
         def _enrich(r):
             author = r.get("their_author")
-            if not author:
-                return ""
+            history = ""
+            if author:
+                try:
+                    _disengage, history = get_counterparty_history_block(
+                        platform="x",
+                        author=author,
+                        current_post_id=r.get("post_id"),
+                        current_reply_id=r.get("id"),
+                    )
+                    history = history or ""
+                except Exception as e:
+                    print(
+                        f"[engage_twitter_helper] counterparty_history failed "
+                        f"for @{author}: {e}",
+                        file=sys.stderr,
+                    )
             try:
-                _disengage, block = get_counterparty_history_block(
-                    platform="x",
-                    author=author,
-                    current_post_id=r.get("post_id"),
-                    current_reply_id=r.get("id"),
-                )
-                return block or ""
+                chain = _build_chain_block(r)
             except Exception as e:
                 print(
-                    f"[engage_twitter_helper] counterparty_history failed "
-                    f"for @{author}: {e}",
+                    f"[engage_twitter_helper] chain block failed "
+                    f"for reply {r.get('id')}: {e}",
                     file=sys.stderr,
                 )
-                return ""
+                chain = ""
+            return (history, chain)
 
         top_rows = rows[:ENRICH_TOP_N]
         with ThreadPoolExecutor(max_workers=8) as ex:
-            for idx, block in enumerate(ex.map(_enrich, top_rows)):
-                history_blocks[idx] = block
+            for idx, (history, chain) in enumerate(ex.map(_enrich, top_rows)):
+                history_blocks[idx] = history
+                chain_blocks[idx] = chain
         non_empty = sum(1 for b in history_blocks if b)
+        chains_non_empty = sum(1 for b in chain_blocks if b)
         print(
-            f"[engage_twitter_helper] counterparty_history enriched "
-            f"{len(top_rows)}/{len(rows)} rows ({non_empty} with non-empty block)",
+            f"[engage_twitter_helper] enriched {len(top_rows)}/{len(rows)} rows "
+            f"(history={non_empty}, chain={chains_non_empty} non-empty)",
             file=sys.stderr,
         )
     except Exception as e:
@@ -215,7 +280,7 @@ def cmd_pending_data(batch_size: int) -> int:
         )
 
     out = []
-    for r, history_block in zip(rows, history_blocks):
+    for r, history_block, chain_block in zip(rows, history_blocks, chain_blocks):
         out.append({
             "id": r.get("id"),
             "platform": r.get("platform"),
@@ -231,6 +296,7 @@ def cmd_pending_data(batch_size: int) -> int:
             "is_our_original_post": int(r.get("is_our_original_post") or 0),
             "project_name": r.get("project_name"),
             "counterparty_history_block": history_block,
+            "conversation_chain_block": chain_block,
             "their_media_block": _render_media_block(r.get("their_media")),
         })
     # json_agg(...) returns null when the array is empty; engage-twitter.sh's

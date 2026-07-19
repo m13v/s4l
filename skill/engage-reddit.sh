@@ -55,8 +55,11 @@ START_TS=$(date +%s)
 echo "[engage-reddit] Pre-flight: brief reddit-browser acquire + ensure_browser_healthy + release..." | tee -a "$LOG_FILE"
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
     echo "[engage-reddit] WARNING: pre-flight acquire BUSY; harness bootstrap will run anyway; per-reply acquires inside engage_reddit.py will retry." | tee -a "$LOG_FILE"
-if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
-    echo "[engage-reddit] WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit" | tee -a "$LOG_FILE"
+ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || true
+_ensure_rc="${PIPESTATUS[0]}"
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    echo "[engage-reddit] WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit" | tee -a "$LOG_FILE"
     ensure_browser_healthy "reddit"
 fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true

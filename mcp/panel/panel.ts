@@ -1,5 +1,5 @@
 /**
- * Social Autoposter control panel (MCP Apps UI).
+ * S4L control panel (MCP Apps UI).
  *
  * Renders inside the host's sandboxed iframe. It does NOT duplicate any pipeline
  * logic: every button calls one of the server's existing tools (draft_cycle,
@@ -63,7 +63,38 @@ interface Snapshot {
   update_available: boolean;
   runtime_ready: boolean;
   runtime_provisioning?: boolean;
+  // THE single "is set up" definition, computed by scripts/snapshot.py (runtime
+  // ready + a ready project incl. the persona + X connected). Every surface
+  // (menu bar, this panel, browser dashboard) gates on this one field; do not
+  // re-derive it locally.
+  setup_complete?: boolean;
+  // Schedule state for the CURRENT Claude account: 'missing'/'disabled' means the
+  // draft tasks aren't registered here (e.g. after an account switch) and the
+  // "Set up draft schedule" button should show.
+  schedule_state?: "missing" | "disabled" | "stalled" | "ok" | "unknown";
+  // Engagement lanes (single source: mode.json via the server snapshot). Two
+  // INDEPENDENT lanes; both can be on (the cycle then splits per
+  // personal_brand_share, default 0.5). `mode` is the derived legacy mirror
+  // kept for back-compat.
+  mode?: "promotion" | "personal_brand";
+  flags?: { personal_brand?: boolean; promotion?: boolean };
+  // Personal-brand share of both-lanes-on cycles, 0.0-1.0.
+  personal_brand_share?: number;
   onboarding?: OnboardingSnapshot;
+  // False only when the always-on tray app was quit while the runtime is ready
+  // (macOS only). Drives the "Restart menu bar" banner.
+  menubar_running?: boolean;
+  // True while S4L's draft pipeline (kicker + support daemons) is paused via
+  // pause_s4l. Independent of menubar_running/setup_complete — Pause leaves
+  // Claude Desktop, the tray, and X connection untouched. Drives the header
+  // Pause switch; undefined = unknown = render as running (no false nag).
+  paused?: boolean;
+  // Live drafting-pipeline status + next-run countdown (scripts/live_status.py,
+  // polled via the drafting_status tool). activity_state is the pipeline verb the
+  // menu-bar spinner narrates; next_run_secs is the seconds until the next run.
+  activity_state?: "scanning" | "drafting" | "posting" | "idle";
+  activity_label?: string;
+  next_run_secs?: number | null;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -88,7 +119,7 @@ function parseResult(result: CallToolResult): any {
 const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
-const btnDraft = $("btn-draft") as HTMLButtonElement;
+const btnSchedule = $("btn-schedule") as HTMLButtonElement;
 const statsGrid = $("stats-grid");
 const statsToggle = $("stats-toggle") as HTMLButtonElement;
 const logEl = $("log");
@@ -100,22 +131,43 @@ const onboardingBlocker = $("onboarding-blocker");
 const onboardingCount = $("onboarding-count");
 const onboardingBarFill = $("onboarding-bar-fill");
 const liveCard = $("live-card");
+const draftingCard = $("drafting-card");
+const draftingStatus = $("drafting-status");
+const btnRunDrafting = $("btn-run-drafting") as HTMLButtonElement;
 const statsCard = $("stats-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
+const menubarBanner = $("menubar-banner");
+const btnMenubarRestart = $("btn-menubar-restart") as HTMLButtonElement;
 const btnLive = $("btn-live") as HTMLButtonElement;
 const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
 const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
 const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
+const switchPersonal = $("switch-personal") as HTMLButtonElement;
+const switchPromo = $("switch-promo") as HTMLButtonElement;
+const switchPause = $("switch-pause") as HTMLButtonElement;
+const pauseName = $("pause-name");
+const splitRow = $("split-row");
+const splitDesc = $("split-desc");
+const splitSlider = $("split-slider") as HTMLInputElement;
+const postingVolumeSelect = $("posting-volume-select") as HTMLSelectElement;
+const postingVolumeDesc = $("posting-volume-desc");
+const modeSub = $("mode-sub");
+const settingsCard = $("settings-card");
+const settingsToggle = $("settings-toggle") as HTMLButtonElement;
+const settingsBody = $("settings-body");
 
 let state: Snapshot | null = null;
 let installPolling = false; // guard against overlapping poll loops
 let setupPolling = false; // guard the live setup-progress poll started by Set up
 let updating = false; // guard against double-firing the in-header update button
 let setupDetailsOpen = false; // header setup dropdown expanded state
+let splitDragging = false; // don't let a snapshot repaint fight an in-progress drag
 let statsOpen = false; // "Last 7 days stats" dropdown expanded state
+let settingsOpen = false; // "Project settings" dropdown expanded state
+let settingsLoading = false; // guard against overlapping settings fetches
 
 function log(msg: string) { logEl.textContent = msg; }
 
@@ -152,7 +204,11 @@ const MILESTONE_LABELS: Record<string, string> = {
   profile_scanned: "Profile scanned",
   project_ready: "Project ready",
   topics_seeded: "Topics seeded",
-  draft_verified: "Draft cycle verified",
+  tasks_scheduled: "Tasks scheduled",
+  // Optional platform milestones: the ledger only includes them in the
+  // snapshot once touched, and they never gate completion.
+  reddit_connected: "Reddit connected",
+  reddit_verified: "Reddit verified",
 };
 
 function milestoneGlyph(status: MilestoneStatus): string {
@@ -171,25 +227,40 @@ function applySetupDetails() {
   setupSummary.classList.toggle("expanded", setupDetailsOpen);
 }
 
+// THE one "is set up" answer, straight from the snapshot (scripts/snapshot.py).
+// Local derivation only as a fallback for version skew against older servers.
+function isSetupComplete(s: Snapshot | null): boolean {
+  if (!s) return false;
+  if (s.setup_complete !== undefined) return !!s.setup_complete;
+  return !!s.runtime_ready && (s.projects_ready || 0) > 0 && !!s.x_connected;
+}
+
 function renderOnboarding(progress?: OnboardingSnapshot) {
   if (!progress || !Array.isArray(progress.milestones)) {
     setupSummary.hidden = true;
     onboardingDetails.hidden = true;
     return;
   }
-  // The header always carries the setup dropdown once a ledger exists, so the
-  // milestone details stay reachable even after setup completes.
-  setupSummary.hidden = false;
+  // Header state keys off the SAME setup_complete the menu bar uses — never the
+  // milestone ledger — so the two surfaces can't disagree about "set up".
+  const done = isSetupComplete(state);
+  // Once setup is complete, drop the dropdown entirely (no lingering "Setup ▾"
+  // affordance) rather than collapsing it to a bare history view.
+  setupSummary.hidden = done;
+  if (done && setupDetailsOpen) {
+    setupDetailsOpen = false;
+    applySetupDetails();
+  }
 
   const total = progress.milestones.length;
   const completed = progress.milestones.filter((m) => m.status === "complete").length;
-  const blocked = !!progress.current_blocker && !progress.complete;
-  setupSummary.classList.toggle("complete", progress.complete);
+  const blocked = !!progress.current_blocker && !done;
+  setupSummary.classList.toggle("complete", done);
   setupSummary.classList.toggle("blocked", blocked);
 
   // The "N/total" counter is shown only while setup is incomplete; once complete
   // it collapses to a bare "Setup ▾" dropdown (progress no longer surfaced inline).
-  onboardingCount.hidden = progress.complete;
+  onboardingCount.hidden = done;
   onboardingCount.textContent = blocked
     ? `${completed}/${total} · needs you`
     : setupPolling
@@ -240,23 +311,71 @@ function render() {
   const needsRuntime = !state.runtime_ready;
   installCard.hidden = !needsRuntime;
 
-  // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
-  // exists, at least one project is fully configured, and the X session is
-  // connected. Until all three hold, the panel is intentionally minimal — just
-  // the Set up button (or the Install card while the runtime is missing) — and
-  // Run draft cycle is hidden. Once complete, Set up disappears and Run draft
-  // cycle is the single primary action.
-  const hasReady = state.projects_ready > 0;
-  const setupComplete = !needsRuntime && hasReady && state.x_connected;
+  // "Menu bar not running" banner: only once the runtime exists (before that the
+  // tray isn't installed and the install card owns the view) and only when the
+  // snapshot explicitly reports it down (undefined = unknown = don't nag).
+  menubarBanner.hidden = needsRuntime || state.menubar_running !== false;
 
-  // Two mutually exclusive primary actions: Set up before completion, Run draft
-  // cycle after. Never both at once.
+  // "Setup complete" is the snapshot's setup_complete — the ONE definition
+  // (computed in scripts/snapshot.py), shared with the menu bar and the browser
+  // dashboard. See isSetupComplete.
+  const setupComplete = isSetupComplete(state);
+
+  // Before setup completes, Set up is the primary action. After it completes the
+  // autopilot drafts on its own (no manual "draft now" button) — the only action
+  // that can surface is "Set up draft schedule" when the tasks aren't scheduled on
+  // THIS Claude account (e.g. after an account switch, which orphans them).
   btnSetup.hidden = setupComplete;
-  btnDraft.hidden = !setupComplete;
   btnSetup.disabled = false;
-  btnDraft.disabled = needsRuntime || !hasReady;
   btnSetup.classList.toggle("primary", !setupComplete);
-  btnDraft.classList.toggle("primary", setupComplete);
+
+  const needsSchedule =
+    setupComplete &&
+    (state.schedule_state === "missing" ||
+      state.schedule_state === "disabled" ||
+      state.schedule_state === "stalled");
+  btnSchedule.hidden = !needsSchedule;
+  btnSchedule.classList.toggle("primary", needsSchedule);
+
+  // Engagement lanes — always shown, mirroring the menu bar. Two independent
+  // lanes; both can be on (cycle splits per personal_brand_share). Single
+  // source: state.flags (the server snapshot's mode.json read), with
+  // state.mode as a legacy fallback.
+  const flags = state.flags || (state.mode === "promotion"
+    ? { personal_brand: false, promotion: true }
+    : { personal_brand: true, promotion: false });
+  const personalOn = !!flags.personal_brand;
+  const promoOn = !!flags.promotion;
+  switchPersonal.setAttribute("aria-checked", String(personalOn));
+  switchPromo.setAttribute("aria-checked", String(promoOn));
+  // Lane split: only meaningful (and only shown) when both lanes are on. Don't
+  // yank the slider out from under an in-progress drag; the drag's own commit
+  // re-syncs it to the server truth.
+  const sharePct = Math.round(
+    (typeof state.personal_brand_share === "number" ? state.personal_brand_share : 0.5) * 100
+  );
+  splitRow.hidden = !(personalOn && promoOn);
+  if (!splitDragging) {
+    splitSlider.value = String(sharePct);
+    renderSplitDesc(sharePct);
+  }
+  // Per-lane descriptions live in the markup; the note line carries only the
+  // cross-lane facts worth knowing.
+  modeSub.textContent =
+    personalOn && promoOn
+      ? `Both lanes on: cycles split ${sharePct}/${100 - sharePct} personal/promotion.`
+      : !personalOn && !promoOn
+        ? "No lane on; the cycle falls back to personal brand."
+        : "";
+
+  // Pause switch (header, inline with the title) — independent of setup/
+  // menubar state, mirrors the menu bar's Pause S4L item. undefined (unknown)
+  // renders as running so a slow first snapshot never flashes a false "paused".
+  const paused = state.paused === true;
+  switchPause.setAttribute("aria-checked", String(!paused));
+  switchPause.setAttribute("aria-label", paused ? "Resume S4L" : "Pause S4L");
+  switchPause.title = paused ? "Resume S4L" : "Pause S4L";
+  pauseName.textContent = paused ? "Paused" : "Running";
 
   // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
   // product is configured and posting. Hide them until setup is complete so the
@@ -264,7 +383,98 @@ function render() {
   // (gated above) is the only thing shown while the runtime is still installing.
   liveCard.hidden = !setupComplete;
   statsCard.hidden = !setupComplete;
+
+  // Project settings is available as soon as the runtime exists: it's how the
+  // user inspects (and fixes) what's saved, including a half-finished project.
+  settingsCard.hidden = needsRuntime;
+
+  renderDrafting();
 }
+
+// ---- drafting-pipeline status + next-run countdown ------------------------
+// The drafting pipeline (the twitter cycle) is what the user triggers: it scans
+// for threads first, then hands off to the drafter. We show what it's doing right
+// now (scanning/drafting/posting — the honest current stage, the same signal the
+// menu-bar spinner narrates) or a live countdown to the next run, plus a Run-now
+// button. The countdown ticks client-side off a locally-anchored deadline so it
+// stays smooth without a per-second server round-trip and is immune to
+// client/server clock skew: each drafting_status poll re-anchors nextRunAtMs =
+// now + next_run_secs*1000. A 1s ticker repaints just this line between polls.
+let nextRunAtMs: number | null = null;
+
+const ACTIVITY_VERB: Record<string, string> = {
+  scanning: "Scanning",
+  drafting: "Drafting",
+  posting: "Posting",
+};
+
+function fmtCountdown(secs: number): string {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function renderDrafting() {
+  if (!state) return;
+  const setupComplete = isSetupComplete(state);
+  draftingCard.hidden = !setupComplete;
+  if (!setupComplete) return;
+
+  const act = state.activity_state || "idle";
+  const paused = state.paused === true;
+  const running = act === "scanning" || act === "drafting" || act === "posting";
+  const verb = ACTIVITY_VERB[act];
+
+  // Run-now is disabled while paused (the kicker is unloaded, nothing would run)
+  // or while a run is already in flight (launchd no-ops the single instance).
+  btnRunDrafting.disabled = paused || running;
+
+  if (verb) {
+    draftingStatus.textContent = `⟳ ${verb} now…`;
+  } else if (paused) {
+    draftingStatus.textContent = "Paused — resume S4L to run drafting.";
+  } else if (nextRunAtMs != null) {
+    const remaining = (nextRunAtMs - Date.now()) / 1000;
+    draftingStatus.textContent =
+      remaining > 0 ? `Next drafting run in ${fmtCountdown(remaining)}` : "Next drafting run any moment…";
+  } else {
+    draftingStatus.textContent = "Next drafting run within a minute";
+  }
+}
+
+// Pure read the widget polls to keep the drafting status + countdown live. Merges
+// the fields into state (re-rendering) and re-anchors the client-side countdown.
+async function pollDraftingStatus() {
+  if (!state || !isSetupComplete(state)) return;
+  try {
+    const s = await call("drafting_status");
+    if (!s || typeof s !== "object") return;
+    // Re-anchor the countdown BEFORE applyState so the render it triggers already
+    // shows the fresh value (not the previous anchor).
+    nextRunAtMs =
+      typeof s.next_run_secs === "number" ? Date.now() + s.next_run_secs * 1000 : null;
+    applyState({
+      activity_state: s.activity_state,
+      activity_label: s.activity_label,
+      next_run_secs: typeof s.next_run_secs === "number" ? s.next_run_secs : null,
+      ...(typeof s.paused === "boolean" ? { paused: s.paused } : {}),
+    });
+  } catch {
+    /* best-effort: a failed poll just leaves the last countdown ticking */
+  }
+}
+
+// 1s ticker: repaint only the countdown line so it counts down smoothly between
+// the 5s polls. Pure client-side (no round-trip), so it runs regardless of tab
+// visibility — the internal setup gate is the only thing that suppresses it.
+setInterval(() => {
+  if (state && isSetupComplete(state)) renderDrafting();
+}, 1000);
+// 5s poll: refresh the live status + re-anchor the countdown. Skipped while the
+// tab is hidden to avoid spawning the drafting_status python for an unseen panel.
+setInterval(() => {
+  if (!document.hidden) void pollDraftingStatus();
+}, 5000);
 
 function applyState(snap: Partial<Snapshot>) {
   state = { ...(state || {} as Snapshot), ...snap } as Snapshot;
@@ -281,9 +491,13 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     x_connected: !!o.x_connected,
     x_state: o.x_state || "",
     x_handle: o.x_handle ?? null,
+    ...(o.setup_complete !== undefined ? { setup_complete: !!o.setup_complete } : {}),
     version: o.mcp_version || state?.version || "",
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
+    mode: o.mode ?? state?.mode,
+    flags: o.flags ?? state?.flags,
+    personal_brand_share: o.personal_brand_share ?? state?.personal_brand_share,
     onboarding: o.onboarding,
   };
 }
@@ -309,6 +523,9 @@ app.ontoolresult = (result) => {
     if (data.runtime_ready) {
       // Stats need the runtime; load them once it's confirmed ready.
       void loadStats();
+      // Prime the drafting status/countdown now (the loopback first-paint
+      // snapshot omits the live fields), then the 5s poll keeps it fresh.
+      void pollDraftingStatus();
     } else if (data.runtime_provisioning) {
       // An install is already underway (another surface / prior open) — resume
       // following it without waiting for a click.
@@ -334,11 +551,14 @@ async function refresh() {
     applyState({
       ...fromSetupStatus(setupStatus),
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
+      ...(typeof rt.menubar_running === "boolean" ? { menubar_running: rt.menubar_running } : {}),
+      ...(typeof rt.paused === "boolean" ? { paused: rt.paused } : {}),
       onboarding: rt.onboarding || setupStatus.onboarding || state?.onboarding,
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
     log("");
     void loadStats();
+    void pollDraftingStatus();
   } catch (e: any) {
     log("Refresh failed: " + (e?.message || e));
   }
@@ -457,7 +677,7 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
       content: [{
         type: "text",
         text:
-          "Set up social autoposter end to end now. Inspect and repair the runtime, auto-detect " +
+          "Set up S4L plugin end to end now. Inspect and repair the runtime, auto-detect " +
           "and connect my X session, scan my profile, discover and research my product, then infer " +
           "and save a complete project with seeded search topics. Keep going without asking me to " +
           "approve each safe setup step. Ask only if I must interactively sign in or no product " +
@@ -466,7 +686,7 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
           "the product URL), make it one short question.",
       }],
     });
-    if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
+    if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up S4L\u201d in the chat instead.");
     else {
       log("Setup is running in the chat. It will only stop for an unavoidable login or missing product.");
       // Follow the agent's progress live and repaint the Setup progress card as
@@ -477,6 +697,195 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
     log("Couldn\u2019t start setup: " + (e?.message || e));
   }
 }));
+
+// Run drafting now: run the drafting pipeline ONE time immediately via the
+// run_drafting tool (launchctl kickstart of the launchd kicker — no model in the
+// loop, unlike Setup). Same control as the menu bar's "Run drafting now". After
+// firing, poll drafting_status so the status flips to "Scanning now…" without
+// waiting for the next 5s poll.
+btnRunDrafting.addEventListener("click", () => busy(btnRunDrafting, "Starting…", async () => {
+  try {
+    const res = await call("run_drafting");
+    if (res?.paused) log("S4L is paused — resume it first, then drafting can run.");
+    else if (res?.ok) log("Drafting started — new drafts land in a few minutes.");
+    else log("Couldn’t start drafting: " + (res?.detail || "unknown error"));
+  } catch (e: any) {
+    log("Couldn’t start drafting: " + (e?.message || e));
+  }
+  await pollDraftingStatus();
+}));
+
+// Set up draft schedule for THIS account. Like Setup, this needs the model in the
+// loop (only the host create_scheduled_task can register a routine, and it runs
+// inside a chat turn), so we inject a user turn via sendMessage. The worker prompt
+// files already exist on disk (the server writes them on boot), so the agent just
+// registers them via create_scheduled_task \u2014 no dependency on queue_setup.
+btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026", async () => {
+  log("Asking Claude to schedule the draft tasks for this account\u2026");
+  // Fire-and-forget telemetry: previously this button had zero click record
+  // anywhere (unlike its menu-bar sibling), so "did a human actually trigger
+  // this, and from which surface" was unanswerable after the fact.
+  void call("client_event", { event: "rearm_clicked", surface: "panel" }).catch(() => {});
+  try {
+    const res = await app.sendMessage({
+      role: "user",
+      content: [{
+        type: "text",
+        text:
+          "Set up the S4L draft autopilot schedule for this Claude account. " +
+          "If queue_setup is available, call it; then for s4l-worker call the host tool " +
+          "create_scheduled_task with taskId, cronExpression \"* * * * *\", notifyOnCompletion " +
+          "false (REQUIRED \u2014 the default true pops a notification every minute), and the prompt " +
+          "\u2014 read it from ~/.claude/scheduled-tasks/s4l-worker/SKILL.md (already on " +
+          "disk). If the task already exists, call update_scheduled_task with taskId s4l-worker " +
+          "and notifyOnCompletion false instead. " +
+          "Before calling create_scheduled_task/list_scheduled_tasks/update_scheduled_task, run " +
+          "(via Bash, best-effort, ignore any error and continue if the path doesn't exist): " +
+          "python3 ~/.social-autoposter-mcp/repo/package/scripts/mark_event.py start <that tool's " +
+          "name>; immediately after it returns, run the same with 'end' instead of 'start'. " +
+          "Do NOT redo my X connection or project setup. Keep replies to me very short.",
+      }],
+    });
+    if ((res as any)?.isError) log("The host rejected it \u2014 type \u201cset up the draft schedule\u201d in the chat instead.");
+    else log("Scheduling is running in the chat. The draft tasks will register for this account.");
+  } catch (e: any) {
+    log("Couldn\u2019t start scheduling: " + (e?.message || e));
+  }
+}));
+
+// Engagement-lane switches: lightweight flip of ONE lane via engagement_mode
+// action:'toggle' (mode.json only, no persona provisioning), then refresh.
+// Mirrors the menu-bar checkmarks (same single source, mode.json). The switch
+// flips optimistically for immediate feedback; the refresh re-syncs it to the
+// server truth either way.
+function wireLaneSwitch(el: HTMLButtonElement, lane: "personal_brand" | "promotion") {
+  el.addEventListener("click", async () => {
+    if (el.disabled) return;
+    el.disabled = true;
+    el.setAttribute("aria-checked", String(el.getAttribute("aria-checked") !== "true"));
+    try {
+      const res = await call("engagement_mode", { action: "toggle", lane });
+      if (res && res.flags) applyState({ flags: res.flags });
+      await refresh();
+    } catch (e: any) {
+      log("Couldn’t switch lane: " + (e?.message || e));
+      await refresh(); // roll the optimistic flip back to the server truth
+    } finally {
+      el.disabled = false;
+    }
+  });
+}
+wireLaneSwitch(switchPersonal, "personal_brand");
+wireLaneSwitch(switchPromo, "promotion");
+
+// Pause switch: calls pause_s4l (unloads/reinstalls the kicker + support
+// daemons; does NOT touch Claude Desktop, the tray, or X). Checked means
+// running, unchecked means paused — inverse of the flip direction.
+switchPause.addEventListener("click", async () => {
+  if (switchPause.disabled) return;
+  const wasPaused = switchPause.getAttribute("aria-checked") !== "true";
+  const action = wasPaused ? "resume" : "pause";
+  switchPause.disabled = true;
+  switchPause.setAttribute("aria-checked", String(wasPaused)); // optimistic flip
+  try {
+    const res = await call("pause_s4l", { action });
+    log(
+      res?.ok
+        ? action === "pause"
+          ? "S4L paused — drafting and posting are stopped."
+          : "S4L resumed."
+        : `Couldn’t ${action} S4L${res?.detail ? ": " + res.detail : "."}`
+    );
+    await refresh(); // always re-sync to server truth, ok or not
+  } catch (e: any) {
+    log(`Couldn’t ${action} S4L: ` + (e?.message || e));
+    await refresh(); // roll the optimistic flip back to the server truth
+  } finally {
+    switchPause.disabled = false;
+  }
+});
+
+// Lane split slider: live-update the caption while dragging, persist on
+// commit (change) via engagement_mode action:'split' (mode.json only, same
+// weight class as the lane toggles), then refresh to the server truth.
+function renderSplitDesc(pct: number) {
+  splitDesc.textContent = `${pct}% personal brand / ${100 - pct}% promotion`;
+}
+splitSlider.addEventListener("pointerdown", () => { splitDragging = true; });
+splitSlider.addEventListener("input", () => {
+  splitDragging = true;
+  renderSplitDesc(Number(splitSlider.value));
+});
+splitSlider.addEventListener("change", async () => {
+  const pct = Number(splitSlider.value);
+  splitSlider.disabled = true;
+  try {
+    const res = await call("engagement_mode", { action: "split", split: pct });
+    if (res && typeof res.personal_brand_share === "number") {
+      applyState({ personal_brand_share: res.personal_brand_share });
+    }
+    await refresh();
+  } catch (e: any) {
+    log("Couldn’t set the lane split: " + (e?.message || e));
+    await refresh(); // roll the slider back to the server truth
+  } finally {
+    splitSlider.disabled = false;
+    splitDragging = false;
+  }
+});
+
+// Posting volume: server-side per-install throttle for the twitter cycle's
+// virality bar (installations.posting_mode on s4l.ai). Loaded ONCE at boot
+// (it is a network GET through the posting_volume tool, so it stays out of
+// the snapshot refresh loop) and re-synced after every change. Option labels
+// pick up this install's own estimated posts/day from the rates payload.
+let postingVolumeLoaded = false;
+function renderPostingVolume(data: any) {
+  if (!data || data.error) return;
+  // No "default" state: the API resolves unset to Steady (medium).
+  const mode = data.mode || "medium";
+  postingVolumeSelect.value = mode;
+  const rates: any[] = Array.isArray(data.rates) ? data.rates : [];
+  // Display names only; internal values stay high|medium|low (API enum).
+  const MODE_LABEL: Record<string, string> = { high: "Aggressive", medium: "Steady", low: "Chill" };
+  for (const r of rates) {
+    const opt = postingVolumeSelect.querySelector(`option[value="${r.mode}"]`) as HTMLOptionElement | null;
+    if (opt && r.est_posts_per_day !== null && r.est_posts_per_day !== undefined) {
+      const n = Number(r.est_posts_per_day);
+      const label = MODE_LABEL[r.mode] || r.mode;
+      opt.textContent = `${label} (~${n >= 10 ? Math.round(n) : n}/day)`;
+    }
+  }
+  postingVolumeDesc.textContent = "How many drafts per day the cycle produces.";
+}
+async function loadPostingVolume() {
+  try {
+    const res = await call("posting_volume", { action: "get" });
+    postingVolumeLoaded = true;
+    renderPostingVolume(res);
+  } catch {
+    /* leave the static labels; a later change still works */
+  }
+}
+postingVolumeSelect.addEventListener("change", async () => {
+  const mode = postingVolumeSelect.value;
+  postingVolumeSelect.disabled = true;
+  try {
+    const res = await call("posting_volume", { action: "set", mode });
+    if (res && res.error) {
+      log("Couldn’t change posting volume: " + res.error);
+    } else {
+      const friendly: Record<string, string> = { high: "Aggressive", medium: "Steady", low: "Chill" };
+      log(`Posting volume set to ${friendly[mode] || mode}. Applies from the next cycle.`);
+    }
+    await loadPostingVolume(); // re-sync to server truth either way
+  } catch (e: any) {
+    log("Couldn’t change posting volume: " + (e?.message || e));
+    await loadPostingVolume();
+  } finally {
+    postingVolumeSelect.disabled = false;
+  }
+});
 
 // ---- collapsible sections -------------------------------------------------
 // The header setup dropdown and the "Last 7 days stats" header are the only two
@@ -494,18 +903,8 @@ statsToggle.addEventListener("click", () => {
   statsToggle.classList.toggle("expanded", statsOpen);
 });
 
-btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async () => {
-  log("Drafting\u2026 the draft list appears in the chat for review.");
-  try {
-    const r = await call("draft_cycle");
-    const n = r.drafted ?? 0;
-    if (r.onboarding) applyState({ onboarding: r.onboarding });
-    if (n) log(`Drafted ${n} \u2014 review them in the chat and choose which to post.`);
-    else log("No drafts produced.");
-    void refresh();
-    void loadStats();
-  } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
-}));
+// (The "Run draft cycle" button was removed \u2014 the autopilot drafts on its own via
+// the launchd kicker + queue worker, so there is no manual draft-now action.)
 
 // In-header update button. Created fresh by render() whenever an update is
 // available, so the click is delegated off verEl rather than bound to the
@@ -557,10 +956,356 @@ btnInstall.addEventListener("click", async () => {
   }
 });
 
-// ---- config view / edit ---------------------------------------------------
-// Removed: raw config.json view/edit. All project changes now go through the
-// `project_config` tool (validates, merges, re-seeds topics) — there is no
-// raw-overwrite surface in the panel anymore.
+// Restart the always-on tray app after a Quit. Calls the restart_menubar tool
+// (re-loads its LaunchAgent server-side) and applies the fresh running state it
+// returns, so the banner drops without waiting for the next refresh.
+btnMenubarRestart.addEventListener("click", () =>
+  busy(btnMenubarRestart, "Restarting\u2026", async () => {
+    log("Restarting the S4L menu bar\u2026");
+    try {
+      const r = await call("restart_menubar");
+      if (typeof r.menubar_running === "boolean") applyState({ menubar_running: r.menubar_running });
+      log(
+        r.menubar_running
+          ? "Menu bar restarted."
+          : "Couldn\u2019t confirm the menu bar came back" + (r.detail ? ": " + r.detail : ".")
+      );
+    } catch (e: any) {
+      log("Couldn\u2019t restart the menu bar: " + (e?.message || e));
+    }
+  })
+);
+
+// ---- project settings (collapsible, editable) ------------------------------
+// A formatted view of what's saved for each project (the config the pipeline
+// reads), fetched via project_config action:'get' and edited per FIELD. Saves
+// go through project_config's validated merge (which re-seeds topics), so this
+// deliberately is NOT a raw config.json editor — that surface was removed on
+// purpose and must not come back.
+interface ProjectSettings {
+  name: string;
+  persona: boolean;
+  ready: boolean;
+  missing_required: string[];
+  fields: Record<string, unknown>;
+  extra_keys: string[];
+}
+
+// Field order + labels per project type. Personas have no website/icp/CTA by
+// design, so they get the grounding fields instead.
+const PRODUCT_FIELDS = [
+  "website", "description", "icp", "voice", "differentiator",
+  "search_topics", "get_started_link", "content_guardrails",
+] as const;
+const PERSONA_FIELDS = [
+  "description", "voice", "search_topics", "content_angle", "content_guardrails",
+] as const;
+const FIELD_LABELS: Record<string, string> = {
+  website: "Website",
+  description: "What it does",
+  icp: "Target audience",
+  voice: "Voice",
+  differentiator: "Differentiator",
+  search_topics: "Search topics",
+  get_started_link: "Get-started link",
+  content_guardrails: "Content guardrails",
+  content_angle: "Content angle",
+};
+// Fields project_config models as named props (strings / topic list); anything
+// else — and any non-string value — rides the `fields` escape hatch instead.
+const NAMED_PROPS = new Set<string>([
+  "website", "description", "icp", "voice", "differentiator",
+  "search_topics", "get_started_link", "content_guardrails",
+]);
+const SINGLE_LINE = new Set<string>(["website", "get_started_link"]);
+
+type EditorKind = "text" | "list" | "json";
+// `sub` set = this editor is one key of an object-valued field (e.g. voice.tone),
+// edited as its own labeled input and reassembled into the object on save.
+interface FieldEditor { key: string; sub?: string; kind: EditorKind; el: HTMLInputElement | HTMLTextAreaElement; orig: string }
+
+function humanizeKey(k: string): string {
+  const s = k.replace(/[_-]+/g, " ").trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : k;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+// How a single value is edited: string -> plain text, string[] -> one per line,
+// anything still structured (nested object, mixed array) -> JSON as last resort.
+function seedFor(v: unknown): { kind: EditorKind; text: string } {
+  if (Array.isArray(v) && v.every((x) => typeof x === "string")) {
+    return { kind: "list", text: v.join("\n") };
+  }
+  if (v == null || typeof v === "string") return { kind: "text", text: String(v ?? "") };
+  return { kind: "json", text: JSON.stringify(v, null, 2) };
+}
+
+function makeField(
+  labelText: string,
+  seed: { kind: EditorKind; text: string },
+  singleLine: boolean
+): { wrap: HTMLElement; el: HTMLInputElement | HTMLTextAreaElement } {
+  const wrap = document.createElement("div");
+  wrap.className = "settings-field";
+  const label = document.createElement("label");
+  label.textContent = labelText + (seed.kind === "list" ? " (one per line)" : "");
+  wrap.appendChild(label);
+  let el: HTMLInputElement | HTMLTextAreaElement;
+  if (seed.kind === "text" && singleLine) {
+    el = document.createElement("input");
+    el.type = "text";
+    el.className = "settings-input";
+  } else {
+    const ta = document.createElement("textarea");
+    // Size to the content: count hard newlines AND estimated soft wraps
+    // (~60 chars/line at this width), so long prose isn't clipped to 2 rows.
+    const lines = seed.text
+      ? seed.text.split("\n").reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 60)), 0)
+      : 1;
+    ta.rows = Math.min(10, Math.max(2, lines));
+    ta.className = "settings-textarea" + (seed.kind === "json" ? " mono" : "");
+    el = ta;
+  }
+  el.value = seed.text;
+  if (!seed.text) el.placeholder = "Not set";
+  el.dataset.orig = seed.text; // mirror of FieldEditor.orig, readable across renders
+  wrap.appendChild(el);
+  return { wrap, el };
+}
+
+function buildProjectEditor(p: ProjectSettings): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "settings-project";
+
+  const head = document.createElement("div");
+  head.className = "settings-project-head";
+  const name = document.createElement("span");
+  name.className = "settings-project-name";
+  name.textContent = p.name;
+  head.appendChild(name);
+  if (p.persona) {
+    const tag = document.createElement("span");
+    tag.className = "settings-project-tag";
+    tag.textContent = "personal brand";
+    head.appendChild(tag);
+  }
+  const stateEl = document.createElement("span");
+  stateEl.className = "settings-project-state";
+  stateEl.textContent = p.ready
+    ? "ready"
+    : "missing: " + p.missing_required.join(", ");
+  head.appendChild(stateEl);
+  box.appendChild(head);
+
+  const editors: FieldEditor[] = [];
+  const keys = p.persona ? PERSONA_FIELDS : PRODUCT_FIELDS;
+  for (const key of keys) {
+    const v = p.fields[key];
+    // Object-valued field (persona voice, structured guardrails): render each key
+    // as its own labeled input inside a titled group instead of one JSON blob.
+    if (isPlainObject(v) && Object.keys(v).length) {
+      const group = document.createElement("fieldset");
+      group.className = "settings-group";
+      const legend = document.createElement("legend");
+      legend.textContent = FIELD_LABELS[key] || humanizeKey(key);
+      group.appendChild(legend);
+      for (const [sub, subVal] of Object.entries(v)) {
+        const seed = seedFor(subVal);
+        const f = makeField(humanizeKey(sub), seed, false);
+        group.appendChild(f.wrap);
+        editors.push({ key, sub, kind: seed.kind, el: f.el, orig: seed.text });
+      }
+      box.appendChild(group);
+      continue;
+    }
+    const seed =
+      key === "search_topics"
+        ? { kind: "list" as EditorKind, text: Array.isArray(v) ? v.map(String).join("\n") : String(v ?? "") }
+        : seedFor(v);
+    const f = makeField(FIELD_LABELS[key] || humanizeKey(key), seed, SINGLE_LINE.has(key));
+    box.appendChild(f.wrap);
+    editors.push({ key, kind: seed.kind, el: f.el, orig: seed.text });
+  }
+
+  if (p.extra_keys.length) {
+    const extra = document.createElement("div");
+    extra.className = "settings-extra";
+    extra.textContent =
+      "Advanced (edit via chat): " + p.extra_keys.join(", ");
+    box.appendChild(extra);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "settings-actions";
+  const btnSave = document.createElement("button");
+  btnSave.className = "primary";
+  btnSave.textContent = "Save changes";
+  btnSave.disabled = true;
+  const status = document.createElement("span");
+  status.className = "settings-status";
+  actions.appendChild(btnSave);
+  actions.appendChild(status);
+  box.appendChild(actions);
+
+  const updateDirty = () => {
+    btnSave.disabled = !editors.some((e) => e.el.value !== e.orig);
+  };
+  for (const e of editors) e.el.addEventListener("input", updateDirty);
+
+  btnSave.addEventListener("click", () => void saveProjectSettings(p, editors, btnSave, status));
+  return box;
+}
+
+async function saveProjectSettings(
+  p: ProjectSettings,
+  editors: FieldEditor[],
+  btnSave: HTMLButtonElement,
+  status: HTMLElement
+) {
+  const dirty = editors.filter((e) => e.el.value !== e.orig);
+  if (!dirty.length) return;
+  const args: Record<string, unknown> = { name: p.name };
+  const extra: Record<string, unknown> = {};
+
+  const fieldLabel = (e: FieldEditor) =>
+    (FIELD_LABELS[e.key] || humanizeKey(e.key)) + (e.sub ? ` · ${humanizeKey(e.sub)}` : "");
+
+  // Object-valued fields edited as groups: if ANY sub-field changed, rebuild the
+  // whole object from all its sub-editors (unchanged keys keep their value) and
+  // send it through the `fields` escape hatch, same as the old JSON editor did.
+  const dirtyGroupKeys = [...new Set(dirty.filter((e) => e.sub !== undefined).map((e) => e.key))];
+  for (const key of dirtyGroupKeys) {
+    const base: Record<string, unknown> = isPlainObject(p.fields[key])
+      ? { ...(p.fields[key] as Record<string, unknown>) }
+      : {};
+    for (const e of editors.filter((x) => x.key === key && x.sub !== undefined)) {
+      const raw = e.el.value;
+      if (e.kind === "list") {
+        const items = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+        if (items.length) base[e.sub!] = items;
+        else delete base[e.sub!]; // cleared -> drop the sub-key
+      } else if (e.kind === "json") {
+        try {
+          base[e.sub!] = JSON.parse(raw);
+        } catch {
+          status.textContent = `${fieldLabel(e)}: invalid JSON, nothing saved.`;
+          return;
+        }
+      } else if (!raw.trim()) {
+        delete base[e.sub!]; // cleared -> drop the sub-key
+      } else {
+        base[e.sub!] = raw;
+      }
+    }
+    extra[key] = Object.keys(base).length ? base : null;
+  }
+
+  for (const e of dirty.filter((x) => x.sub === undefined)) {
+    const raw = e.el.value;
+    if (e.kind === "list") {
+      const items = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (!items.length) extra[e.key] = null; // cleared -> delete the key
+      else if (NAMED_PROPS.has(e.key)) args[e.key] = items;
+      else extra[e.key] = items;
+    } else if (e.kind === "json") {
+      try {
+        extra[e.key] = JSON.parse(raw);
+      } catch {
+        status.textContent = `${fieldLabel(e)}: invalid JSON, nothing saved.`;
+        return;
+      }
+    } else if (!raw.trim()) {
+      extra[e.key] = null; // cleared -> delete the key
+    } else if (NAMED_PROPS.has(e.key)) {
+      args[e.key] = raw;
+    } else {
+      extra[e.key] = raw;
+    }
+  }
+  if (Object.keys(extra).length) args.fields = extra;
+
+  btnSave.disabled = true;
+  const prev = btnSave.textContent;
+  btnSave.textContent = "Saving…";
+  status.textContent = "";
+  try {
+    const res = await call("project_config", args);
+    if (res && res.ok) {
+      // Adopt the saved values as the new baseline so the dirty tracking (and
+      // the Save button) reset without a full re-render under the user's cursor.
+      for (const e of dirty) { e.orig = e.el.value; e.el.dataset.orig = e.el.value; }
+      status.textContent = res.ready
+        ? "Saved."
+        : `Saved. Still missing: ${(res.missing_required || []).join(", ")}.`;
+      void refresh();
+    } else {
+      status.textContent = "Save failed: " + (res?.note || res?._raw || "unknown error");
+    }
+  } catch (e: any) {
+    status.textContent = "Save failed: " + (e?.message || e);
+  } finally {
+    btnSave.textContent = prev;
+    btnSave.disabled = !editors.some((e) => e.el.value !== e.orig);
+  }
+}
+
+// Fetch fresh values on every expand (a cheap local read), so the section
+// always shows what's actually on disk — including edits made from the chat.
+async function loadSettings() {
+  if (settingsLoading) return;
+  // Never clobber unsaved edits: if any editor differs from its saved baseline,
+  // keep the current form instead of re-rendering over the user's changes.
+  const editing = Array.from(
+    settingsBody.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")
+  ).some((el) => el.value !== (el.dataset.orig ?? el.value));
+  if (editing) return;
+  settingsLoading = true;
+  if (!settingsBody.querySelector(".settings-project")) {
+    settingsBody.innerHTML = `<div class="muted">Loading…</div>`;
+  }
+  try {
+    const res = await call("project_config", { action: "get" });
+    const projects: ProjectSettings[] | null = Array.isArray(res?.projects) ? res.projects : null;
+    settingsBody.textContent = "";
+    if (!projects) {
+      // No `projects` array = the call errored (e.g. the menu-bar fallback server
+      // can't serve this action). Show THAT message — reporting "no projects
+      // configured" here reads as "setup is broken" when it isn't.
+      const err = document.createElement("div");
+      err.className = "muted";
+      err.textContent =
+        typeof res?._raw === "string" && res._raw
+          ? res._raw
+          : "Couldn’t load settings.";
+      settingsBody.appendChild(err);
+      return;
+    }
+    if (!projects.length) {
+      settingsBody.innerHTML = `<div class="muted">No projects configured yet — run Set up first.</div>`;
+      return;
+    }
+    for (const p of projects) settingsBody.appendChild(buildProjectEditor(p));
+  } catch (e: any) {
+    settingsBody.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "muted";
+    err.textContent = "Couldn’t load settings: " + (e?.message || e);
+    settingsBody.appendChild(err);
+  } finally {
+    settingsLoading = false;
+  }
+}
+
+settingsToggle.addEventListener("click", () => {
+  settingsOpen = !settingsOpen;
+  settingsBody.hidden = !settingsOpen;
+  settingsToggle.setAttribute("aria-expanded", String(settingsOpen));
+  settingsToggle.classList.toggle("expanded", settingsOpen);
+  if (settingsOpen) void loadSettings();
+});
 
 // ---- live browser view ----------------------------------------------------
 // Polls the show_browser_to_user tool, which keeps a CDP screencast of the
@@ -628,4 +1373,5 @@ app.connect().then(() => {
   if (ctx) applyHostContext(ctx);
   // Stats load from ontoolresult once the first snapshot confirms the runtime is
   // ready (the pipeline can't run without it), so nothing to do here.
+  if (!postingVolumeLoaded) void loadPostingVolume();
 });

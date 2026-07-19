@@ -16,13 +16,16 @@ const manifest = JSON.parse(read("mcp/manifest.json"));
 
 assert.match(skill, /Treat the user's setup request as a terminal\s+goal/);
 assert.match(skill, /Do not ask whether to run setup/);
-assert.match(skill, /run the draft-only verification/);
+assert.match(
+  skill,
+  /Verification means scheduling\s+the autopilot and letting the kicker drive it/,
+);
 assert.match(server, /ONBOARDING IS A TERMINAL GOAL/);
 assert.match(server, /confirm:true without waiting for another yes\/no reply/);
 assert.match(server, /ready_for_verification/);
-assert.match(server, /state: "runtime_not_ready"/);
+assert.match(server, /runtime_ready: false/);
 assert.match(server, /runDoctorPhase\("full"\)/);
-assert.match(panel, /Set up social autoposter end to end now/);
+assert.match(panel, /Set up S4L plugin end to end now/);
 assert.match(panel, /btnSetup\.disabled = false/);
 assert.match(panelHtml, /The Set up button handles this automatically/);
 assert.match(panelHtml, /id="onboarding-details"/);

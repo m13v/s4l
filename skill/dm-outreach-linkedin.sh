@@ -12,7 +12,7 @@ set -euo pipefail
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -31,7 +31,18 @@ source "$(dirname "$0")/lock.sh"
 # mcp__linkedin-agent Playwright MCP to the CDP-driven harness Chrome (port 9556).
 source "$(dirname "$0")/lib/linkedin-backend.sh"
 acquire_lock "linkedin-browser" 3600
-ensure_linkedin_browser_for_backend
+# rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+# Chrome); convert to clean exit 0 here. NOTE: log() is not defined yet at
+# this point, hence plain echo.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 acquire_lock "dm-outreach-linkedin" 2700
 
 # Load secrets
@@ -45,7 +56,7 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/dm-outreach-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== LinkedIn DM Outreach Run: $(date) ==="
@@ -233,7 +244,17 @@ Inspect the send result (capture_screenshot + Read the PNG to confirm the messag
 CRITICAL: ALL browser calls MUST use the mcp__linkedin-harness__bh_run tool (the BROWSER BACKEND block above). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a bh_run call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
 PROMPT_EOF
 
-ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+# rc=78 here means a peer stole the pipeline lock mid-run (we normally
+# re-enter our own); skip cleanly rather than fight over the window.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline took the 9556 Chrome; skipping the Claude step"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-linkedin" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: LinkedIn DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
 

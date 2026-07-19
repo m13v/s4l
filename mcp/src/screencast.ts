@@ -18,11 +18,43 @@
  */
 
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+import { logLine } from "./telemetry.js";
+
+// One structured relay line (context "browser-foreground", the same lane the
+// menubar's NSWorkspace observer emits on) every time THIS module raises the
+// managed Chrome. The observer records THAT the window came to the front;
+// these lines record WHY (screencast attach vs explicit front action), so the
+// two join on timestamp in Cloud Logging.
+function logBringToFront(source: string, extra: Record<string, unknown>): void {
+  try {
+    logLine(
+      "stdout",
+      JSON.stringify({ ev: "browser_bring_to_front", source, ...extra }),
+      "browser-foreground"
+    );
+  } catch {
+    /* telemetry must never break the screencast */
+  }
+}
 
 // Untyped indirection: Node ships a global WebSocket at runtime (>=21) but
 // @types/node doesn't always declare it as a value, and MessageEvent isn't typed
 // without the DOM lib. Reach for it dynamically and keep the event handlers `any`.
-const WS: any = (globalThis as any).WebSocket;
+//
+// Claude Desktop launches this server with whatever `node` is on the user's
+// PATH, which can be 18/20 with no global WebSocket. Fall back to the bundled
+// `ws` package, whose browser-style API (onopen/onmessage/send/close/readyState)
+// matches how this module drives the socket.
+const WS: any =
+  (globalThis as any).WebSocket ??
+  (() => {
+    try {
+      return createRequire(import.meta.url)("ws").WebSocket;
+    } catch {
+      return undefined;
+    }
+  })();
 
 interface CdpTarget {
   id: string;
@@ -33,13 +65,14 @@ interface CdpTarget {
 }
 
 // Ports we manage a Chrome on, most-likely-active first. TWITTER_CDP_URL (the
-// twitter harness) wins if set; the rest cover reddit / browser-harness / assrt.
+// twitter harness) wins if set; the rest cover linkedin (9556) / reddit (9557) /
+// browser-harness / assrt.
 function candidatePorts(): number[] {
   const ports: number[] = [];
   const env = process.env.TWITTER_CDP_URL || "";
   const m = env.match(/:(\d+)/);
   if (m) ports.push(Number(m[1]));
-  for (const p of [9555, 9557, 9222, 9223, 9755]) {
+  for (const p of [9555, 9556, 9557, 9222, 9223, 9755]) {
     if (!ports.includes(p)) ports.push(p);
   }
   return ports;
@@ -117,6 +150,14 @@ class Screencast {
       this.port = chosenPort as number;
       this.targetTitle = target.title || "";
       this.targetUrl = target.url || "";
+      // connect() just sent Page.bringToFront (Chrome won't stream frames for a
+      // background tab), which raises the harness window — record each raise.
+      // Reconnects happen silently on every frame poll after the attached tab
+      // dies, so this line is the ONLY attribution for reconnect-storm raises.
+      logBringToFront("screencast_attach", {
+        port: chosenPort,
+        url: (target.url || "").slice(0, 200),
+      });
       return { ok: true };
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) };
@@ -146,6 +187,12 @@ class Screencast {
         clearTimeout(to);
         this.ws = ws;
         this.send("Page.enable");
+        // Activate this tab first. Chrome only streams screencast frames for a
+        // page whose RenderWidget is visible; a background tab (or one behind
+        // another window) emits zero frames, which strands the panel on
+        // "Connecting…". bringToFront makes the attached tab the foreground tab
+        // so startScreencast has something to render.
+        this.send("Page.bringToFront");
         this.send("Page.startScreencast", {
           format: "jpeg",
           quality: 55,
@@ -294,5 +341,10 @@ export async function bringBrowserToFront(
   if (process.platform === "darwin") {
     await raiseMacWindow(chosenPort);
   }
+  logBringToFront("front_action", {
+    port: chosenPort,
+    url: (target.url || "").slice(0, 200),
+    raised_os_window: process.platform === "darwin",
+  });
   return { ok: true, port: chosenPort };
 }

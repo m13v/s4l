@@ -40,19 +40,19 @@ set -euo pipefail
 # together, both on 9556). The per-phase locks do NOT prevent this because
 # they release between phases. This guard makes the ENTIRE run a singleton:
 # if a prior run-linkedin.sh is still alive, this fire exits immediately.
-SAPS_LI_RUN_LOCK="/tmp/saps-run-linkedin.lock"
-if mkdir "$SAPS_LI_RUN_LOCK" 2>/dev/null; then
-  echo $$ > "$SAPS_LI_RUN_LOCK/pid"
+S4L_LI_RUN_LOCK="/tmp/s4l-run-linkedin.lock"
+if mkdir "$S4L_LI_RUN_LOCK" 2>/dev/null; then
+  echo $$ > "$S4L_LI_RUN_LOCK/pid"
 else
-  _li_holder="$(cat "$SAPS_LI_RUN_LOCK/pid" 2>/dev/null || echo "")"
+  _li_holder="$(cat "$S4L_LI_RUN_LOCK/pid" 2>/dev/null || echo "")"
   if [ -n "$_li_holder" ] && kill -0 "$_li_holder" 2>/dev/null; then
     echo "[run-linkedin] singleton guard: prior full run (pid $_li_holder) still alive; exiting this fire to avoid two drivers on the 9556 Chrome"
     exit 0
   fi
   # holder is dead -> stale lock; reclaim it
   echo "[run-linkedin] singleton guard: reclaiming stale run lock (dead pid ${_li_holder:-unknown})"
-  rm -rf "$SAPS_LI_RUN_LOCK"
-  mkdir "$SAPS_LI_RUN_LOCK" && echo $$ > "$SAPS_LI_RUN_LOCK/pid"
+  rm -rf "$S4L_LI_RUN_LOCK"
+  mkdir "$S4L_LI_RUN_LOCK" && echo $$ > "$S4L_LI_RUN_LOCK/pid"
 fi
 
 # Transport backend selector (2026-05-28). Two interchangeable paths for the
@@ -85,7 +85,7 @@ LINKEDIN_BACKEND="${LINKEDIN_BACKEND:-browser}"
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 # Only gates the browser backend — UniPile has no headed session to compromise.
 if [ "$LINKEDIN_BACKEND" = "browser" ] && [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -199,7 +199,7 @@ PY
 # Trap chain: lock.sh has already installed _sa_release_locks on
 # EXIT INT TERM HUP. Replace with a chained handler so summary fires first,
 # then locks release. _sa_release_locks remains in scope after sourcing.
-trap '_sa_emit_run_summary_oneshot; _sa_release_locks; rm -rf "$SAPS_LI_RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
+trap '_sa_emit_run_summary_oneshot; _sa_release_locks; rm -rf "$S4L_LI_RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
 
 # ===== Phase A: discovery + scoring =====
 python3 "$REPO_DIR/scripts/linkedin_search_topic_schema.py" 2>>"$LOG_FILE" || true
@@ -868,7 +868,18 @@ else
   # <60s stale (tail-flush window), producing $8.91 empty-envelope runs.
   # 2026-05-01: false-positive hardened by env-var bypass + pgrep alive check.
   acquire_lock "linkedin-browser" 3600
-  ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+  # rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+  # Chrome); must be converted to exit 0 HERE, in the parent shell (an exit
+  # inside ensure_* only kills the tee subshell; 2026-07-06 bug).
+  _LI_BOOT_RC=0
+  ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+  if [ "$_LI_BOOT_RC" -eq 78 ]; then
+      log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+      exit 0
+  elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+      log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+      exit "$_LI_BOOT_RC"
+  fi
 
   set +e
   "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
@@ -1083,9 +1094,17 @@ echo "Phase A: chose project=$PA_PROJECT topic='$PA_SEARCH_TOPIC' activity=$PA_A
 
 # Look up the chosen project's full config (only this one).
 PROJECT_FULL=$(python3 -c "
-import json, os
+import json, os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+import learned_preferences as lp
 c = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 p = next((p for p in c.get('projects',[]) if p['name']=='$PA_PROJECT'), {})
+# learned_preferences is a SINGLE install-wide block since 2026-07-08 (see
+# scripts/learned_preferences.py), not one per project. Stamped in under the
+# same key so the existing prose below ('learned_preferences.draft_style_notes
+# entry ... overrides the engagement style') keeps working unchanged.
+p = dict(p)
+p['learned_preferences'] = lp.get_global_block(c)
 print(json.dumps(p, indent=2))
 ")
 
@@ -1096,14 +1115,14 @@ print(json.dumps(p, indent=2))
 # generate_styles_block path). The picked style flows three places, identical
 # to run-twitter-cycle.sh: (1) --style filter for top_performers.py so the
 # exemplars section shows only posts matching the assigned style, (2)
-# saps_render_style_block so the prompt block embeds the same assignment, (3)
+# s4l_render_style_block so the prompt block embeds the same assignment, (3)
 # --assigned-style/--assigned-mode flags on log_post.py so the post pipeline
 # coerces USE-mode drift back to the assigned name and registers INVENT-mode
 # inventions. On invent mode PICKED_STYLE is empty and top_performers stays
 # unfiltered (model sees the full landscape to invent against).
 source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_linkedin_assign_XXXXXX.json)
-saps_pick_style linkedin posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_linkedin_assign_XXXXXX.json)
+s4l_pick_style linkedin posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
 PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -1129,7 +1148,7 @@ if [ -n "$PICKED_STYLE" ]; then
 else
     TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2>/dev/null || echo "(top performers report unavailable)")
 fi
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" linkedin posting)
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" linkedin posting)
 # Best-effort cleanup of the assignment tempfile at wrapper exit.
 trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
 
@@ -1221,6 +1240,12 @@ $STYLES_BLOCK
      (OMIT --new-style entirely in USE mode.)
    Apply the project's voice block (voice.tone, never violate voice.never,
    mirror voice.examples if present). Reply in $PA_LANG.
+   The learned_preferences block in the Project config above (when present) is
+   distilled human review feedback and is MANDATORY, not advisory: follow every
+   learned_preferences.draft_style_notes entry when writing (it overrides the
+   engagement style's structural template on conflict), and treat
+   learned_preferences.audience_avoid / thread_avoid matches as strong reasons
+   to skip. Never violate content_guardrails.do_not.
    NEVER use em dashes.
 
 2a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
@@ -1404,6 +1429,12 @@ $STYLES_BLOCK
      (OMIT --new-style entirely in USE mode.)
    Apply the project's voice block (voice.tone, never violate voice.never,
    mirror voice.examples if present). Reply in $PA_LANG.
+   The learned_preferences block in the Project config above (when present) is
+   distilled human review feedback and is MANDATORY, not advisory: follow every
+   learned_preferences.draft_style_notes entry when writing (it overrides the
+   engagement style's structural template on conflict), and treat
+   learned_preferences.audience_avoid / thread_avoid matches as strong reasons
+   to skip. Never violate content_guardrails.do_not.
    NEVER use em dashes.
 
 3a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
@@ -1567,7 +1598,17 @@ else
 # linkedin cycle's Phase A) grabbed it in the meantime, this acquire blocks
 # until they release; the FIFO ticket queue in lock.sh guarantees fairness.
 acquire_lock "linkedin-browser" 3600
-ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+# rc=78 skip check: normally Phase B re-enters the pipeline lock from Phase A
+# (holder pid is ours), so 78 here means a peer stole/reclaimed it mid-run.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline took the 9556 Chrome; skipping Phase B"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed before Phase B (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 
 set +e
 "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE"

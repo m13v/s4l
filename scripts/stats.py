@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch, load_env
+from account_resolver import resolve as _resolve_account
 
 
 # --- HTTP wrappers for the Reddit branch (2026-05-12 migration) --------------
@@ -36,24 +37,30 @@ from http_api import api_get, api_post, api_patch, load_env
 def _http_list_reddit_active_posts():
     """Walk /api/v1/posts in pages and return rows for the Reddit refresh job.
 
-    The /api/v1/posts GET caps a single page at 500. Sort by id ASC so we can
-    page deterministically; we re-issue with an increasing id cursor until the
-    server returns a short page. We need scan_no_change_count, posted_at,
-    engagement_updated_at, deletion_detect_count, upvotes, comments_count.
+    The /api/v1/posts GET caps a single page at 500. 2026-07-14 fix: the old
+    version broke after the FIRST page on the (long-stale) assumption that the
+    active-post count was "well under 500" — with ~12k active reddit rows that
+    silently pinned Step 2 to the oldest 500 rows forever, so recent posts
+    never got deletion-detected. The API has no id cursor, but `since` filters
+    posted_at >= X, so we page by an ascending posted_at cursor: `since` is
+    inclusive, the boundary row re-appears on the next page and is deduped via
+    seen_ids. We need scan_no_change_count, posted_at, engagement_updated_at,
+    deletion_detect_count, upvotes, comments_count.
     """
     out = []
     seen_ids = set()
-    cursor_since = None  # unused for id-asc paging
-    last_seen_id = 0
+    cursor = None  # ISO posted_at of the newest row seen so far
     while True:
         query = {
             "platform": "reddit",
             "status": "active",
             "has_our_url": "true",
-            "order_by": "id",
+            "order_by": "posted_at",
             "order_dir": "asc",
             "limit": 500,
         }
+        if cursor:
+            query["since"] = cursor
         resp = api_get("/api/v1/posts", query=query)
         rows = ((resp or {}).get("data") or {}).get("posts") or []
         new_rows = [r for r in rows if r.get("id") and r["id"] not in seen_ids]
@@ -62,12 +69,10 @@ def _http_list_reddit_active_posts():
         for r in new_rows:
             seen_ids.add(r["id"])
             out.append(r)
-            if r["id"] > last_seen_id:
-                last_seen_id = r["id"]
-        # Without a server-side cursor, we get the same first 500 every call.
-        # Break to avoid an infinite loop; the typical Reddit active-post count
-        # is well under 500 so one page covers it.
-        break
+        stamps = [r.get("posted_at") for r in new_rows if r.get("posted_at")]
+        if len(rows) < 500 or not stamps:
+            break
+        cursor = max(stamps)
     return out
 
 
@@ -332,14 +337,15 @@ from moltbook_tools import (
     MoltbookRateLimitedError,
 )
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 
 
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
 
 
 class HttpNotFoundError(Exception):
@@ -441,6 +447,26 @@ def fetch_reddit_json(url, user_agent, max_retries=2, timeout=15):
     (success AND error) into _reddit_rate_state so the caller can pace.
     On 429, honors Retry-After (capped to 120s) and retries.
     """
+    # 2026-07-14 transport fix: Reddit started 403-blocking plain urllib on
+    # *.json (2026-05-28), which silently killed this scan (every poll came
+    # back as an HTML block page -> 'empty'/'error', zero rows patched since).
+    # Route through the logged-in harness browser first, the same transport
+    # reddit_tools._do_request has used since 2026-05-29 (the replies pass in
+    # this file already goes through it via batch_fetch_info and kept working).
+    # urllib below stays as the fallback; REDDIT_FETCH_BACKEND=urllib forces it.
+    if os.environ.get("REDDIT_FETCH_BACKEND", "harness").lower() != "urllib":
+        try:
+            from reddit_browser_fetch import browser_get_json
+            body, code = browser_get_json(url)
+            if code == 200 and body:
+                try:
+                    return ("ok", json.loads(body))
+                except Exception:
+                    pass  # non-JSON body -> fall through to urllib
+            elif code == 404:
+                return ("not_found", None)
+        except Exception:
+            pass
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     for attempt in range(max_retries + 1):
         try:
@@ -680,7 +706,7 @@ def refresh_reddit(db, user_agent, config=None, quiet=False):
         else:
             # our_url is a thread URL without a comment ID
             # Check if it's our original post (we are the thread author)
-            is_our_post = thread_author.lower() == config.get("accounts", {}).get("reddit", {}).get("username", "").lower()
+            is_our_post = thread_author.lower() == (_resolve_account("reddit") or "").lower()
 
             if is_our_post:
                 # Original post — use thread-level stats (they ARE our stats)
@@ -714,7 +740,7 @@ def refresh_reddit(db, user_agent, config=None, quiet=False):
                 # Check if our comment is still visible by searching response[1]
                 our_found = False
                 our_removed = False
-                our_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+                our_username = _resolve_account("reddit") or ""
                 children = response[1].get("data", {}).get("children", [])
                 for child in children:
                     cd = child.get("data", {})
@@ -803,7 +829,7 @@ def refresh_reddit_resurrect(db, user_agent, config=None, quiet=False, days=60):
     One live detection is enough (bias: don't falsely mark deleted).
     """
     config = config or {}
-    our_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+    our_username = _resolve_account("reddit") or ""
 
     # 2026-05-12: read via /api/v1/posts. `db` is ignored.
     posts_rows = _http_list_reddit_dead_posts(days)
@@ -1753,10 +1779,10 @@ def refresh_twitter(db, config=None, quiet=False, audit_mode=False):
     ttr_total = ttr_updated = ttr_changed = ttr_deleted = ttr_errors = 0
     if not audit_mode:
         # Freshness override for ad-hoc reruns. Cron uses the 5h default;
-        # setting SAPS_TTR_STALE_HOURS=0 forces every active row through this
+        # setting S4L_TTR_STALE_HOURS=0 forces every active row through this
         # cycle (useful right after a capture cycle to watch the refresh loop).
         try:
-            _ttr_stale = float(os.environ.get("SAPS_TTR_STALE_HOURS", "5"))
+            _ttr_stale = float(os.environ.get("S4L_TTR_STALE_HOURS", "5"))
         except ValueError:
             _ttr_stale = 5.0
         ttr_rows = _http_list_twitter_top_replies_to_refresh(stale_hours=_ttr_stale)
@@ -2415,7 +2441,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
+    reddit_username = _resolve_account("reddit") or ""
     user_agent = f"social-autoposter/1.0 (u/{reddit_username})" if reddit_username else "social-autoposter/1.0"
 
     load_env()

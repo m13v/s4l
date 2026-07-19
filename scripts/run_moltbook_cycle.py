@@ -27,6 +27,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, load_env
+from account_resolver import resolve as _resolve_account
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
 from engagement_styles import validate_or_register, pick_style_for_post
 from version import read_version as read_autoposter_version
@@ -34,7 +35,13 @@ from project_topics import topics_for_project
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 SCRIPTS = os.path.join(REPO_DIR, "scripts")
-CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 SKILL_FILE = os.path.join(REPO_DIR, "SKILL.md")
 MOLTBOOK_POST = os.path.join(SCRIPTS, "moltbook_post.py")
 RUN_CLAUDE = os.path.join(SCRIPTS, "run_claude.sh")
@@ -52,9 +59,6 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def api_key():
@@ -345,7 +349,7 @@ def post_and_log(decisions, claude_session_id):
                 "thread_content": "",
                 "our_url": our_url,
                 "our_content": text,
-                "our_account": "matthew-autoposter",
+                "our_account": _resolve_account("moltbook") or "",
                 "source_summary": "moltbook cycle comment",
                 "project": p.get("matched_project", ""),
                 "engagement_style": validated_style or "",

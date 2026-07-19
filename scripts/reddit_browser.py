@@ -84,25 +84,20 @@ def _diag_log(msg):
         pass
 VIEWPORT = {"width": 911, "height": 1016}
 
-# Load Reddit username from config.
-# Prefers the new top-level `reddit_account.username` (2026-05-15) over the
-# legacy `accounts.reddit.username` path. Drift between the two silently
-# broke the post-permalink lookup on the VM (wrong username → JS finds 0
-# matching comments → permalink=None → pipeline records `failed` despite
-# the comment landing on Reddit).
+# Our Reddit username, via the ONE resolver (account_resolver.resolve('reddit'):
+# env -> reddit_account.username login ground truth -> accounts.reddit.username).
+# The dual-key precedence used to be duplicated here; drift between the two keys
+# silently broke the post-permalink lookup on the VM (wrong username → JS finds 0
+# matching comments → permalink=None → pipeline records `failed` despite the
+# comment landing on Reddit). "" means "unknown account" — never a hardcoded
+# fallback, which would mis-attribute on a misconfigured install.
 _config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
-OUR_USERNAME = "Deep_Ad1959"
-if os.path.exists(_config_path):
-    try:
-        with open(_config_path) as f:
-            _cfg = json.load(f)
-        OUR_USERNAME = (
-            (_cfg.get("reddit_account") or {}).get("username")
-            or _cfg.get("accounts", {}).get("reddit", {}).get("username")
-            or OUR_USERNAME
-        )
-    except Exception:
-        pass
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from account_resolver import resolve as _resolve_account
+    OUR_USERNAME = _resolve_account("reddit") or ""
+except Exception:
+    OUR_USERNAME = ""
 
 
 def _ban_entry_to_slug(entry):
@@ -141,7 +136,9 @@ def _load_comment_blocked_subs():
     try:
         with open(_config_path) as f:
             cfg = json.load(f)
-        current_account = (cfg.get("reddit_account") or {}).get("username") or None
+        # Same value as OUR_USERNAME above; resolved once through the ONE
+        # resolver so ban scoping and permalink lookup can never disagree.
+        current_account = OUR_USERNAME or None
         blocked = set()
         bans = cfg.get("subreddit_bans") or {}
         if isinstance(bans, dict):
@@ -243,8 +240,6 @@ def find_reddit_cdp_port():
     return None
 
 
-_LOCK_SESSION_ID = f"python:{os.getpid()}"
-
 # Path to the bash-lock lease helper. Bumping this lease from inside reddit_browser.py
 # is what shields Python-CDP pipelines (run-reddit-search, audit-reddit-resurrect,
 # stats.sh reddit phase, engage-reddit) from the watchdog's 60-90s reclaim. Those
@@ -279,75 +274,113 @@ def _heartbeat_bash_lease():
         pass  # Best-effort. Never fail a CDP op because of lease bookkeeping.
 
 
+# ---- browser-session mutex (2026-07-14: shared implementation) -------------
+# The old inline lock here still had the check-then-write claim race AND the
+# dead-holder starvation (a SIGKILLed peer blocked everyone for the full
+# 300s LOCK_EXPIRY) that twitter_browser.py fixed on 2026-06-16. Both drivers
+# now share scripts/browser_mutex.py (twitter's proven mutex, parameterized):
+# reddit gains the O_EXCL atomic claim, dead-PID reclaim, batch inherit via
+# S4L_LOCK_OWNER, and role-aware posting priority (only active when a caller
+# sets S4L_LOCK_ROLE=post; default scan keeps today's no-preemption behavior).
+# The bash-lease bump rides the mutex's on_touch hook, so every acquire AND
+# refresh keeps the watchdog fed exactly as before.
+from browser_mutex import BrowserMutex
+
+_MUTEX = BrowserMutex(
+    lock_file=LOCK_FILE,
+    label="Reddit browser",
+    lock_expiry=LOCK_EXPIRY,
+    wait_max=LOCK_WAIT_MAX,
+    poll_interval=LOCK_POLL_INTERVAL,
+    on_touch=_heartbeat_bash_lease,
+)
+
+
+def _acquire_browser_lock():
+    _MUTEX.acquire()
+
+
+def _refresh_browser_lock():
+    _MUTEX.refresh()
+
+
 def _release_browser_lock():
-    """Release the lock if we hold it."""
-    try:
-        if os.path.exists(LOCK_FILE):
-            with open(LOCK_FILE) as f:
-                lock = json.load(f)
-            if lock.get("session_id") == _LOCK_SESSION_ID:
-                os.remove(LOCK_FILE)
-    except (json.JSONDecodeError, OSError):
-        pass
+    _MUTEX.release()
 
 
 atexit.register(_release_browser_lock)
 
 
-def _acquire_browser_lock():
-    """Wait for the Reddit browser lock to free, then acquire it.
-
-    Polls every LOCK_POLL_INTERVAL seconds for up to LOCK_WAIT_MAX seconds.
-    Exits 1 only after exhausting the wait budget; the launchd caller will
-    retry on the next 5-min tick.
-    """
-    deadline = time.time() + LOCK_WAIT_MAX
-    while True:
-        if os.path.exists(LOCK_FILE):
-            try:
-                with open(LOCK_FILE) as f:
-                    lock = json.load(f)
-                age = time.time() - lock.get("timestamp", 0)
-                if age >= LOCK_EXPIRY:
-                    break
-                holder = lock.get("session_id", "unknown")
-                if time.time() >= deadline:
-                    print(json.dumps({
-                        "success": False,
-                        "error": f"Reddit browser locked by session {holder} ({int(age)}s); waited {LOCK_WAIT_MAX}s, giving up."
-                    }))
-                    sys.exit(1)
-                time.sleep(LOCK_POLL_INTERVAL)
-                continue
-            except (json.JSONDecodeError, OSError):
-                pass
-        break
-    with open(LOCK_FILE, "w") as f:
-        json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
-    # Also bump the bash-lock lease so the watchdog respects this CDP burst.
-    # See _heartbeat_bash_lease() for why: Python-CDP pipelines never trigger
-    # the MCP PreToolUse heartbeat hook, so without this call the watchdog
-    # would steal the bash lock at age >= 60s during legitimate CDP work.
-    _heartbeat_bash_lease()
+# --- L1/L2 browser-hang guards (2026-07-13, mirrors twitter_browser.py) ------
+# L1: default per-op/navigation timeouts so no Playwright call can hang forever.
+# L2: liveness heartbeat on the shell reddit-browser lock dir; lock held +
+# stale heartbeat = wedged holder, TERMed by watchdog_hung_runs.py in ~30 min
+# instead of the multi-hour age cap. See twitter_browser.py for the incident
+# writeup (2026-07-13 pid 1380 media-capture wedge during a network flap).
+BROWSER_OP_TIMEOUT_MS = 30_000
+BROWSER_NAV_TIMEOUT_MS = 60_000
+_BROWSER_LOCK_HEARTBEAT = "/tmp/social-autoposter-reddit-browser.lock/heartbeat"
+_HB_THROTTLE_S = 5
+_hb_last_touch = 0.0
 
 
-def _refresh_browser_lock():
-    """Refresh the lock timestamp to prevent expiry during long operations.
-
-    Also bumps the bash-lock lease so the watchdog won't reclaim during
-    multi-step CDP ops. Call this from inside long CDP flows (scroll loops,
-    multi-second waits) to keep both the python lock file mtime AND the bash
-    lease fresh.
-    """
+def _touch_browser_heartbeat(*_args):
+    global _hb_last_touch
+    now = time.time()
+    if now - _hb_last_touch < _HB_THROTTLE_S:
+        return
+    _hb_last_touch = now
     try:
-        with open(LOCK_FILE, "w") as f:
-            json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
-    except OSError:
+        if os.path.isdir(os.path.dirname(_BROWSER_LOCK_HEARTBEAT)):
+            with open(_BROWSER_LOCK_HEARTBEAT, "w") as f:
+                f.write(str(int(now)))
+    except Exception:
         pass
-    _heartbeat_bash_lease()
+
+
+def _register_reddit_park_on_exit(cdp_base=""):
+    """Shared tab lifecycle (2026-07-17 unification): park reddit tabs on
+    reddit's own /robots.txt at process exit — the SAME single implementation
+    twitter_browser uses (scripts/browser_lifecycle.py). Static page = no SPA
+    to leak/crash while idle, URL still matches the reddit.com reuse
+    preference above so no new tabs (Target.createTarget is the proven
+    focus-steal trigger). S4L_NO_TAB_PARK=1 escape hatch inside the module.
+    Best-effort: parking must never fail an attach."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from browser_lifecycle import register_park_on_exit
+
+        register_park_on_exit(
+            (cdp_base or os.environ.get("REDDIT_CDP_URL", "").strip()
+             or "http://127.0.0.1:9557").rstrip("/"),
+            ("reddit.com",),
+            "https://www.reddit.com/robots.txt",
+            "reddit_browser",
+        )
+    except Exception:
+        pass
 
 
 def get_browser_and_page(playwright):
+    """Instrumented entry point: attach via _get_browser_and_page_raw, then
+    (L1) set default per-op/navigation timeouts so no page call can hang
+    forever, and (L2) wire the browser-lock liveness heartbeat. All new code
+    should use THIS, never the raw variant."""
+    browser, page, is_cdp = _get_browser_and_page_raw(playwright)
+    try:
+        page.set_default_timeout(BROWSER_OP_TIMEOUT_MS)
+        page.set_default_navigation_timeout(BROWSER_NAV_TIMEOUT_MS)
+    except Exception:
+        pass
+    _touch_browser_heartbeat()
+    try:
+        page.on("request", _touch_browser_heartbeat)
+    except Exception:
+        pass
+    return browser, page, is_cdp
+
+
+def _get_browser_and_page_raw(playwright):
     """Get a logged-in Reddit page, preferring CDP-attach over launch_persistent_context.
 
     Two paths:
@@ -382,6 +415,7 @@ def get_browser_and_page(playwright):
         try:
             cdp_browser = playwright.chromium.connect_over_cdp(cdp_url_env)
             _bh_activity_log("attach_harness", cdp_url_env)
+            _register_reddit_park_on_exit(cdp_url_env)
             # Prefer a context that already carries a live reddit_session; else
             # fall back to the first context (harness is single-profile, logged in).
             chosen = None
@@ -502,6 +536,15 @@ def post_comment(thread_url, text):
 
     Returns: {"ok": true, "permalink": "..."} or {"ok": false, "error": "..."}
     """
+    # Identity gate (mirrors twitter_browser.reply_to_tweet): refuse to post
+    # when no Reddit account resolves. Without it we cannot attribute the
+    # comment or find our own permalink afterwards, and posting with a blank
+    # identity pollutes the shared DB. Fail fast and loud instead.
+    if not OUR_USERNAME:
+        print("[reddit_browser] no reddit account configured "
+              "(accounts.reddit.username / reddit_account.username / "
+              "AUTOPOSTER_REDDIT_USERNAME); refusing to post.", file=sys.stderr)
+        return {"ok": False, "error": "no_account_configured"}
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -543,6 +586,28 @@ def post_comment(thread_url, text):
             if "login" in page.url.lower():
                 return {"ok": False, "error": "not_logged_in"}
 
+            # Tab-collision guard (2026-07-14): every reddit pipeline shares
+            # the ONE harness tab, and a concurrent scan/fetch/engage session
+            # can navigate it between our goto and the checks below. The
+            # missing comment form then misclassified as account_blocked_in_sub
+            # (a PERMANENT verdict) — 5/5 approved cards false-positived this
+            # way on 2026-07-14. Verify the tab still shows OUR thread; re-goto
+            # once if hijacked, and classify a persistent hijack as the
+            # TRANSIENT tab_contention so the row is retried, never buried.
+            import re as _re
+            _tid_m = _re.search(r"/comments/([a-z0-9]+)", old_url)
+            _tid = _tid_m.group(1) if _tid_m else None
+
+            def _tab_is_ours():
+                return bool(_tid) and f"/comments/{_tid}" in (page.url or "")
+
+            if not _tab_is_ours():
+                page.goto(old_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+                _ensure_old_reddit(page)
+                if not _tab_is_ours():
+                    return {"ok": False, "error": "tab_contention"}
+
             # Check if the top-level comment form exists at all.
             # When the sub gates top-level commenting on this account (CrowdControl,
             # AutoMod karma/age threshold, mod-approved-only, shadowban), old reddit
@@ -550,10 +615,20 @@ def post_comment(thread_url, text):
             # page. The sub itself may be public; the gate is account-level. There
             # is no error banner and no API field that exposes this, so the only
             # signal is the missing form on a logged-in page load.
-            has_comment_form = page.locator(
-                ".commentarea .usertext.cloneable, .commentarea > form.usertext"
-            ).count() > 0
+            _form_sel = ".commentarea .usertext.cloneable, .commentarea > form.usertext"
+            has_comment_form = page.locator(_form_sel).count() > 0
             if not has_comment_form:
+                # Slow-render tolerance: give the form a short explicit wait
+                # before concluding the sub gates this account (an instant
+                # count() on a slow load is another false-positive source).
+                try:
+                    page.locator(_form_sel).first.wait_for(state="attached", timeout=6000)
+                    has_comment_form = True
+                except Exception:
+                    pass
+            if not has_comment_form:
+                if not _tab_is_ours():
+                    return {"ok": False, "error": "tab_contention"}
                 return {"ok": False, "error": "account_blocked_in_sub"}
 
             # Some subs render the form but show a gate notice instead of a usable
@@ -771,6 +846,13 @@ def reply_to_comment(comment_permalink, text, dm_id=None):
     Returns: {"ok": true, "applied_campaigns": [...], "reply_text": "..."}
               or {"ok": false, "error": "..."}
     """
+    # Identity gate (mirrors twitter_browser.reply_to_tweet): no resolved
+    # account -> no post. See post_comment above for the rationale.
+    if not OUR_USERNAME:
+        print("[reddit_browser] no reddit account configured "
+              "(accounts.reddit.username / reddit_account.username / "
+              "AUTOPOSTER_REDDIT_USERNAME); refusing to post.", file=sys.stderr)
+        return {"ok": False, "error": "no_account_configured"}
     from playwright.sync_api import sync_playwright
 
     # Pre-flight: refuse to attempt a reply in a sub we know we can't comment in.
@@ -1704,7 +1786,7 @@ def _log_dm_outbound(chat_url, content, dm_id=None, minted_codes=None):
         return False
 
 
-def send_dm(chat_url, message, dm_id=None):
+def send_dm(chat_url, message, dm_id=None, apply_campaigns=True):
     """Send a message in a Reddit chat or PM thread.
 
     For chat URLs (reddit.com/chat/...), navigates to the chat room and
@@ -1746,8 +1828,12 @@ def send_dm(chat_url, message, dm_id=None):
         minted_link_codes = wrap_res.get("minted_codes", [])
 
     # Tool-level campaign suffix injection (guaranteed delivery of literal text).
+    # apply_campaigns=False (via S4L_SKIP_CAMPAIGN_SUFFIX on the send-dm CLI)
+    # opts this DM out — set ONLY for human-drafted escalation replies
+    # (engage-dm-replies Phase 0); see twitter_browser.py send_dm for the
+    # incident rationale. The autopilot never sets it.
     applied_campaigns = []
-    for cid, suffix, sample_rate in _load_active_reddit_campaigns_for_dm():
+    for cid, suffix, sample_rate in (_load_active_reddit_campaigns_for_dm() if apply_campaigns else []):
         if random.random() < sample_rate:
             message = message + suffix
             applied_campaigns.append(cid)
@@ -2461,7 +2547,11 @@ def main():
                 dm_id_arg = int(sys.argv[4])
             except ValueError:
                 print(f"[send-dm] ignoring non-int dm_id arg: {sys.argv[4]!r}", file=sys.stderr)
-        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg)
+        # S4L_SKIP_CAMPAIGN_SUFFIX=1 opts this DM out of campaign suffixes.
+        # Set ONLY by engage-dm-replies Phase 0 when delivering a human-drafted
+        # escalation reply — see send_dm's apply_campaigns comment.
+        _skip_camp = os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        result = send_dm(sys.argv[2], sys.argv[3], dm_id=dm_id_arg, apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
     elif cmd == "compose-dm":

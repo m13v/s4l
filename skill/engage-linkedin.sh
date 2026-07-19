@@ -2,7 +2,7 @@
 # engage-linkedin.sh — LinkedIn engagement loop
 # Phase A: Discover replies/mentions from LinkedIn notifications (Claude-driven MCP).
 # Phase B: Respond to pending LinkedIn replies (Claude-driven, OAuth API for posting).
-# Called by launchd every 3 hours.
+# Called by launchd every 4 hours (03:30/07:30/11:30/15:30/19:30/23:30).
 #
 # IMPORTANT: all LinkedIn browser work goes through the linkedin-harness MCP
 # (bh_run, CDP-driven real Chrome on port 9556), driven by Claude (the LLM).
@@ -17,7 +17,7 @@ set -euo pipefail
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
 if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
-    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
 fi
@@ -84,7 +84,7 @@ LOG_FILE="$LOG_DIR/engage-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 BATCH_ID="enli-$(date +%Y%m%d_%H%M%S)-$$"
 export SA_CYCLE_ID="$BATCH_ID"
 
-log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
 log "=== LinkedIn Engagement Run: $(date) ==="
@@ -242,7 +242,18 @@ PROMPT_EOF
 # SA_PIPELINE_LOCKED=1 + SA_PIPELINE_PLATFORM so the PreToolUse hook
 # (~/.claude/hooks/linkedin-agent-lock.sh) skips the cross-session block check.
 acquire_lock "linkedin-browser" 3600
-ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+# rc=78 is the linkedin-pipeline lock's reserved skip code (peer pipeline is
+# driving the 9556 Chrome). It must be converted to exit 0 HERE, in the parent
+# shell: an exit inside ensure_* only kills the tee subshell (2026-07-06 bug).
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 
 gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase A claude exited with code $?"
 
@@ -297,13 +308,13 @@ print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) i
     # ONE assigned style per reply iteration PROGRAMMATICALLY, mirroring
     # engage-twitter.sh. The picked style flows two places: (1) --style filter
     # for top_performers.py so the per-style exemplars match the assignment,
-    # (2) saps_render_style_block so the prompt embeds the same assignment. On
+    # (2) s4l_render_style_block so the prompt embeds the same assignment. On
     # invent mode picked_style is empty and top_performers stays unfiltered.
     # Replaces the legacy generate_styles_block (which discarded the pick and
     # let the model invent freely).
     source "$REPO_DIR/skill/styles.sh"
-    STYLE_ASSIGN_FILE=$(mktemp -t saps_linkedin_eng_assign_XXXXXX.json)
-    saps_pick_style linkedin replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+    STYLE_ASSIGN_FILE=$(mktemp -t s4l_linkedin_eng_assign_XXXXXX.json)
+    s4l_pick_style linkedin replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
     PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -322,7 +333,7 @@ try:
 except Exception:
     print('use')
 " 2>/dev/null)
-    STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" linkedin replying)
+    STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" linkedin replying)
     rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true
 
     # Top performers feedback report — filtered to the picked style when in
@@ -519,7 +530,17 @@ PROMPT_EOF
     # styles-prep window (~1-3s). FIFO ticket queue in lock.sh ensures
     # fairness if a peer or parallel cycle grabbed it in the meantime.
     acquire_lock "linkedin-browser" 3600
-    ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+    # rc=78 skip check: normally Phase B re-enters the pipeline lock we took in
+    # Phase A (holder pid is ours), so 78 here means a peer stole/reclaimed it.
+    _LI_BOOT_RC=0
+    ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+    if [ "$_LI_BOOT_RC" -eq 78 ]; then
+        log "linkedin-pipeline lock: peer pipeline took the 9556 Chrome; skipping Phase B"
+        exit 0
+    elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+        log "ERROR: linkedin browser bootstrap failed before Phase B (rc=$_LI_BOOT_RC)"
+        exit "$_LI_BOOT_RC"
+    fi
 
     gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
 

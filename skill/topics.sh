@@ -2,24 +2,24 @@
 # Shared search-topic picker helper. Mirrors skill/styles.sh exactly.
 # Usage:
 #   source topics.sh
-#   ASSIGN_FILE=$(mktemp -t saps_topic_assign_XXXXXX.json)
-#   ASSIGNMENT=$(saps_pick_topic studyly twitter "$ASSIGN_FILE")
+#   ASSIGN_FILE=$(mktemp -t s4l_topic_assign_XXXXXX.json)
+#   ASSIGNMENT=$(s4l_pick_topic studyly twitter "$ASSIGN_FILE")
 #   PICKED_TOPIC=$(echo "$ASSIGNMENT" | python3 -c "import json,sys; print((json.load(sys.stdin).get('search_topic') or ''))")
-#   TOPIC_BLOCK=$(saps_render_topic_block "$ASSIGN_FILE")
+#   TOPIC_BLOCK=$(s4l_render_topic_block "$ASSIGN_FILE")
 # Requires REPO_DIR to be set before sourcing.
 #
 # Architecture (2026-05-26 picker rollout):
-#   - saps_pick_topic: per-project programmatic search_topic picker. Emits the
+#   - s4l_pick_topic: per-project programmatic search_topic picker. Emits the
 #     assignment JSON to stdout AND writes it to the optional outfile path so
 #     a sibling shell var can keep the path around and re-read it later.
 #     Replaces the legacy "show all search_topics[], let the model improvise"
 #     pattern, which produced inconsistent per-tweet topic stamps and made
 #     end-to-end attribution noisy.
-#   - saps_render_topic_block: turns an assignment JSON file into the compact
+#   - s4l_render_topic_block: turns an assignment JSON file into the compact
 #     prompt block (one assigned topic + trusted top-N reference context).
-#   - Mirrors styles.sh's saps_pick_style / saps_render_style_block.
+#   - Mirrors styles.sh's s4l_pick_style / s4l_render_style_block.
 
-saps_pick_topic() {
+s4l_pick_topic() {
   local project="$1"
   local platform="${2:-twitter}"
   local outfile="${3:-}"
@@ -38,7 +38,7 @@ print(json.dumps(assignment))
 " 2>/dev/null || echo '{"mode":"cold_start","search_topic":null,"project":"'"$project"'","platform":"'"$platform"'","reference_topics":[],"universe_size":0,"trusted_n":0,"cold_n":0}'
 }
 
-saps_render_topic_block() {
+s4l_render_topic_block() {
   local assign_file="$1"
   python3 -c "
 import json, sys

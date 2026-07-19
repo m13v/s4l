@@ -13,17 +13,12 @@ import { resolvePython } from "./runtime.js";
 
 const require = createRequire(import.meta.url);
 
-export const ONBOARDING_MILESTONES = [
-  "environment_checked",
-  "runtime_ready",
-  "x_connected",
-  "profile_scanned",
-  "project_ready",
-  "topics_seeded",
-  "draft_verified",
-] as const;
-
-export type OnboardingMilestone = (typeof ONBOARDING_MILESTONES)[number];
+// Milestone identifiers are NOT redeclared here. onboarding-ledger.cjs is the
+// single source of truth (it must be plain, build-free CommonJS so bin/cli.js
+// can require() it directly with no compile step) — ONBOARDING_MILESTONES below
+// re-exports its live MILESTONES array instead of hand-copying the list, which
+// is what let "x_verified" exist in one copy but not the other and throw
+// `unknown onboarding milestone` at runtime (2026-07-07).
 export type DoctorPhase = "pre_connect" | "full";
 export type DoctorCheckStatus = "pass" | "fail" | "expected" | "warn";
 
@@ -66,6 +61,7 @@ interface LedgerEvent {
 }
 
 interface LedgerApi {
+  MILESTONES: readonly string[];
   readLedger(): any;
   publicSnapshot(): any;
   recordAttempt(
@@ -97,6 +93,11 @@ interface DoctorApi {
 
 const ledgerApi = require("../shared/onboarding-ledger.cjs") as LedgerApi;
 const doctorApi = require("../shared/doctor.cjs") as DoctorApi;
+
+// Re-export of the ONE runtime array (see the comment above the imports): this
+// is not a second list, just a typed alias for ledgerApi.MILESTONES.
+export const ONBOARDING_MILESTONES = ledgerApi.MILESTONES;
+export type OnboardingMilestone = (typeof ONBOARDING_MILESTONES)[number];
 
 export function onboardingSnapshot() {
   return ledgerApi.publicSnapshot();
@@ -256,8 +257,13 @@ export function flushOnboardingEvents(): Promise<{
         error: "installation identity unavailable",
       };
     }
+    // Onboarding milestones go to the CLOUD RUN host (AUTOPOSTER_LOG_BASE,
+    // default app.s4l.ai), the same GCP-logging lane as the raw log stream: the
+    // relay console.log()s each event so Cloud Run's runtime ships it to Cloud
+    // Logging. NOT the Vercel host (AUTOPOSTER_API_BASE / s4l.ai) the heartbeat
+    // still uses — these events are not a DB row anymore.
     const base = (
-      process.env.AUTOPOSTER_API_BASE || "https://s4l.ai"
+      process.env.AUTOPOSTER_LOG_BASE || "https://app.s4l.ai"
     ).replace(/\/+$/, "");
     let sent = 0;
     // Re-read after every batch. This catches milestone events appended while a

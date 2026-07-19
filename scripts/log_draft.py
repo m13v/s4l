@@ -17,7 +17,7 @@ Usage:
 
 Engagement-style fields (2026-05-22 cutover, closes the Twitter enforcement gap):
     --assigned-style / --assigned-mode
-        Picker output from saps_pick_style. Persisted to
+        Picker output from s4l_pick_style. Persisted to
         twitter_candidates.assigned_style + .assigned_mode so
         twitter_post_plan.py can call validate_or_register with the
         original assignment and coerce USE-mode drift back, or accept the
@@ -51,7 +51,10 @@ from http_api import api_patch
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--candidate-id", type=int, required=True)
+    p.add_argument("--candidate-id", type=int, default=None,
+                   help="twitter_candidates row id (required for --platform twitter).")
+    p.add_argument("--thread-url", default=None,
+                   help="reddit_candidates thread_url (required for --platform reddit).")
     p.add_argument("--text", required=True)
     p.add_argument("--style", default=None)
     p.add_argument(
@@ -70,14 +73,46 @@ def main():
     p.add_argument(
         "--platform",
         default="twitter",
-        choices=["twitter"],
-        help="Reserved for future Reddit/LinkedIn drafts; only twitter for now.",
+        choices=["twitter", "reddit"],
+        help="twitter targets twitter_candidates by id; reddit targets "
+             "reddit_candidates by thread_url (save_draft action).",
     )
     args = p.parse_args()
 
     text = args.text.strip()
     if not text:
         print(json.dumps({"error": "EMPTY_TEXT"}))
+        sys.exit(1)
+
+    # Reddit lane (2026-07-16): the queue worker persists Draft A per thread
+    # (keep-alive + durability, mirroring the twitter-prep flow). Routes
+    # through the same save_draft action post_reddit._db_save_draft uses, so
+    # a later salvage reuses the draft without a second LLM spend.
+    if args.platform == "reddit":
+        if not args.thread_url:
+            print(json.dumps({"error": "THREAD_URL_REQUIRED"}))
+            sys.exit(1)
+        resp = api_patch(
+            "/api/v1/reddit-candidates/by-thread-url",
+            {
+                "thread_url": args.thread_url,
+                "action": "save_draft",
+                "draft_text": text,
+                "draft_engagement_style": args.style,
+            },
+            ok_on_404=True,
+        )
+        if (resp or {}).get("_not_found"):
+            print(json.dumps({"error": "CANDIDATE_NOT_FOUND", "thread_url": args.thread_url}))
+            sys.exit(1)
+        if not (resp or {}).get("ok"):
+            print(json.dumps({"error": "SAVE_DRAFT_FAILED", "thread_url": args.thread_url}))
+            sys.exit(1)
+        print(json.dumps({"logged": True, "thread_url": args.thread_url, "platform": "reddit"}))
+        return
+
+    if args.candidate_id is None:
+        print(json.dumps({"error": "CANDIDATE_ID_REQUIRED"}))
         sys.exit(1)
 
     # Parse --new-style early so a malformed JSON arg fails before we touch

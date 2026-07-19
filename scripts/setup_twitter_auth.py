@@ -46,6 +46,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 # websocket-client is needed for CDP (status/connect). It is NOT needed for
@@ -60,14 +61,8 @@ except ImportError:
         "websocket-client not installed (needed for CDP). pip install websocket-client"
     )
 
-# Live-handle resolver (best-effort). Lets connect_x record the real logged-in
-# @handle alongside the locally-mirrored cookies. Guarded so a missing dep never
-# breaks setup.
+# Make scripts-dir siblings (twitter_cookie_mirror, etc.) importable during setup.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from twitter_account import resolve_handle  # noqa: E402
-except Exception:
-    resolve_handle = None
 
 # Local 0600 cookie mirror — the keychain-independent durability layer (Gap B).
 # Always importable (stdlib only); guarded so a path quirk never breaks setup.
@@ -89,7 +84,7 @@ except Exception:
 # --- Config -----------------------------------------------------------------
 
 # Same managed Chrome the twitter-harness pipeline uses (skill/lib/twitter-backend.sh).
-CDP = os.environ.get("SAPS_TWITTER_CDP_URL", os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555")).rstrip("/")
+CDP = os.environ.get("S4L_TWITTER_CDP_URL", os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555")).rstrip("/")
 PORT = int(CDP.rsplit(":", 1)[-1]) if CDP.rsplit(":", 1)[-1].isdigit() else 9555
 PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / "browser-harness"
 # Same PID file server.py (the twitter-harness MCP) writes, so a Chrome launched
@@ -114,6 +109,29 @@ ABP_PYTHON = Path.home() / "ai-browser-profile" / ".venv" / "bin" / "python"
 
 # --- Chrome lifecycle -------------------------------------------------------
 
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _cdp_urlopen(url, timeout=15):
+    """urlopen for CDP endpoints: never send loopback traffic through a proxy.
+
+    Mirrors browser_harness.admin.cdp_urlopen (same fix, same reason): urllib's
+    default opener honors proxy env vars AND macOS system proxy settings (scutil
+    --proxy). On a box with a system-wide proxy (e.g. a local gost/ISP forwarder)
+    every 127.0.0.1 CDP probe gets routed to the proxy and fails, even though
+    Chrome is genuinely up and curl (env proxies only) works fine. Loopback must
+    always connect direct; a non-loopback CDP URL (S4L_TWITTER_CDP_URL override
+    pointed at a remote endpoint) keeps the default proxy behavior.
+    """
+    # Accept a plain URL string OR a urllib.request.Request (e.g. a PUT to
+    # .../json/new) — both are valid `url` args to opener.open()/urlopen().
+    raw_url = url.full_url if isinstance(url, urllib.request.Request) else url
+    host = (urllib.parse.urlsplit(raw_url).hostname or "").lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return _NO_PROXY_OPENER.open(url, timeout=timeout)
+    return urllib.request.urlopen(url, timeout=timeout)
+
+
 def _port_open(port: int) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.5)
@@ -130,7 +148,7 @@ def _cdp_alive() -> bool:
     if not _port_open(PORT):
         return False
     try:
-        with urllib.request.urlopen(f"{CDP}/json/version", timeout=1.5) as r:
+        with _cdp_urlopen(f"{CDP}/json/version", timeout=1.5) as r:
             return r.status == 200
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
@@ -199,7 +217,12 @@ def _launch_chrome() -> bool:
         cmd += ["--window-position=80,80", "--window-size=1100,900"]
     cmd.append("about:blank")
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # start_new_session: Chrome must not inherit this process's group. When the
+    # caller is a transient launchd job, launchd SIGKILLs the job's whole
+    # process group on exit, reaping Chrome with it; the next lane's relaunch
+    # then steals the user's focus (2026-07-12, same fix as *-backend.sh).
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
     try:
         PID_FILE.write_text(str(proc.pid))
     except OSError:
@@ -222,10 +245,10 @@ def ensure_chrome(launch: bool = True) -> bool:
 # --- CDP attach + login validation (mirrors restore_twitter_session.py) -----
 
 def _attach():
-    targets = json.load(urllib.request.urlopen(f"{CDP}/json", timeout=10))
+    targets = json.load(_cdp_urlopen(f"{CDP}/json", timeout=10))
     page = next((t for t in targets if t.get("type") == "page"), None)
     if not page:
-        page = json.load(urllib.request.urlopen(
+        page = json.load(_cdp_urlopen(
             urllib.request.Request(f"{CDP}/json/new?about:blank", method="PUT"), timeout=10))
     ws = create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
     state = {"id": 0}
@@ -314,19 +337,47 @@ _HANDLE_PLACEHOLDERS = {"", "your-twitter-handle", "@your-twitter-handle"}
 
 
 def _resolve_live_handle(send) -> "str | None":
-    """Read the logged-in @handle from the LIVE x.com session via CDP DOM.
+    """Read the logged-in @handle from the LIVE x.com session.
 
-    resolve_handle() only reads config.json (which on a fresh install is the
-    template placeholder), so it can't discover the real account. This reads the
-    actual logged-in handle from the page so connect_x can persist it. Best
-    effort: returns None on any failure and never raises into the connect flow.
+    On a fresh install config.json carries no handle yet, so this reads the actual
+    logged-in handle from the SAME authenticated session connect_x just validated
+    and stamps it on the durable cookie mirror (see _persist_session). That mirror
+    is what account_resolver.resolve('twitter') falls back to, so attribution is
+    ground truth instead of a hardcoded handle that would silently mis-attribute
+    every post. Two methods, most reliable first:
+
+      1. X's own account/settings.json (canonical `screen_name`). The web client
+         calls this on every load; it is stable across DOM redesigns, unlike the
+         selector-only scrape that kept failing ("handle missing again" during
+         onboarding). One GET on the already-open session: csrf via the
+         non-httpOnly ct0 cookie, auth_token rides along with credentials.
+      2. DOM fallback: the left-nav Profile link href / account-switcher chip.
+
+    Best effort: returns None on any failure and never raises into the connect
+    flow.
     """
-    js = r"""(function(){
-      function fromHref(sel){var a=document.querySelector(sel);if(a){var h=a.getAttribute('href')||'';var m=h.match(/^\/([A-Za-z0-9_]{1,15})$/);if(m)return m[1];}return '';}
-      var h=fromHref('a[data-testid="AppTabBar_Profile_Link"]');
-      if(h)return h;
-      var b=document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
-      if(b){var m=(b.textContent||'').match(/@([A-Za-z0-9_]{1,15})/);if(m)return m[1];}
+    js = r"""(async function(){
+      function ck(n){var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):'';}
+      try{
+        var ct0=ck('ct0');
+        if(ct0){
+          var BEARER='Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+          var urls=['https://api.x.com/1.1/account/settings.json','https://api.twitter.com/1.1/account/settings.json'];
+          for(var i=0;i<urls.length;i++){
+            try{
+              var resp=await fetch(urls[i],{method:'GET',credentials:'include',headers:{'authorization':BEARER,'x-csrf-token':ct0}});
+              if(resp&&resp.ok){var j=await resp.json();if(j&&j.screen_name)return String(j.screen_name);}
+            }catch(e){}
+          }
+        }
+      }catch(e){}
+      try{
+        function fromHref(sel){var a=document.querySelector(sel);if(a){var h=a.getAttribute('href')||'';var m=h.match(/^\/([A-Za-z0-9_]{1,15})$/);if(m)return m[1];}return '';}
+        var h=fromHref('a[data-testid="AppTabBar_Profile_Link"]');
+        if(h)return h;
+        var b=document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+        if(b){var m=(b.textContent||'').match(/@([A-Za-z0-9_]{1,15})/);if(m)return m[1];}
+      }catch(e){}
       return '';
     })()"""
     try:
@@ -336,7 +387,8 @@ def _resolve_live_handle(send) -> "str | None":
             send("Page.navigate", {"url": "https://x.com/home"})
             time.sleep(3)
         for _ in range(8):
-            r = send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+            r = send("Runtime.evaluate",
+                     {"expression": js, "returnByValue": True, "awaitPromise": True})
             v = (r.get("result", {}).get("result", {}) or {}).get("value", "") or ""
             v = v.strip().lstrip("@")
             if v:
@@ -345,41 +397,6 @@ def _resolve_live_handle(send) -> "str | None":
     except Exception:
         return None
     return None
-
-
-def _write_handle_to_config(handle: "str | None") -> bool:
-    """Persist the discovered handle to config.json accounts.twitter.handle, but
-    ONLY when the configured value is empty or the template placeholder, so we
-    never clobber a handle the user set on purpose. Returns True if written.
-
-    This is what makes account_resolver.resolve('twitter') return the REAL
-    account, so our_account (attribution, own-reply skip, account-keyed ops) is
-    correct instead of the poisonous 'your-twitter-handle' default. (2026-06-02)
-    """
-    if not handle:
-        return False
-    try:
-        with open(_CONFIG_JSON, encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:
-        return False
-    accounts = cfg.setdefault("accounts", {})
-    if not isinstance(accounts, dict):
-        return False
-    tw = accounts.setdefault("twitter", {})
-    if not isinstance(tw, dict):
-        return False
-    cur = (tw.get("handle") or "").strip()
-    if cur.lower() not in _HANDLE_PLACEHOLDERS:
-        return False  # a real handle is already set; do not overwrite
-    tw["handle"] = "@" + handle.lstrip("@")
-    try:
-        with open(_CONFIG_JSON, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
-        return True
-    except Exception:
-        return False
 
 
 def _persist_session() -> None:
@@ -421,17 +438,15 @@ def _persist_session() -> None:
     if not cookies:
         return
 
-    # Fall back to the configured handle if live resolution came up empty.
-    if handle and _write_handle_to_config(handle):
-        print(f"setup_twitter_auth: recorded live X handle @{handle} in config.json "
-              "(accounts.twitter.handle); attribution + own-reply dedup now scoped "
-              "to the real account", file=sys.stderr)
-    if not handle and resolve_handle is not None:
-        try:
-            handle = resolve_handle()
-        except Exception:
-            handle = None
-
+    # The handle's single durable home is the cookie mirror (written just below).
+    # We deliberately do NOT also copy it into config.json: account_resolver
+    # resolves env -> config override -> this mirror, so a second copy in config
+    # would be duplicated state that can drift — and its going missing there was the
+    # "posts land 0/N, no_account_configured" bug. config.accounts.twitter.handle
+    # stays a user-only override. When live resolution came up empty, save_cookies
+    # carries the previously-stamped handle forward, so a known account is never
+    # downgraded to null.
+    #
     # Local mirror — keychain-independent durability. This is the only cookie
     # store; the VM-era server store (/api/v1/twitter/session-cookies) was
     # removed 2026-06-17 when we stopped running AppMaker VMs.
@@ -441,6 +456,10 @@ def _persist_session() -> None:
             print(f"setup_twitter_auth: mirrored {n} x.com cookies to "
                   f"{twitter_cookie_mirror.MIRROR_PATH} (survives keychain re-lock "
                   "/ Cookies-DB wipe on relaunch)", file=sys.stderr)
+            if handle:
+                print(f"setup_twitter_auth: durable X handle @{handle} stamped on the "
+                      "cookie mirror; account_resolver resolves it for attribution + "
+                      "own-reply dedup", file=sys.stderr)
         except Exception as e:
             print(f"setup_twitter_auth: local mirror save skipped ({e})", file=sys.stderr)
 
@@ -652,8 +671,8 @@ def _import_from(source: str) -> dict:
     # or behind the autoposter's own Chrome window, so a human needs real time
     # to find and click it. A 60s cap killed it mid-prompt and dumped the user
     # into the manual-login fallback. Give the dialog room; override with
-    # SAPS_COOKIE_COPY_TIMEOUT (seconds), 0/empty = no timeout.
-    _raw_to = os.environ.get("SAPS_COOKIE_COPY_TIMEOUT", "600").strip()
+    # S4L_COOKIE_COPY_TIMEOUT (seconds), 0/empty = no timeout.
+    _raw_to = os.environ.get("S4L_COOKIE_COPY_TIMEOUT", "600").strip()
     try:
         copy_timeout = float(_raw_to) if _raw_to else None
     except ValueError:
@@ -776,7 +795,7 @@ def _count_x_cookies_on_disk() -> int:
     import tempfile
     tmpdir = None
     try:
-        tmpdir = Path(tempfile.mkdtemp(prefix="saps_flushchk_"))
+        tmpdir = Path(tempfile.mkdtemp(prefix="s4l_flushchk_"))
         dst = tmpdir / "Cookies"
         shutil.copy2(db, dst)
         for suffix in ("-wal", "-shm"):
@@ -998,17 +1017,50 @@ def cmd_connect(args) -> dict:
     except Exception as e:
         return {"ok": False, "connected": False, "state": "error", "error": str(e), "cdp": CDP}
 
-    # 1b. Headless + Keychain pre-flight (#3 + #4, added 2026-06-02).
-    # On macOS, copy_browser_cookies.py needs to read the per-browser Safe
-    # Storage entry from the OS keychain. SSH-invoked processes get
-    # errSecAuthFailed silently — no prompt, no warning. We probe up front so
-    # the user sees "your keychain is locked / run unlock-keychain" instead of
-    # the misleading "log in manually" cascade.
-    headless = _is_headless()
-    if headless:
-        # Probe with the first source's likely browser label. We don't know
-        # which source will succeed yet, so probe Chrome (the autoposter
-        # default); if that's denied, all the AUTO_SOURCES will be too.
+    # 1b. Choose the connection PATH before doing any keychain work. There are
+    #     two mutually exclusive paths, and only one of them touches the keychain:
+    #       - IMPORT: copy an existing x.com session out of the user's everyday
+    #         browser. This reads that browser's "Safe Storage" key from the macOS
+    #         Keychain, so it (and ONLY it) is gated by the headless keychain
+    #         preflight below.
+    #       - MANUAL LOGIN: open the managed Chrome's own login page and let the
+    #         user sign in by hand. Reads NO keychain and needs NO everyday-browser
+    #         session, so it must NEVER be blocked by the keychain preflight.
+    #     Auto-import is only possible when some installed browser actually holds
+    #     an x.com session. On a fresh or remote/headless box there is nothing to
+    #     import, so gating manual login behind the keychain check dead-ended setup
+    #     on "keychain locked" even though there was no session to copy anyway
+    #     (the exact wedge that stalled the macstadium test box). We now skip
+    #     straight to manual login whenever there's nothing to import.
+    #
+    #     Source selection:
+    #       - explicit --source X   -> just that one (one keychain prompt)
+    #       - --source all          -> the full chrome/arc/brave/edge sweep (legacy)
+    #       - no --source (default) -> the browser(s) that ACTUALLY hold an x.com
+    #         session, so we prompt the keychain for exactly the right one.
+    if args.source == "all":
+        sources = AUTO_SOURCES
+        has_importable = True
+    elif args.source:
+        sources = [args.source]
+        has_importable = True
+    else:
+        _srcs = _list_sources()
+        _with_session = [s["spec"] for s in _srcs if s.get("x_session")]
+        sources = _with_session or ["chrome:Default"]
+        has_importable = bool(_with_session)
+
+    manual_login = bool(getattr(args, "manual_login", False))
+    # Attempt an auto-import ONLY when the user didn't force manual login AND
+    # there is a real session to copy. Otherwise fall through to manual login.
+    will_import = has_importable and not manual_login
+
+    # 1c. Headless + Keychain pre-flight (#3 + #4, added 2026-06-02) — relevant
+    #     ONLY to the import path. copy_browser_cookies.py must read the per-browser
+    #     Safe Storage entry from the OS keychain; SSH/launchd-invoked processes get
+    #     errSecAuthFailed silently (no prompt). The manual-login path skips this.
+    if will_import and _is_headless():
+        # Probe Chrome (the autoposter default); if that's denied, the rest are too.
         kc_ok, kc_detail = _keychain_safe_storage_ok("Chrome")
         if not kc_ok:
             return {
@@ -1024,28 +1076,17 @@ def cmd_connect(args) -> dict:
                     "or another headless context). No GUI prompt is shown for this — macOS "
                     "denies access silently. To fix, run this once in the same session:\n"
                     "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
-                    "Then re-run connect_x. If you're on the autoposter machine via SSH, you "
-                    "may also need to run it before every fresh shell, or persist with "
-                    "`security set-keychain-settings -lut 0`."
+                    "Then re-run connect_x. Or connect X with manual login instead — that "
+                    "signs in directly in the autoposter's own browser and needs no keychain."
                 ),
                 "remediation_cmd": "security unlock-keychain ~/Library/Keychains/login.keychain-db",
                 "cdp": CDP,
             }
 
-    # 2. Import from the user's everyday browser.
-    #    - explicit --source X        -> just that one (one keychain prompt)
-    #    - --source all               -> the full chrome/arc/brave/edge sweep (legacy)
-    #    - no --source (the default)  -> auto-pick the browser(s) that ACTUALLY
-    #      hold an x.com session, so we prompt the keychain for exactly the right
-    #      one instead of blindly walking all four and prompting per browser.
-    if args.source == "all":
-        sources = AUTO_SOURCES
-    elif args.source:
-        sources = [args.source]
-    else:
-        sources = _auto_pick_sources()
+    # 2. Import from the user's everyday browser (skipped entirely when we're on
+    #    the manual-login path — `will_import` False makes this loop a no-op).
     attempts = []
-    for src in sources:
+    for src in (sources if will_import else []):
         res = _import_from(src)
         copied = res.get("stdout", "")
         detail = copied or res.get("error") or res.get("stderr")
@@ -1110,8 +1151,15 @@ def cmd_connect(args) -> dict:
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
-    manual_login = bool(getattr(args, "manual_login", False))
-    open_login = manual_login or rolled_up_error_type == "keychain_acl_denied"
+    # Open a focused login window when the user asked for manual login, when the
+    # keychain prompt was denied (import can't proceed), OR when there was nothing
+    # to import in the first place — in that last case manual login is the ONLY
+    # path that can work, so we must open the window rather than dead-end.
+    open_login = (
+        manual_login
+        or not will_import
+        or rolled_up_error_type == "keychain_acl_denied"
+    )
 
     shown = False
     if open_login:
@@ -1127,7 +1175,7 @@ def cmd_connect(args) -> dict:
         # That race is what made setup misreport the handle as "missing." If the
         # cookie appears, fall through to the same connected/persist/handle path the
         # auto-import success branch uses.
-        login_wait = getattr(args, "login_wait", 90.0)
+        login_wait = getattr(args, "login_wait", 300.0)
         if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
             try:
                 if _is_session_valid():
@@ -1168,16 +1216,23 @@ def cmd_connect(args) -> dict:
         )
         extra["remediation"] = "rerun_connect_x_and_click_allow"
     elif open_login:
-        # Explicit --manual-login: a window is open and we waited; they just
-        # haven't finished signing in yet.
+        # Manual login: either the caller asked for it (--manual-login) or there
+        # was no existing X session anywhere to import, so this is the only path.
+        # A focused login window is open and we waited; they just haven't finished
+        # signing in yet.
+        _why = (
+            "" if will_import
+            else "No existing X session was found in your everyday browser to import, so "
+        )
+        _tried = (" (Auto-import tried: " + ", ".join(sources) + ".)") if will_import else ""
         note = (
-            "A Chrome window for the autoposter is open at the X login page"
+            _why
+            + "a Chrome window for the autoposter is open at the X login page"
             + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
             + " and you are NOT logged in yet. Log in there yourself — username, password, "
             "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
             "to confirm and I'll re-check (run connect_x again). The session is saved to the "
-            "autoposter's own profile, so this is a one-time step. "
-            "(Auto-import tried: " + ", ".join(sources) + ".)"
+            "autoposter's own profile, so this is a one-time step." + _tried
         )
     else:
         # Auto-import failed for a non-deny reason and the user did NOT ask for
@@ -1230,10 +1285,12 @@ def main() -> int:
                         "the login window only opens when the user DENIED the keychain "
                         "prompt; every other auto-import failure returns needs_login "
                         "without popping an unexpected browser window.")
-    c.add_argument("--login-wait", type=float, default=90.0,
+    c.add_argument("--login-wait", type=float, default=300.0,
                    help="Seconds to wait for a MANUAL login to complete before "
-                        "returning needs_login (default 90; 0 disables the wait). "
-                        "Prevents the detection race that misreports the handle as missing.")
+                        "returning needs_login (default 300; 0 disables the wait). "
+                        "A human finding the on-screen/VNC window plus password + 2FA "
+                        "routinely exceeds 90s, so the wait is generous. Prevents the "
+                        "detection race that misreports the handle as missing.")
     args = ap.parse_args()
 
     if args.cmd == "detect-sources":

@@ -59,11 +59,18 @@ log "recover-check eligible; mode=${MODE:-?}"
 # linkedin-backend.sh exports LINKEDIN_CDP_URL + LINKEDIN_DISCOVER_PYTHON +
 # MCP_CONFIG_FILE and provides ensure_linkedin_browser_for_backend (launches the
 # port-9556 harness Chrome and acquires the cross-pipeline lock).
-export SAPS_PIPELINE_NAME="linkedin-recovery"
+export S4L_PIPELINE_NAME="linkedin-recovery"
 # shellcheck disable=SC1091
 source "$REPO_DIR/skill/lib/linkedin-backend.sh"
 
-if ! ensure_linkedin_browser_for_backend; then
+# rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+# Chrome): a skip, not a browser failure.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
     log "ERROR: could not bring up linkedin-harness Chrome; will retry next hour"
     exit 0
 fi

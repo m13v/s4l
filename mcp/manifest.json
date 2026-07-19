@@ -1,20 +1,20 @@
 {
   "dxt_version": "0.1",
   "name": "social-autoposter",
-  "display_name": "Social Autoposter",
-  "version": "1.6.74",
-  "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
-  "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Fully quit and restart Claude (quit and reopen, not just close the window).\n2. Choose **Set up social-autoposter** from the prompt menu or type **Set me up on social-autoposter end to end**. The agent installs the owned runtime, connects X, discovers and configures your product, and verifies with a draft-only cycle.",
+  "display_name": "S4L",
+  "version": "1.7.6",
+  "description": "Draft, review, approve, and autopilot X/Twitter posts.",
+  "long_description": "## **⚠️ The disclaimer above is generic Claude boilerplate.** Anthropic shows the same warning on every plugin regardless of what it does; any plugin has the same level of access as any app you download from the internet.\n\nS4L is an open source product developed by Mediar.ai Incorporated, a VC-backed San Francisco-based startup.\n\nTo get started:\n\n1\\. Copy this prompt: **Set me up on S4L plugin end to end**\n\n2\\. Quit with CMD+Q, reopen Claude, paste into a new chat.\n\nWhat happens next:\n\n* About every 5 minutes S4L scans X for posts that match your topics and drafts replies in your voice.\n* Drafts show up as review cards, usually the first within a few minutes. Nothing is posted automatically; you approve each one.\n* Posting autopilot stays off until you explicitly turn it on.",
   "author": {
-    "name": "m13v",
+    "name": "S4L.ai",
     "email": "i@m13v.com",
-    "url": "https://m13v.com"
+    "url": "https://s4l.ai"
   },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
     "mcp_config": {
-      "command": "node",
+      "command": "${__dirname}/vendor/node-darwin-arm64/bin/node",
       "args": [
         "${__dirname}/dist/index.js"
       ],
@@ -25,24 +25,68 @@
   },
   "tools": [
     {
+      "name": "engagement_mode",
+      "description": "Choose engagement lanes (personal brand + optional product promotion)"
+    },
+    {
       "name": "project_config",
-      "description": "The one tool to configure, edit, and connect a project's X account. Run first and continue end to end: inspect status, connect X, discover and configure (or later edit) the product, seed topics, and proceed to draft-only verification."
+      "description": "Configure or edit a project"
     },
     {
-      "name": "runtime",
-      "description": "The one plumbing tool for the local runtime lifecycle, action-based: status (is the owned Python/Chromium runtime installed, plus mid-install progress), install (provision/repair it, safe and idempotent), version + update (report and install new releases), and doctor + doctor_status (structured environment diagnostics, pre-connect during onboarding and full after X is connected)."
-    },
-    {
-      "name": "draft_cycle",
-      "description": "Scan X, draft replies locally, walk through each one (approve or skip), post only the approved ones."
+      "name": "approve_drafts",
+      "description": "Post chosen drafts"
     },
     {
       "name": "get_stats",
-      "description": "Read-only post and engagement stats for the X/Twitter rail over the last N days."
+      "description": "Get X/Twitter stats"
+    },
+    {
+      "name": "runtime",
+      "description": "Runtime: status, update & diagnostics"
+    },
+    {
+      "name": "restart_menubar",
+      "description": "Restart the S4L menu bar app"
+    },
+    {
+      "name": "run_drafting",
+      "description": "Run the drafting pipeline now"
+    },
+    {
+      "name": "drafting_status",
+      "description": "Live drafting-pipeline status + next-run countdown"
+    },
+    {
+      "name": "posting_volume",
+      "description": "Read or set posting volume (Aggressive / Steady / Chill)"
+    },
+    {
+      "name": "pause_s4l",
+      "description": "Pause or resume S4L"
+    },
+    {
+      "name": "report_diagnosis",
+      "description": "Send a diagnosis report to the S4L developers"
+    },
+    {
+      "name": "client_event",
+      "description": "Log a lightweight client UI event"
+    },
+    {
+      "name": "queue_setup",
+      "description": "Get autopilot scheduled-task specs"
     },
     {
       "name": "dashboard",
-      "description": "Render the visual dashboard (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, and refresh. Also rendered automatically after state-changing actions."
+      "description": "S4L dashboard"
+    },
+    {
+      "name": "connect_product",
+      "description": "Add your product"
+    },
+    {
+      "name": "show_browser_to_user",
+      "description": "Show browser to user"
     }
   ],
   "keywords": [
@@ -52,9 +96,9 @@
     "autoposter",
     "marketing"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/m13v/social-autoposter"
+    "url": "https://github.com/m13v/s4l"
   }
 }

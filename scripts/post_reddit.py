@@ -28,14 +28,83 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch
+from virality import calculate_reddit_virality_score, fetch_virality_bar
 from author_history_block import render as _render_author_history
 from project_topics import topics_for_project
+from active_experiments import collect as _collect_exps
+# Single source of truth for drafting prompts (2026-07-16): the reddit draft
+# prompt is rendered by draft_prompt_core (same module the X cycle renders
+# from), so shared sections (arm-aware directive, voice corpus, self-memory,
+# learned preferences, project routing) exist ONCE and every drafting
+# experiment applies to both platforms on the same commit.
+import draft_prompt_core as _dpc
 
-REPO_DIR = os.path.expanduser("~/social-autoposter")
-CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+# Honor S4L_REPO_DIR so managed-package installs resolve helper scripts inside
+# the package instead of a nonexistent ~/social-autoposter (the same $HOME
+# hardcode class that silently no-op'd session restore on customer boxes).
+REPO_DIR = os.path.expanduser(os.environ.get("S4L_REPO_DIR") or "~/social-autoposter")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 REDDIT_BROWSER = os.path.join(REPO_DIR, "scripts", "reddit_browser.py")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 REDDIT_TOOLS = os.path.join(REPO_DIR, "scripts", "reddit_tools.py")
+RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
+
+# JSON schema for the queue-routed draft turn (tag post-reddit-draft ->
+# claude_job.py type reddit-draft). One object, two arrays; posts[] entries
+# now carry TWO independent drafts per thread (draft_a_*/draft_b_*, mirroring
+# run-twitter-cycle.sh's PREP_SCHEMA) instead of a single `text` field, so the
+# review card can show both and let the reviewer pick (2026-07-15). rejects[]
+# entries feed _propose_excludes_from_rejects (thread_url + reason +
+# proposed_excludes).
+REDDIT_DRAFT_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "posts": {"type": "array", "items": {"type": "object", "properties": {
+            "thread_url": {"type": "string"},
+            "reply_to_url": {"type": ["string", "null"]},
+            "draft_a_text": {"type": "string"},
+            "draft_a_style": {"type": "string"},
+            "draft_a_new_style": {"type": ["object", "null"], "properties": {
+                "description": {"type": "string"},
+                "example": {"type": "string"},
+            }},
+            "draft_b_text": {"type": "string"},
+            "draft_b_style": {"type": "string"},
+            "draft_b_new_style": {"type": ["object", "null"], "properties": {
+                "description": {"type": "string"},
+                "example": {"type": "string"},
+            }},
+            "thread_author": {"type": "string"},
+            "thread_title": {"type": "string"},
+            "search_topic": {"type": "string"},
+        }, "required": ["thread_url", "draft_a_text", "draft_a_style",
+                        "draft_b_text", "draft_b_style", "thread_author",
+                        "thread_title"]}},
+        "rejects": {"type": "array", "items": {"type": "object", "properties": {
+            "thread_url": {"type": "string"},
+            "reason": {"type": "string"},
+            "proposed_excludes": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["thread_url", "reason"]}},
+    },
+    "required": ["posts", "rejects"],
+})
+
+# Interpreter every child subprocess must run under. A bare PYTHON resolved
+# to the user's system python, which lacks the pipeline deps (Playwright and
+# friends) that live only in the owned uv runtime — so on a fresh box every
+# reddit_browser.py reply died (the same class as the Karol/Twitter bug,
+# 2026-06-22). Honor the authoritative S4L_PYTHON pin (set by the launchd
+# plist), else sys.executable (the owned interpreter the MCP launches us under).
+# Never the literal PYTHON: that re-rolls the PATH dice. Re-exported so
+# grandchildren inherit it.
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 RATELIMIT_FILE = "/tmp/reddit_ratelimit.json"
 PREFLIGHT_WAIT_BUDGET_SECONDS = 180
 
@@ -73,8 +142,8 @@ DRAFT_TTL_MIN = 60
 # in build_discover_prompt; bumped to 10 (2026-05-08) so each cycle gets a
 # wider top-of-funnel and the new draft-gate-omit feedback report can steer
 # rephrasings without starving the next attempt of fresh angles. Override via
-# SAPS_REDDIT_MAX_SEARCHES env var without code change.
-MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "3"))
+# S4L_REDDIT_MAX_SEARCHES env var without code change.
+MAX_DISCOVER_SEARCHES = int(os.environ.get("S4L_REDDIT_MAX_SEARCHES", "3"))
 
 # CDP-error → permanence map. Permanent failures mark status='failed' and are
 # never re-evaluated. Transient failures stay status='pending' with
@@ -90,11 +159,46 @@ _TRANSIENT_CDP_ERRORS = {
     "all_attempts_failed",
     "comment_box_not_found",
     "not_logged_in",
+    # A concurrent reddit pipeline navigated the shared harness tab out from
+    # under the poster (2026-07-14: 5/5 approvals misclassified as
+    # account_blocked_in_sub this way). Always retryable.
+    "tab_contention",
 }
 
+# ---- posting-active flag (2026-07-14, mirrors twitter's posting-active) ----
+# Stamped for the whole --phase post run and heartbeated per row. Readers:
+# run-reddit-search.sh (skips a cycle fire while fresh) and reddit-backend.sh's
+# pre-launch defer hook (skips every other reddit pipeline's fire), so scans
+# and engagement never grab the ONE shared harness tab mid-post. A stale file
+# (heartbeat older than ~120s) never blocks anyone: a killed poster must not
+# wedge the fleet.
+_S4L_STATE_DIR = os.path.expanduser(os.environ.get("S4L_STATE_DIR") or "~/.social-autoposter-mcp")
+POSTING_ACTIVE_FILE = os.path.join(_S4L_STATE_DIR, "reddit-posting-active.json")
+
+
+def _stamp_posting_active():
+    try:
+        os.makedirs(_S4L_STATE_DIR, exist_ok=True)
+        with open(POSTING_ACTIVE_FILE, "w") as f:
+            json.dump({"pid": os.getpid(), "hb": time.time()}, f)
+    except Exception:
+        pass
+
+
+def _clear_posting_active():
+    try:
+        with open(POSTING_ACTIVE_FILE) as f:
+            if json.load(f).get("pid") != os.getpid():
+                return  # a peer poster owns the flag now; not ours to clear
+    except Exception:
+        pass
+    try:
+        os.remove(POSTING_ACTIVE_FILE)
+    except Exception:
+        pass
+
 from engagement_styles import (
-    VALID_STYLES, get_styles_prompt, get_content_rules, validate_or_register,
-    pick_style_for_post, get_voice_relationship_rule,
+    get_styles_prompt, validate_or_register, pick_style_for_post,
 )
 # Audience-page routing: tells Claude which curated landing pages exist for the
 # project so it can bake a deep URL (e.g. https://s4l.ai/ghostwriting) into the
@@ -104,6 +208,15 @@ from audience_pages import (
     prompt_block as _audience_prompt_block,
     classify_url_as_audience_page as _audience_classify_url,
 )
+# Learned preferences (2026-07-03): human review feedback distilled by
+# feedback_digest.py into the project's learned_preferences config block.
+# Rendered as an explicit prompt section here because this pipeline does not
+# embed the raw project JSON. Empty string when the project has no block.
+try:
+    from learned_preferences import prompt_block as _learned_prefs_block
+except Exception:  # never let a missing module break the poster
+    def _learned_prefs_block(_project_cfg):
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +261,11 @@ def _db_upsert_discovered_candidate(candidate, batch_id, project_name):
             "draft_engagement_style": candidate.get("engagement_style"),
             "score_t0": int(score_raw) if score_raw is not None else None,
             "comments_t0": int(comments_raw) if comments_raw is not None else None,
+            # Shared-scorer composite (scripts/virality.py); feeds the install's
+            # rolling percentile pool behind the reddit virality-threshold
+            # endpoint. Server-side ON CONFLICT takes the NEWEST non-null value
+            # so a re-sighted thread's bar standing tracks current momentum.
+            "virality_score": candidate.get("virality_score"),
         }
         api_post("/api/v1/reddit-candidates", body)
     except Exception as e:
@@ -316,21 +434,51 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
     None if no eligible row remains.
     """
     limit = max(1, int(limit or 1))
+    body = {
+        "batch_id": batch_id,
+        "max_attempts": MAX_ATTEMPTS,
+        "draft_ttl_minutes": DRAFT_TTL_MIN,
+        "limit": limit,
+    }
+    # Rolling virality bar (2026-07-18): pass the active bar so the server
+    # filters below-bar rows INSIDE the claim query (no wasted salvage slots,
+    # no last_attempt_at stamp on rows the drafter would never see). Mirrors
+    # the X prefilter's semantics: filtered rows stay 'pending' untouched;
+    # NULL-virality legacy rows pass. Bar OFF (None) = unfiltered, as before.
+    if os.environ.get("S4L_REDDIT_VIRALITY_BAR", "1") != "0":
+        _bar = fetch_virality_bar("reddit")
+        if _bar is not None:
+            body["min_virality"] = _bar
+            print(f"[post_reddit] salvage virality bar ACTIVE: min_virality={_bar:.4f}")
     try:
         resp = api_post(
             "/api/v1/reddit-candidates/pick-salvage",
-            {
-                "batch_id": batch_id,
-                "max_attempts": MAX_ATTEMPTS,
-                "draft_ttl_minutes": DRAFT_TTL_MIN,
-                "limit": limit,
-            },
+            body,
         )
         data = (resp or {}).get("data") or {}
         if not data.get("decisions"):
             return None
+        # Lane for salvage rows is derived from CONFIG (persona:true on the
+        # row's project), not from this cycle's env: a persona row that
+        # failed transiently must re-draft under the persona directive even
+        # when the retry cycle's coin flip landed promotion, and vice versa.
+        _sv_proj = (data.get("project_name") or "").lower()
+        try:
+            _sv_lane = "personal_brand" if any(
+                p.get("persona") is True and (p.get("name") or "").lower() == _sv_proj
+                for p in (load_config().get("projects") or [])
+            ) else "promotion"
+        except Exception:
+            _sv_lane = "promotion"
         return {
             "project_name": data.get("project_name") or "general",
+            "lane": _sv_lane,
+            # batch_id must ride the plan file into --phase draft: the
+            # snapshot filename, the prompt's top_performers --invoked-by,
+            # and the proposed_excludes 2-distinct-batch activation gate all
+            # read plan["batch_id"] there (it was silently None before
+            # 2026-07-17, which defeated the excludes gate's distinctness).
+            "batch_id": batch_id,
             "decisions": data.get("decisions") or [],
             "cost": float(data.get("cost") or 0.0),
             "salvaged": bool(data.get("salvaged", True)),
@@ -480,10 +628,14 @@ def _make_ban_entry(sub: str, reason: str | None, project: str | None) -> dict:
     it). Account is the only scope dimension.
     """
     from datetime import datetime, timezone
+    # The ONE resolver (env -> reddit_account.username -> accounts.reddit
+    # .username) replaces the old reddit_account-only read, so installs whose
+    # onboarding wrote accounts.reddit.username get account-scoped bans too
+    # instead of the global (account=None) back-compat bucket.
     account = None
     try:
-        with open(CONFIG_PATH) as _f:
-            account = (json.load(_f).get("reddit_account") or {}).get("username") or None
+        from account_resolver import resolve as _resolve_account_ban
+        account = _resolve_account_ban("reddit") or None
     except Exception:
         pass
     return {
@@ -536,6 +688,15 @@ def mark_comment_blocked(thread_url: str,
 # Tuned 2026-04-29: broaden to catch mod-rule bans expressed in present tense
 # ("the sub bans software", "no software allowed") in addition to account-level
 # bans ("u/X has been banned"). Each new pattern observed from real abort logs.
+# Reason prefix that marks a TIME-LIMITED quarantine entry in
+# subreddit_bans.thread_blocked (written by platform_strike_events.py when a
+# moderator removes one of our original threads). pick_thread_target.py
+# expires these after threads.quarantine_days (default 30); every other
+# reason is a permanent block. Keep this literal in sync with the reason
+# string platform_strike_events.py builds and the check in
+# pick_thread_target.load_thread_blocked_subs.
+QUARANTINE_REASON_PREFIX = "thread_removed_by_moderation"
+
 _THREAD_BLOCK_PATTERNS = [
     r"\bbanned\b",
     r"\bbans\b\s+(all|any|every|every kind|posts?|comments?|software|websites?|self[- ]promo|advertising|promotional)",
@@ -566,6 +727,26 @@ def _abort_is_permanent_block(abort_reason: str) -> bool:
     return False
 
 
+def _mirror_ban_to_backend(kind: str, entry: dict) -> None:
+    """Mirror a config.json ban entry to the backend subreddit_bans table
+    (source of truth as of 2026-07-19; config.json is the write-through
+    cache). Best-effort: the local write already happened and readers union
+    both sources, so a failed mirror degrades to local-only state, never to
+    an un-banned sub."""
+    try:
+        import subreddit_bans_client
+        subreddit_bans_client.record(
+            kind,
+            entry.get("sub") or "",
+            reason=entry.get("reason"),
+            account=entry.get("account"),
+            project=entry.get("noticed_by_project") or entry.get("project"),
+            added_at=entry.get("added_at"),
+        )
+    except Exception as e:
+        print(f"[post_reddit] WARNING: backend ban mirror failed: {e}")
+
+
 def mark_thread_blocked(subreddit: str, abort_reason: str = "",
                          project: str | None = None,
                          force: bool = False) -> None:
@@ -585,6 +766,13 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
     force=True bypasses the abort_reason regex gate (used when an upstream
     signal — e.g. the model's permanent_block=true — has already decided
     this is permanent and the reason text alone wouldn't match the patterns).
+
+    Quarantine refresh (2026-07-19): entries whose reason starts with
+    QUARANTINE_REASON_PREFIX are TIME-LIMITED (pick_thread_target expires
+    them after threads.quarantine_days, default 30). When a NEW quarantine
+    strike arrives for a sub whose existing entry is also a quarantine, the
+    entry's added_at/reason are refreshed so the 30-day clock re-arms.
+    Permanent entries (bans, 403s, standing-rule verdicts) are never touched.
     """
     sub = re.sub(r"^r/", "", subreddit, flags=re.IGNORECASE).strip().lower()
     if not sub:
@@ -599,27 +787,45 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
         blocked = bans.setdefault("thread_blocked", [])
         existing = _ban_entries_to_subs(blocked)
         if sub not in existing:
-            blocked.append(_make_ban_entry(sub, reason_str, project))
+            new_entry = _make_ban_entry(sub, reason_str, project)
+            blocked.append(new_entry)
             blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
             with open(CONFIG_PATH, "w") as f:
                 json.dump(config, f, indent=2)
                 f.write("\n")
             print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts "
                   f"(reason={reason_str!r} project={project!r})")
+            _mirror_ban_to_backend("thread_blocked", new_entry)
         else:
-            print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
+            # Re-arm an existing QUARANTINE entry on a fresh quarantine strike
+            # (both old and new reasons carry the prefix). Never overwrite a
+            # permanent entry with a weaker time-limited one.
+            entry = next((e for e in blocked
+                          if isinstance(e, dict) and _ban_entry_sub(e) == sub), None)
+            old_reason = (entry or {}).get("reason") or ""
+            new_is_q = (reason_str or "").startswith(QUARANTINE_REASON_PREFIX)
+            if entry is not None and new_is_q and old_reason.startswith(QUARANTINE_REASON_PREFIX):
+                from datetime import datetime, timezone
+                entry["reason"] = reason_str
+                entry["added_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(config, f, indent=2)
+                    f.write("\n")
+                print(f"[post_reddit] Refreshed r/{sub} thread quarantine "
+                      f"(30-day clock re-armed)")
+                _mirror_ban_to_backend("thread_blocked", entry)
+            else:
+                print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
     except Exception as e:
         print(f"[post_reddit] WARNING: could not persist thread-blocked sub r/{sub}: {e}")
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def pick_project(platform="reddit", exclude=None):
     try:
-        cmd = ["python3", os.path.join(REPO_DIR, "scripts", "pick_project.py"),
+        cmd = [PYTHON, os.path.join(REPO_DIR, "scripts", "pick_project.py"),
                "--platform", platform, "--json"]
         if exclude:
             cmd.extend(["--exclude", ",".join(exclude)])
@@ -641,7 +847,7 @@ def get_top_performers(project_name, platform="reddit", style=None):
     callers that have not flipped to the picker yet).
     """
     try:
-        cmd = ["python3", os.path.join(REPO_DIR, "scripts", "top_performers.py"),
+        cmd = [PYTHON, os.path.join(REPO_DIR, "scripts", "top_performers.py"),
                "--platform", platform, "--project", project_name]
         if style:
             cmd.extend(["--style", style])
@@ -660,7 +866,7 @@ def get_top_search_topics(project_name, platform="reddit", limit=8, window_days=
     project on this platform, or '' if no data yet. See top_search_topics.py."""
     try:
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_search_topics.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_search_topics.py"),
              "--project", project_name, "--platform", platform,
              "--window-days", str(window_days), "--limit", str(limit)],
             capture_output=True, text=True, timeout=15,
@@ -684,7 +890,7 @@ def get_omitted_reddit_topics(project_name, limit=10, window_hours=168, min_omit
     """
     try:
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_omitted_reddit_topics.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_omitted_reddit_topics.py"),
              "--project", project_name,
              "--window-hours", str(window_hours),
              "--limit", str(limit),
@@ -709,7 +915,7 @@ def get_dud_reddit_queries(project_name, limit=15, window_hours=168):
     """
     try:
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_dud_reddit_queries.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_dud_reddit_queries.py"),
              "--project", project_name,
              "--window-hours", str(window_hours),
              "--limit", str(limit)],
@@ -1009,37 +1215,107 @@ no candidate lines, no commentary about thread content (you don't see any).
 """
 
 
-def build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                       style_assignment=None):
-    """DRAFT phase: write comments only for ripen-survivors.
+def _truncate(s, n):
+    s = s or ""
+    return s if len(s) <= n else s[:n] + "..."
 
-    `candidates` is the list of decisions that passed the delta gate, each
-    annotated with ripen data (delta_up, delta_comments, composite). Claude
-    fetches each thread, reads context, then writes the best comment.
 
-    2026-05-19: `style_assignment` is the pick_style_for_post() result the
-    discover phase already wrote into the plan JSON. Forwarding it here so
-    the draft phase enforces the SAME style instead of letting the model
-    free-pick (and overwhelmingly default to pattern_recognizer). When
-    omitted, get_styles_prompt() picks fresh internally (legacy callers).
+def _prefetch_thread_digests(candidates, reddit_username=None):
+    """Pre-fetch thread content for the draft prompt (2026-07-14).
+
+    The draft turn used to be agentic: Claude ran `reddit_tools.py fetch` via
+    the Bash tool per candidate. Queue routing (claude_job.py, tag
+    post-reddit-draft) only carries pure text->JSON turns, so the fetches now
+    happen HERE, in Python, and the digests are inlined into the prompt —
+    the same tool-free conversion the twitter Phase 2b prep got on 2026-06-26.
+    Same access pattern as before (reddit_tools fetch rides the harness
+    Chrome's CDP, which is multi-client safe), just a different caller.
+
+    Returns (digests, dropped): digests maps thread_url -> digest text for
+    candidates worth drafting; dropped is a list of (candidate, reason) for
+    threads that can no longer be posted to (archived/locked/blocked) so the
+    caller marks them permanently failed. Transient fetch failures land in
+    NEITHER (candidate stays pending; Phase 0 salvage retries next cycle).
     """
-    content_angle = build_content_angle(project, config)
+    digests = {}
+    dropped = []
+    our_name = (reddit_username or "").lower()
+    for c in candidates:
+        url = c.get("thread_url") or ""
+        if not url:
+            continue
+        try:
+            proc = subprocess.run(
+                [PYTHON, REDDIT_TOOLS, "fetch", url],
+                capture_output=True, text=True, timeout=90,
+            )
+            data = json.loads((proc.stdout or "").strip() or "{}")
+        except Exception as e:
+            print(f"[post_reddit] prefetch FAILED (transient) {url}: {e}",
+                  file=sys.stderr, flush=True)
+            continue
+        err = data.get("error")
+        if err:
+            if err in ("thread_archived", "thread_locked", "subreddit_blocked"):
+                dropped.append((c, err))
+            else:
+                print(f"[post_reddit] prefetch error (transient) {url}: {err}",
+                      file=sys.stderr, flush=True)
+            continue
+        thread = data.get("thread") or {}
+        comments = data.get("comments") or []
+        lines = [
+            f"subreddit: {thread.get('subreddit', '')}  score: {thread.get('score', 0)}"
+            f"  comments: {thread.get('num_comments', 0)}",
+            f"OP u/{thread.get('author', '')}: {thread.get('title', '')}",
+        ]
+        selftext = (thread.get("selftext") or "").strip()
+        if selftext:
+            lines.append(_truncate(selftext, 1500))
+        already = False
+        if comments:
+            lines.append("top comments:")
+            for cm in comments[:12]:
+                author = cm.get("author") or ""
+                if our_name and author.lower() == our_name:
+                    already = True
+                body = _truncate((cm.get("body") or "").strip().replace("\n", " "), 280)
+                lines.append(f"  u/{author} ({cm.get('score', 0)}): {body}")
+        if already:
+            lines.append("NOTE: one of OUR accounts already commented in this"
+                         " thread (astroturf OMIT rule applies).")
+        digests[url] = "\n".join(lines)
+    return digests, dropped
 
-    recent_ctx = ""
-    if recent_comments:
-        # _recent_comment_text handles both legacy str and current (id, content) shapes.
-        snippets = "\n".join(
-            f"  - {_recent_comment_text(c)}"
-            for c in recent_comments
-            if _recent_comment_text(c)
-        )
-        recent_ctx = f"\nYour last {len(recent_comments)} comments (don't repeat talking points):\n{snippets}\n"
 
-    top_ctx = ""
-    if top_report:
-        lines = top_report.split("\n")[:20]
-        top_ctx = f"\n## Past performance feedback:\n{chr(10).join(lines)}\n"
+def build_draft_prompt(project, config, candidates, top_report, recent_comments,
+                       style_assignment_a=None, style_assignment_b=None, digests=None,
+                       batch_id=None, recent_self="", lane=""):
+    """DRAFT phase: assemble reddit ingredients, render via draft_prompt_core.
 
+    The prompt TEXT lives in scripts/draft_prompt_core.py, the single source
+    of truth shared with the X cycle: shared sections (arm-aware DRAFT
+    DIRECTIVE, ACCOUNT VOICE CORPUS, cross-cycle self-memory, PROJECT
+    ROUTING with the ops-filtered project config + global learned
+    preferences, on-demand top-performers instructions) exist once there and
+    every drafting experiment applies to both platforms on the same commit.
+    This function only builds the reddit-specific candidate block and passes
+    ingredients through.
+
+    `recent_comments` stays in the signature for the generation-trace caller
+    contract but no longer feeds the prompt; the cross-cycle self-memory
+    block (`recent_self`, rendered by recent_self_posts.py with explicit
+    do-not-imitate rules) replaced it 2026-07-16.
+
+    2026-05-19: style_assignment_a/b are two independent
+    pick_style_for_post() results picked up front, so the model enforces the
+    SAME two assignments instead of free-picking. 2026-07-15: two
+    independent drafts (A/B) per thread, mirroring run-twitter-cycle.sh.
+    2026-07-16: arm-aware. The caller MUST run
+    draft_prompt_core.pick_draft_prompt_arm() first (it exports
+    S4L_DRAFT_PROMPT_VARIANT) so the style blocks below and the directive
+    render under the same arm that active_experiments.collect() stamps.
+    """
     candidate_lines = []
     for c in candidates:
         rip = c.get("ripen") or {}
@@ -1058,106 +1334,40 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
                 history_line = "\n    " + _hb.replace("\n", "\n    ")
         except Exception:
             pass
+        digest_block = ""
+        if digests and c.get("thread_url") in digests:
+            _d = digests[c["thread_url"]]
+            digest_block = "\n    THREAD CONTENT:\n      " + _d.replace("\n", "\n      ")
         candidate_lines.append(
             f"  - {c['thread_url']}{delta_info}\n"
             f"    title: {c.get('thread_title', '')}\n"
             f"    suggested style: {c.get('engagement_style', '')}"
-            f"{history_line}"
+            f"{history_line}{digest_block}"
         )
     candidates_block = "\n".join(candidate_lines)
 
-    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to draft comments for the ones where you can write something genuinely useful to that audience. Lean toward DRAFTING when the audience overlaps even partially with the project's user, and only OMIT on clear no-bridge cases.
-
-Content angle: {content_angle}
-{recent_ctx}{top_ctx}
-## Candidate threads (post-ripen):
-{candidates_block}
-
-## SELECTION GATE — soft fits are OK; reject only clear mismatches
-
-The ripen step proves a thread is alive (people are voting/commenting). It does NOT prove the thread fits the project. Reddit search returns false positives based on raw token overlap (e.g. a search for "no-code app maker" surfaces r/gamemaker shader threads because of the word "maker"; a search for "E2E testing developer productivity QA" can surface a JonBenet murder thread because of how Reddit indexes acronyms). The gate exists to catch those token-overlap false positives, NOT to demand a perfect product fit on every thread.
-
-For each thread, ask the **bridge test**:
-"Could a thoughtful person from {project.get('name', 'this project')}'s audience plausibly read my comment and find it useful, regardless of whether they ever try the product?"
-
-DRAFT it if YES. OMIT only if NO bridge exists at all (clear off-topic / hostile audience / token-overlap false positive). Soft / partial / adjacent fits are GOOD enough — a useful comment in an adjacent sub builds reputation even when no one converts. Don't optimize for purity. Don't artificially cap output. The post-phase will cap actual posting at a reasonable number, so feel free to draft for any thread that passes the soft bridge test.
-
-DRAFT THESE (broad, inclusive — not just direct hits):
-- Project: AI test automation (Assrt). Thread: "Playwright selectors keep breaking on every refactor" → direct fit. DRAFT.
-- Project: AI test automation. Thread: r/QualityAssurance "How are people handling flaky CI tests?" → adjacent topic, same audience. DRAFT.
-- Project: AI app builder (mk0r). Thread: "I want to prototype a tip calculator without learning React" → direct fit. DRAFT.
-- Project: AI app builder. Thread: r/SaaS "Indie hackers shipping MVPs in a weekend" → adjacent: same builder mindset. DRAFT (helpful comment about iteration speed).
-- Project: study tool (Studyly). Thread: r/medschool "best way to handle 200-slide lectures" → direct fit. DRAFT.
-- Project: study tool. Thread: r/GetStudying "I'm burnt out, can't retain anything" → adjacent: study-habit audience. DRAFT (empathetic comment about active recall, even if no product mention).
-- Project: home security camera (Cyrano). Thread: r/HomeImprovement "wired vs wireless cameras" → direct fit. DRAFT.
-
-OMIT THESE (clear no-bridge cases only):
-- Project: AI test automation. Thread: r/JonBenet "The Absurdity of the BDI Theory" → token-overlap false positive (BDI ≠ a testing acronym here). 1996 murder case audience. NO bridge. OMIT.
-- Project: AI app builder. Thread: r/BostonSocialClub "Events worth leaving the house for this weekend" → matched on "tried"/"maker". Locals planning weekends. NO bridge. OMIT.
-- Project: AI app builder. Thread: r/gamemaker "Using surfaces to create paper-like behavior" → GameMaker is a code IDE, not a no-code generator. Audience writes GML shaders. NO bridge. OMIT.
-- Project: study tool. Thread: r/SubredditDrama "the alternative option is still running" → meta drama, no study angle. OMIT.
-- Project: study tool. Thread: r/trichotillomania "the trich trance" → medical condition, not studying. OMIT.
-- Project: study tool. Thread where you've ALREADY commented under any of our accounts (`already_posted=true` or our usernames in the comment list): obvious astroturfing. OMIT.
-- Any thread where you'd be embarrassed to have your comment shown next to a {project.get('name', 'this project')} link in the same Reddit thread.
-
-## Tools (via Bash)
-- Fetch thread: python3 {REDDIT_TOOLS} fetch "THREAD_URL"
-- Do NOT run any searches. The threads are already chosen.
-
-## CRITICAL Bash rules
-- NEVER use run_in_background=true. All commands foreground.
-- Fetch each thread once to read OP and top comments for context. Use the fetched content to apply the SELECTION GATE.
-
-## CRITICAL CONTENT RULES (apply only to threads that pass the gate)
-- Go BIMODAL on length: 1 punchy sentence (<100 chars) OR 4-5 sentences of real substance. Avoid 2-3 sentence middle-ground.
-- GROUNDING RULE — pick ONE lane per comment:
-  LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this", "scenario:") then you may invent specifics freely.
-  LANE 2 - NO FABRICATION: every specific (numbers, durations, places, tools) must appear verbatim in the content_angle above. Otherwise drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is...").
-- VOICE RELATIONSHIP: see the dedicated section below; it governs whether you speak AS the maker or as an outside observer.
-- NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l).
-- NEVER include URLs or links in your comment text.
-- Prefer replying to OP (top-level reply). ONE comment per thread.
-- Statements beat questions. Be authoritative, not inquisitive.
-
-## Content rules
-{get_content_rules("reddit")}
-
-{get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
-
-{get_voice_relationship_rule()}
-
-## OUTPUT FORMAT
-For each thread that PASSES the SELECTION GATE, output one JSON object per line:
-{{"action": "post", "thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "{(style_assignment or {}).get('style') or 'style_name'}", "search_topic": "the seed concept", "new_style": null}}
-
-For threads that FAIL the gate, simply omit the post JSON above. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads).
-
-## OPTIONAL: proposed_excludes (self-improving denylist)
-When you OMIT a thread because of a recurring CLASS of false-positive (the SUB itself surfaces wrong-audience threads, not just this one thread), you MAY emit a second JSON line for that thread:
-
-{{"action": "reject", "thread_url": "SAME_URL_AS_GIVEN", "reason": "short reason", "proposed_excludes": ["subreddit:bestofredditorupdates"]}}
-
-Rules:
-- proposed_excludes entries MUST use the typed form `subreddit:<slug>` (lowercase, no `r/` prefix). Future shape: `keyword:<word>` is accepted but unused today.
-- DO emit when: the false-positive is structural — e.g. r/bestofredditorupdates is family drama matching on the word "alternative"; r/hfy is sci-fi narrative matching on the word "spaced"; r/superstonk is GME meme stock matching on "anki" via a random comment. The SUB is the false positive, not just this one post.
-- DO NOT emit when: this specific thread is bad but the sub is fine in general (e.g. r/{project.get('name', 'project')}'s natural audience like r/medicalschool, r/anki, r/getstudying — never propose excluding a top-performing sub).
-- Activation gate: a term needs >=2 SEPARATE batches to propose it before it goes live on future Reddit searches. A single mistaken proposal cannot mute a sub. Propose if a thoughtful future cycle would likely agree; otherwise omit.
-- 1-3 entries per reject is plenty. When in doubt, omit the field. Default (no reject line) is safe.
-
-Examples of GOOD proposals:
-- Reject r/bestofredditorupdates "Husband lied" → ["subreddit:bestofredditorupdates"]
-- Reject r/hfy "The Trial of Humanity" → ["subreddit:hfy"]
-- Reject r/battlefield6 "GAME UPDATE 1.3.1.0" → ["subreddit:battlefield6"]
-- Reject r/superstonk "GMERICA acquisition" → ["subreddit:superstonk"]
-- Reject r/nosleep "cursed doll" → ["subreddit:nosleep"]
-
-Examples of WRONG proposals (do not emit):
-- Reject a specific r/nursing thread because OP is venting → DO NOT exclude r/nursing (it's our target audience; just omit this thread)
-- Reject one r/anki thread that's off-topic → DO NOT exclude r/anki (core ICP)
-
-Output DONE after all JSONs (both post and reject lines, in any order). Do NOT narrate. Fetch, gate, draft-or-reject, output JSONs, DONE.
-"""
-
+    ing = {
+        "project_name": project.get("name", "this project"),
+        "content_angle": build_content_angle(project, config),
+        "candidates_block": candidates_block,
+        "n_candidates": len(candidates),
+        "batch_id": batch_id or "",
+        "repo_dir": REPO_DIR,
+        "top_report": top_report or "",
+        "styles_block_a": get_styles_prompt("reddit", context="posting",
+                                            assignment=style_assignment_a),
+        "styles_block_b": get_styles_prompt("reddit", context="posting",
+                                            assignment=style_assignment_b),
+        "style_a_name": (style_assignment_a or {}).get("style") or "style_name",
+        "style_b_name": (style_assignment_b or {}).get("style") or "style_name",
+        "recent_self_block": recent_self or "",
+        # personal_brand renders the persona directive + persona-whitelisted
+        # project JSON in draft_prompt_core; comes from the plan stamp (see
+        # _discover_iteration), NEVER from env; salvage plans predate this
+        # cycle's lane and must keep the promotion directive.
+        "lane": lane or "",
+    }
+    return _dpc.render_reddit_prompt(ing)
 
 def parse_candidates(output):
     """Extract action=candidate JSON objects from Claude's discover output."""
@@ -1175,177 +1385,78 @@ def parse_candidates(output):
     return candidates
 
 
-def build_prompt(project, config, limit, top_report, recent_comments,
-                 top_topics_report="", dud_queries_report=""):
-    """Build prompt for Claude to search, evaluate, and draft replies (no posting).
 
-    `dud_queries_report` is a JSON list of recent zero-result queries for this
-    project (see get_dud_reddit_queries). When non-empty, an anti-list block is
-    inserted alongside the positive top_topics_report so the LLM is steered
-    away from phrasings that have already proven flat in the last 7 days.
+
+def run_claude_structured(prompt, timeout=1200):
+    """Run the draft turn through scripts/run_claude.sh, tag post-reddit-draft.
+
+    The tag is mapped in claude_job.py TAG_TO_TYPE, so run_claude.sh routes it
+    through the file job queue and the s4l-worker scheduled task performs the
+    LLM turn (mapped tags deliberately have NO claude -p fallback: on a box
+    with no live worker the provider times out with exit 79 and this phase
+    skips, exactly like the twitter draft lane when Claude Desktop is closed).
+    run_claude.sh also owns session accounting (claude_sessions cost rows); it
+    honors our pre-set CLAUDE_SESSION_ID so posts keep their attribution.
+
+    Returns (ok, result, usage): result is the parsed structured_output dict
+    (posts/rejects per REDDIT_DRAFT_SCHEMA), or raw text when the envelope
+    carried an unparseable result (caller falls back to the legacy JSONL
+    regex parsers), or an error string when ok is False.
     """
-    content_angle = build_content_angle(project, config)
-
-    # DB-backed search_topics (post 2026-05-27 config.json removal).
-    topics_list = list(topics_for_project(project.get("name") or ""))
-
-    project_json = json.dumps({
-        "name": project.get("name"),
-        "description": project.get("description"),
-        "search_topics": topics_list,
-    }, indent=2)
-
-    recent_ctx = ""
-    if recent_comments:
-        # _recent_comment_text handles both legacy str and current (id, content) shapes.
-        snippets = "\n".join(
-            f"  - {_recent_comment_text(c)}"
-            for c in recent_comments
-            if _recent_comment_text(c)
-        )
-        recent_ctx = f"""
-Your last {len(recent_comments)} comments (don't repeat talking points):
-{snippets}
-"""
-
-    top_ctx = ""
-    if top_report:
-        lines = top_report.split("\n")[:30]
-        top_ctx = f"""
-## Feedback from past performance:
-{chr(10).join(lines)}
-"""
-
-    top_topics_ctx = ""
-    if top_topics_report:
-        top_topics_ctx = f"""
-## Past top-performing search topics (sorted by clicks DESC first, then composite-scored: clicks*100 + comments + upvotes)
-CLICKS ARE THE PRIORITY SIGNAL. Any topic with `clicks > 0` is GOLD TIER, clicks
-are the only metric that proves our reply drove someone to actually visit the
-project's link. Comments and upvotes are vanity. If a project in your draft set
-has a gold-tier topic in this list, mimic ITS framing (subreddit fit, keyword
-cluster, specificity) FIRST before falling back to other styles. The Δpost /
-Δskip columns also matter: high Δskip + few posts = topic surfaces alive but
-off-topic threads (reword more narrowly); low Δskip + few posts = dead supply
-(drop the topic). Optimize the entire pipeline for clicks; everything else is
-leading indicators.
-
-{top_topics_report}
-
-If none of the top topics match this run's angle, pick any seed from the
-project's search_topics list. New topics with 0 clicks are fine — we still need
-to explore — but a gold-tier topic that fits should beat any unproven topic.
-"""
-
-    # NEGATIVE-signal feedback: queries that have produced zero post-filter
-    # candidates in the last 7 days. Mirrors twitter_search_attempts /
-    # top_dud_twitter_queries.py but speaks in terms of (query, subreddits)
-    # since Reddit search is sub-scoped. Keep this list short — Reddit is
-    # more keyword-rigid than Twitter, so even "the same phrase but in a
-    # different sub" can still produce results.
-    dud_queries_ctx = ""
-    if dud_queries_report and dud_queries_report.strip() not in ("[]", ""):
-        dud_queries_ctx = f"""
-## Dead queries (DO NOT redraft these — flat for the last 7 days):
-{dud_queries_report}
-
-Each entry is a (query, subreddits) phrasing that has returned ZERO usable
-threads on every recent attempt. Pick fresh wording, a different angle, or a
-different subreddit slate. Reusing an exact dead phrasing wastes a search
-slot and burns rate-limit budget for no upside.
-"""
-
-    return f"""Find {limit} Reddit threads where you can add genuine value as someone with expertise in {project.get('name', 'general')}.
-
-Topic area: {project_json}
-Content angle: {content_angle}
-
-Your role: You are a knowledgeable observer of this space. Your comments should be indistinguishable
-from any other knowledgeable person in the conversation. NEVER mention product names, links, websites,
-or GitHub repos. Product mentions happen ONLY later in the reply pipeline when people respond to you.
-
-CRITICAL: every comment picks ONE of two lanes (see the GROUNDING RULE below).
-  LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this",
-  "scenario:", "say a friend tried") and you may then invent any specifics.
-  LANE 2 - NO FABRICATION: every specific (numbers, durations, places, course names, headcount,
-  named tools) must appear verbatim in this project's content_angle / voice / messaging in
-  config.json. Otherwise drop the specific or pattern-frame ("the part that breaks down is...",
-  "the typical failure mode is...").
-Never present an invented specific as a personal first-hand claim without a Lane 1 opener.
-VOICE RELATIONSHIP: see the dedicated section below; it governs whether you speak AS the maker or as an outside observer.
-{recent_ctx}{top_ctx}{top_topics_ctx}{dud_queries_ctx}
-{get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
-
-{get_voice_relationship_rule()}
-
-## Tools (via Bash) - ALWAYS foreground, NEVER run_in_background
-- Search (global, by relevance): python3 {REDDIT_TOOLS} search "QUERY" --limit 15
-- Search (scoped to specific subs): python3 {REDDIT_TOOLS} search "QUERY" --subreddits AI_Agents,SaaS,smallbusiness --time month
-- Search (broader time range): python3 {REDDIT_TOOLS} search "QUERY" --time month
-- Fetch thread: python3 {REDDIT_TOOLS} fetch "THREAD_URL"
-- Check dedup: python3 {REDDIT_TOOLS} already-posted "THREAD_URL"
-
-Search defaults to sort=relevance and time=week. Use --time month for broader results. Use --subreddits for targeted sub searches.
-
-## Delta gating (new 2026-05-05)
-Each thread in the search JSON now carries delta fields populated from a
-persistent reddit_thread_snapshots table:
-  - sightings: how many search cycles have surfaced this exact thread
-  - delta_score: upvote change since first_seen_at
-  - delta_comments: comment change since first_seen_at
-  - delta_window_min: minutes between first_seen_at and now
-  - first_seen_at: when we first saw this thread
-
-Use these to PREFER threads that are still picking up momentum since we last
-saw them (positive delta_score with recent activity) over stale threads that
-peaked hours ago. A thread with sightings>=2 and delta_score<=0 over 60+ min
-is going cold; skip it for a fresher candidate.
-
-## CRITICAL Bash rules
-- NEVER use run_in_background=true. All bash commands must run foreground and return quickly (under 20s each).
-- NEVER use `sleep` commands. NEVER run `sleep N && cat ...` to wait for background tasks.
-- NEVER pipe multiple searches with `&` or `&&`. Run ONE search command at a time, wait for output, then decide next step.
-- If you see `{{"error": "rate_limited", ...}}` in the output, DO NOT retry that command. Skip it and move on.
-  Rate limits are global. Waiting won't help this session. Use whatever search results you already have.
-- If you can't find enough threads after 5 search attempts total, draft fewer posts (even 1-2 is fine) rather than searching more.
-
-## CRITICAL CONTENT RULES
-- Study the style performance data in the feedback report below. Pick styles with the highest avg upvotes.
-- Go BIMODAL on length: either 1 punchy sentence (<100 chars) or 4-5 sentences of real substance. AVOID the 2-3 sentence middle.
-- GROUNDING has TWO valid forms. Lane 1: open with a disclosure phrase ("hypothetically", "imagine someone running this", "scenario:") and then invent freely. Lane 2: every specific (numbers/places/programs) must be grounded in content_angle/voice/messaging in config.json, or drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is..."). Never present an invented specific as a personal first-hand claim without a Lane 1 opener.
-- VOICE: see the VOICE RELATIONSHIP section below; it governs whether you speak AS the maker or as an outside observer based on the matched project's voice_relationship field.
-- NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l).
-- NEVER include URLs or links.
-- Prefer replying to OP (top-level reply).
-- ONE comment per thread.
-- Statements beat questions. Be authoritative, not inquisitive.
-
-## Steps
-1. Pick 2 concepts from the project's search_topics list: {json.dumps(topics_list)}.
-   These are shared concept seeds across platforms (Twitter, Reddit, GitHub, LinkedIn). Some
-   phrases are tuned for other platforms — rephrase each into natural Reddit search terms
-   (vernacular, problem-framing, pain points) before running the search. Skip already_posted=true threads.
-2. Pick {limit} best threads where you have genuine expertise to contribute. Prefer replying to OP. Fetch each one.
-3. Draft the comment following the CRITICAL CONTENT RULES above. Quality over quantity.
-4. Output each as a JSON object, then DONE. Include the seed concept you used in "search_topic".
-
-## Content rules
-{get_content_rules("reddit")}
-
-## CRITICAL OUTPUT FORMAT
-You MUST output each draft as a raw JSON object on its own line. No commentary before or after. Example:
-
-{{"action": "post", "thread_url": "https://old.reddit.com/r/sub/comments/abc/title/", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "critic", "search_topic": "the seed concept you picked", "new_style": null}}
-
-If, and ONLY if, none of the listed styles fits, you may invent one. Set "engagement_style" to your snake_case name AND replace `"new_style": null` with `{{"description": "...", "example": "...", "note": "...", "why_existing_didnt_fit": "..."}}`. Inventing should be rare; prefer an existing style if it's even 80% right.
-
-After all {limit} JSON objects, output DONE on its own line.
-Do NOT describe what you are doing. Do NOT narrate. Just search, draft, output JSON, DONE.
-"""
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0,
+             "cache_create": 0, "cost_usd": 0.0}
+    session_id = str(uuid.uuid4())
+    usage["session_id"] = session_id
+    # Inherited by run_claude.sh (which honors a caller-set session id) and by
+    # the log_post -> reddit_tools.py chain for posts.claude_session_id.
+    os.environ["CLAUDE_SESSION_ID"] = session_id
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)  # claude uses OAuth, not API key
+    cmd = ["bash", RUN_CLAUDE_SH, "post-reddit-draft", "-p",
+           "--output-format", "json", "--json-schema", REDDIT_DRAFT_SCHEMA]
+    try:
+        proc = subprocess.run(cmd, input=prompt, env=env, text=True,
+                              capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "TIMEOUT", usage
+    # run_claude.sh narrates on stderr (queue enqueue, quota stamps); forward
+    # into the run log so cycle debugging keeps its trail.
+    for ln in (proc.stderr or "").splitlines():
+        print(f"[post_reddit] {ln[:300]}", file=sys.stderr, flush=True)
+    text = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        # exit 79 = queue provider timeout (no live worker) — the standard
+        # claude-blocked skip code; the caller records draft_error and the
+        # candidates stay pending for the next cycle.
+        return False, (text[:2000] or f"exit {proc.returncode}"), usage
+    try:
+        envlp, _ = json.JSONDecoder().raw_decode(text)
+    except Exception as e:
+        return False, f"envelope parse error: {e}: {text[:500]}", usage
+    try:
+        usage["cost_usd"] = float(envlp.get("total_cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    so = envlp.get("structured_output")
+    if so is None:
+        so = envlp.get("result")
+    if isinstance(so, str):
+        try:
+            so = json.loads(so)
+        except (json.JSONDecodeError, TypeError):
+            pass  # caller regex-parses the raw text
+    return True, so, usage
 
 
 def run_claude(prompt, timeout=600):
     """Run claude -p in bare mode with Bash tool only (no MCP needed).
+
+    DEPRECATED 2026-07-14: the draft phase (the only caller) moved to
+    run_claude_structured, which routes through run_claude.sh -> the
+    claude_job.py queue (tag post-reddit-draft) so the s4l-worker scheduled
+    task performs the turn. Kept for reference and emergency manual use only;
+    do NOT wire new callers to this (it bypasses session cost accounting and
+    the queue seam).
 
     Streams output in real time to stderr (picked up by tee in the shell wrapper)
     while collecting the full output for JSON parsing.
@@ -1451,7 +1562,7 @@ def run_claude(prompt, timeout=600):
         text_output = "\n".join(all_text_parts) if all_text_parts else "".join(collected)
         stderr_out = proc.stderr.read() if proc.stderr else ""
         try:
-            log_args = ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
+            log_args = [PYTHON, os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
                  "--session-id", session_id, "--script", "post_reddit"]
             orch_cost = usage.get("cost_usd")
             if isinstance(orch_cost, (int, float)) and orch_cost > 0:
@@ -1487,7 +1598,7 @@ def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
     """
     try:
         r = subprocess.run(
-            ["python3", REDDIT_BROWSER_LOCK, "acquire",
+            [PYTHON, REDDIT_BROWSER_LOCK, "acquire",
              "--timeout", str(timeout), "--ttl", str(ttl)],
             capture_output=True, text=True, timeout=timeout + 30,
         )
@@ -1512,7 +1623,7 @@ def _release_browser_lease() -> None:
     """
     try:
         subprocess.run(
-            ["python3", REDDIT_BROWSER_LOCK, "release"],
+            [PYTHON, REDDIT_BROWSER_LOCK, "release"],
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -1529,7 +1640,7 @@ def post_via_cdp(thread_url, reply_to_url, text):
     for attempt in range(MAX_ATTEMPTS):
         try:
             target = reply_to_url or thread_url
-            cmd = ["python3", REDDIT_BROWSER, "reply" if reply_to_url else "post-comment", target, text]
+            cmd = [PYTHON, REDDIT_BROWSER, "reply" if reply_to_url else "post-comment", target, text]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             cdp_out = proc.stdout.strip()
             if not cdp_out:
@@ -1567,7 +1678,7 @@ def post_via_cdp(thread_url, reply_to_url, text):
     return {"ok": False, "error": "all_attempts_failed"}
 
 
-def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None, link_source=None):
+def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None, link_source=None, draft_prompt_variant=None):
     """Log a successful post to the database. Returns the new post_id, or None.
 
     generation_trace_path (2026-05-12): optional path to a JSON file with
@@ -1585,7 +1696,7 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
     (if any) Claude baked into the reply text.
     """
     try:
-        cmd = ["python3", REDDIT_TOOLS, "log-post",
+        cmd = [PYTHON, REDDIT_TOOLS, "log-post",
              thread_url, permalink or "", text, project_name,
              thread_author, thread_title,
              "--account", reddit_username]
@@ -1597,6 +1708,12 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
             cmd.extend(["--generation-trace", generation_trace_path])
         if link_source:
             cmd.extend(["--link-source", link_source])
+        # draft_prompt_variant (2026-07-16): the arm that shaped this draft,
+        # read from the decision's stamped experiments dict (never from env;
+        # the MCP-approval poster runs in a different process than the
+        # cycle). Mirrors twitter_post_plan.py -> log_post.py.
+        if draft_prompt_variant:
+            cmd.extend(["--draft-prompt-variant", draft_prompt_variant])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         try:
             payload = json.loads((result.stdout or "").strip())
@@ -1616,7 +1733,7 @@ def bump_campaigns(table, row_id, campaign_ids):
     for cid in campaign_ids:
         try:
             subprocess.run(
-                ["python3", bump,
+                [PYTHON, bump,
                  "--table", table, "--id", str(row_id), "--campaign-id", str(cid)],
                 capture_output=True, text=True, timeout=15,
             )
@@ -1798,15 +1915,24 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     builds the query bank and runs reddit_tools.cmd_search directly; no Claude
     session). Uses `decisions` key for downstream-phase compatibility.
     """
-    if args.project:
+    # Force-inject (2026-07-17): --project (manual MCP runs) or S4L_FORCE_PROJECT
+    # (the personal_brand lane's env, set by s4l_mode.py via the wrapper's eval)
+    # bypasses pick_project entirely. This is the ONLY way a persona:true entry
+    # can be selected; pick_project structurally excludes personas. Mirrors
+    # run-twitter-cycle.sh's S4L_FORCE_PROJECT handling.
+    force_project = args.project or (os.environ.get("S4L_FORCE_PROJECT") or "").strip()
+    if force_project:
         project = None
         for p in config.get("projects", []):
-            if p["name"].lower() == args.project.lower():
+            if p["name"].lower() == force_project.lower():
                 project = p
                 break
         if not project:
-            print(f"[post_reddit] ERROR: project '{args.project}' not found")
+            print(f"[post_reddit] ERROR: project '{force_project}' not found")
             return None
+        if not args.project:
+            print(f"[post_reddit] force-inject: S4L_FORCE_PROJECT={force_project} "
+                  f"(lane={os.environ.get('S4L_ACTIVE_LANE') or 'promotion'})")
     else:
         project = pick_project("reddit", exclude=already_picked)
         if not project:
@@ -1819,7 +1945,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # 2026-05-11: surface the per-project sub denylist for visibility in run
     # logs (twitter cycle does the equivalent at run-twitter-cycle.sh:410).
     # The actual *enforcement* happens server-side in reddit_tools._load_
-    # comment_blocked_subs via the SAPS_REDDIT_PROJECT env var set below.
+    # comment_blocked_subs via the S4L_REDDIT_PROJECT env var set below.
     # mark_used stamps last_used_at on every active term so decay (60d
     # unused → prune) only fires on terms that truly stopped contributing.
     try:
@@ -1868,7 +1994,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # search_topic IS the raw query string) ranked clicks-first, then appends
     # config.json seeds for cold-start coverage, deduped by normalized core.
     import reddit_query_bank as _rqb
-    max_searches = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "6") or "6")
+    max_searches = int(os.environ.get("S4L_REDDIT_MAX_SEARCHES", "6") or "6")
     bank = _rqb.build_bank(project_name, limit=max_searches)
     queries = [(b.get("query") or "").strip() for b in bank if (b.get("query") or "").strip()]
     n_proven = sum(1 for b in bank if b.get("source") == "proven")
@@ -1890,8 +2016,8 @@ def _discover_iteration(args, config, reddit_username, already_picked):
                 "error": "no_queries"}
 
     plan_batch_id = f"reddit-discover-{project_name}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    os.environ["SAPS_REDDIT_PROJECT"] = project_name
-    os.environ["SAPS_REDDIT_BATCH_ID"] = plan_batch_id
+    os.environ["S4L_REDDIT_PROJECT"] = project_name
+    os.environ["S4L_REDDIT_BATCH_ID"] = plan_batch_id
 
     # Opaque-results discover (post 2026-05-07 refactor): create a private
     # dump dir and tell reddit_tools.py via env var to write thread JSON
@@ -1903,7 +2029,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     import shutil as _shutil
     import glob as _glob
     dump_dir = _tempfile.mkdtemp(prefix=f"reddit-discover-{project_name}-")
-    os.environ["SAPS_REDDIT_DUMP_DIR"] = dump_dir
+    os.environ["S4L_REDDIT_DUMP_DIR"] = dump_dir
 
     print(f"[post_reddit] Starting programmatic discover "
           f"(queries={len(queries)}, limit={args.limit}, dump_dir={dump_dir})")
@@ -1937,7 +2063,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     finally:
         # Always unset so a subsequent (non-discover) reddit_tools call in
         # this process doesn't accidentally inherit dump mode.
-        os.environ.pop("SAPS_REDDIT_DUMP_DIR", None)
+        os.environ.pop("S4L_REDDIT_DUMP_DIR", None)
     elapsed = time.time() - start
     print(f"[post_reddit] Discover ran {searches_ok}/{len(queries)} searches "
           f"in {elapsed:.0f}s ($0.0000)")
@@ -1971,6 +2097,10 @@ def _discover_iteration(args, config, reddit_username, already_picked):
                 "selftext": t.get("selftext") or "",  # captured for analytics + future relevance gates
                 "score": int(t.get("score") or 0),
                 "num_comments": int(t.get("num_comments") or 0),
+                # cmd_search stamps age_hours on every dumped thread; feeds the
+                # shared virality scorer below. 0.0 fallback only for very old
+                # dump files written before 2026-07-18.
+                "age_hours": float(t.get("age_hours") or 0.0),
                 "search_topic": query,
             })
     # Best-effort cleanup; the OS will eventually reap /tmp anyway.
@@ -2006,7 +2136,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # harvested candidate is still persisted to the queue for analytics + salvage;
     # the cap is a soft prioritization only (conservative per user directive —
     # isolate + surface the garbage in logs rather than silently filtering it).
-    DISCOVER_CAP = int(os.environ.get("SAPS_REDDIT_DISCOVER_CAP", "25") or "25")
+    DISCOVER_CAP = int(os.environ.get("S4L_REDDIT_DISCOVER_CAP", "25") or "25")
     for c in candidates:
         ov = _topical_overlap(c.get("search_topic"), c.get("thread_title"), c.get("selftext"))
         # velocity proxy: comments weighted 4x upvotes, echoing the old ripen
@@ -2015,6 +2145,14 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         vel = int(c.get("score") or 0) + 4 * int(c.get("num_comments") or 0)
         c["topical_overlap"] = round(ov, 3)
         c["velocity"] = vel
+        # Composite virality predictor (2026-07-18, shared scripts/virality.py):
+        # age-normalized velocity x discussion bonus x 7-day-half-life decay.
+        # Persisted on EVERY harvested row (capped or not) so the install's
+        # rolling percentile pool reflects the full discovery distribution,
+        # exactly like twitter_candidates. Ranking below stays overlap-first
+        # (Reddit's relevance-sort leak makes on-topic-ness the scarcer
+        # signal); virality gates via the bar prefilter, not the sort.
+        c["virality_score"], _ = calculate_reddit_virality_score(c)
     # Primary sort: overlap desc (on-topic first). Tiebreak: velocity desc.
     ranked = sorted(candidates, key=lambda c: (c["topical_overlap"], c["velocity"]), reverse=True)
     selected = ranked[:DISCOVER_CAP] if DISCOVER_CAP > 0 else ranked
@@ -2033,7 +2171,33 @@ def _discover_iteration(args, config, reddit_username, already_picked):
           f"overlap_zero={n_zero} low={n_low} mid={n_mid} high={n_high}")
     for c in selected:
         print(f"[discover_harvest]   ov={c['topical_overlap']:.2f} vel={c['velocity']:>5} "
+              f"vir={c['virality_score']:>8.2f} "
               f"q={(c.get('search_topic') or '')[:40]!r} :: {(c.get('thread_title') or '')[:70]!r}")
+
+    # --- ROLLING VIRALITY BAR prefilter (2026-07-18, aligns with the X
+    # cycle's 2026-07-17 candidate-level prefilter). Fetch the install's
+    # rolling percentile bar and drop below-bar rows from `selected` BEFORE
+    # the draft phase ever sees them. Filtered rows are NOT expired or
+    # rejected: the queue-persist block below upserts ALL harvested candidates
+    # (with virality_score) regardless of this filter, so filtered rows stay
+    # 'pending' and re-enter via salvage if a re-discovery bumps their
+    # score above the bar within the 24h freshness window. Fail-open by
+    # construction: bar OFF (cold start / thin pool / fetch failure /
+    # S4L_REDDIT_VIRALITY_BAR=0 kill switch / dry-run) means no filtering.
+    if not args.dry_run and os.environ.get("S4L_REDDIT_VIRALITY_BAR", "1") != "0":
+        _bar = fetch_virality_bar("reddit")
+    else:
+        _bar = None
+    if _bar is not None and selected:
+        _pre_n = len(selected)
+        selected = [c for c in selected
+                    if float(c.get("virality_score") or 0.0) >= _bar]
+        print(f"[virality_prefilter] kept {len(selected)} of {_pre_n} candidate(s) "
+              f"at/above bar={_bar:.4f}; below-bar rows stay pending and are "
+              f"never sent to the drafter")
+    elif _bar is None:
+        print("[virality_prefilter] bar OFF this cycle (cold-start/thin pool, "
+              "fetch failed, or disabled); drafting ungated")
 
     # Persist freshly-discovered candidates to reddit_candidates so a
     # transient post failure on a later phase can be retried by the next
@@ -2062,7 +2226,23 @@ def _discover_iteration(args, config, reddit_username, already_picked):
             except Exception as e:
                 print(f"[post_reddit] WARNING: seed backfill failed: {e}", file=sys.stderr)
 
+    # batch_id rides the plan file into --phase draft (snapshot filename,
+    # top_performers --invoked-by, proposed_excludes activation gate). Same
+    # reason as the salvage plan's batch_id above.
+    #
+    # lane (2026-07-17): stamped ONCE here at plan-write time and read from
+    # the PLAN by every downstream phase (_draft_iteration →
+    # render_reddit_prompt), never from env; salvage plans from earlier
+    # cycles and the env-less MCP approval poster must not inherit this
+    # cycle's lane. Same stamp-at-source convention as active_experiments
+    # (see CLAUDE.md). Derived from CONFIG (persona:true), not from
+    # S4L_ACTIVE_LANE, so an env-less manual `--project <persona>` run also
+    # drafts under the persona directive; the personal_brand lane can only
+    # ever force-inject the persona project, so the two always agree.
     return {"project_name": project_name, "decisions": selected,
+            "batch_id": queue_batch,
+            "lane": ("personal_brand" if project.get("persona") is True
+                     else "promotion"),
             "cost": 0.0, "session_id": None,
             "phase": "discover"}
 
@@ -2178,18 +2358,73 @@ def _draft_iteration(plan, config, reddit_username):
     # to the assigned style → embed the assignment block in the prompt →
     # JSON example shows the literal assigned style name. End-to-end
     # adherence comes from those three lined-up signals.
-    style_assignment = pick_style_for_post("reddit", context="posting")
-    picked_style = style_assignment.get("style")
-    print(f"[post_reddit] draft style assigned: mode={style_assignment['mode']} "
-          f"style={picked_style or '(invent)'}")
-    top_report = get_top_performers(project_name, style=picked_style)
+    # Draft-prompt A/B arm (2026-07-16): the SAME experiment the X cycle
+    # runs, picked with the SAME precedence (env override -> server-side
+    # per-install pin -> coin flip). pick_draft_prompt_arm exports
+    # S4L_DRAFT_PROMPT_VARIANT, so (a) engagement_styles renders the style
+    # blocks arm-aware, (b) active_experiments.collect() below stamps the
+    # arm that ACTUALLY shaped this prompt onto every candidate (before
+    # this, reddit cards carried an inert arm that never touched the text).
+    _arm, _arm_source = _dpc.pick_draft_prompt_arm()
+    print(f"[post_reddit] draft-prompt arm: {_arm} (source={_arm_source})")
+    style_assignment_a = pick_style_for_post("reddit", context="posting")
+    style_assignment_b = pick_style_for_post("reddit", context="posting")
+    picked_style_a = style_assignment_a.get("style")
+    picked_style_b = style_assignment_b.get("style")
+    print(f"[post_reddit] draft style A assigned: mode={style_assignment_a['mode']} "
+          f"style={picked_style_a or '(invent)'}")
+    print(f"[post_reddit] draft style B assigned: mode={style_assignment_b['mode']} "
+          f"style={picked_style_b or '(invent)'}")
+    # treatment_v4 skips the per-style exemplar report entirely (voice-first:
+    # cross-account style winners compete with the account's own voice);
+    # control_v4 keeps it. Same gate, same reason as the X cycle's
+    # TOP_REPORT skip; the decision lives in draft_prompt_core.
+    if _dpc.skip_top_report(_arm):
+        top_report = ""
+    else:
+        top_report = get_top_performers(project_name, style=picked_style_a)
     recent_comments = get_recent_comments()
+    # Cross-cycle self-memory (anti-repetition negative context), the same
+    # block the X prep prompt carries. Empty string on failure, never blocks.
+    _recent_self = _dpc.recent_self_block("reddit")
     # We don't have a Reddit equivalent of top_search_topics_report in
     # the draft phase (the discover phase loads it for the search step).
     # Pass empty string; the trace audit still captures top_performers
     # and recent_comments, which is the bulk of the few-shot context.
+    # Tool-free turn (2026-07-14): fetch every thread HERE and inline the
+    # digests, so the draft prompt is pure text->JSON and queue-routable.
+    # Dead threads (archived/locked/blocked) are marked permanently failed
+    # now instead of at post time; transient fetch failures stay pending
+    # (dropped from THIS cycle only; Phase 0 salvage retries them).
+    _before_prefetch = len(candidates)
+    digests, dropped = _prefetch_thread_digests(candidates, reddit_username)
+    for _c, _why in dropped:
+        _url = _c.get("thread_url", "")
+        print(f"[post_reddit] prefetch drop {_url}: {_why}")
+        _db_mark_candidate_attempt(_url, reason=f"prefetch_{_why}", permanent=True)
+    candidates = [c for c in candidates if c.get("thread_url") in digests]
+    print(f"[post_reddit] prefetch: {len(candidates)} thread(s) inlined, "
+          f"{len(dropped)} dropped dead, "
+          f"{_before_prefetch - len(candidates) - len(dropped)} transient-skipped")
+    if not candidates:
+        plan = dict(plan)
+        plan["decisions"] = []
+        plan["phase"] = "draft"
+        return plan
+
     prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments,
-                                style_assignment=style_assignment)
+                                style_assignment_a=style_assignment_a,
+                                style_assignment_b=style_assignment_b, digests=digests,
+                                batch_id=plan.get("batch_id"),
+                                recent_self=_recent_self,
+                                lane=plan.get("lane") or "")
+    # Durable full-prompt record per batch (same prep-prompts dir the X
+    # cycle writes; reddit-draft-prompt-<batch>.md, newest 50 kept), so
+    # prompt-block presence is verifiable after any release.
+    _snap_path = _dpc.snapshot_prompt(prompt, plan.get("batch_id") or "unknown", "reddit")
+    if _snap_path:
+        print(f"[draft_prompt_snapshot] batch={plan.get('batch_id')} "
+              f"bytes={len(prompt)} path={_snap_path}")
 
     # Build the generation_trace audit blob: what Claude is about to see.
     # Captured BEFORE the Claude call so we never end up with a post row
@@ -2221,17 +2456,31 @@ def _draft_iteration(plan, config, reddit_username):
 
     print(f"[post_reddit] Starting draft session for {len(candidates)} thread(s)...")
     start = time.time()
-    ok, output, usage = run_claude(prompt, timeout=600)
+    ok, output, usage = run_claude_structured(prompt, timeout=1800)
     elapsed = time.time() - start
     print(f"[post_reddit] Draft finished in {elapsed:.0f}s (${usage['cost_usd']:.4f})")
 
     if not ok:
-        print(f"[post_reddit] Draft FAILED: {output[:300]}")
+        print(f"[post_reddit] Draft FAILED: {str(output)[:300]}")
         plan["draft_error"] = "claude_failed"
         plan["draft_cost"] = usage["cost_usd"]
         return plan
 
-    drafted = parse_post_decisions(output)
+    if isinstance(output, dict):
+        # Queue/schema path: posts[] mirrors the legacy JSONL post-line shape.
+        drafted = []
+        _seen_urls = set()
+        for _d in output.get("posts") or []:
+            if not isinstance(_d, dict):
+                continue
+            _url = _d.get("thread_url", "")
+            if _d.get("draft_a_text") and _url and _url not in _seen_urls:
+                _d.setdefault("action", "post")
+                drafted.append(_d)
+                _seen_urls.add(_url)
+    else:
+        # Legacy fallback: the envelope carried free text; regex-parse it.
+        drafted = parse_post_decisions(output or "")
     print(f"[post_reddit] Draft produced {len(drafted)} post(s)")
 
     # 2026-05-11: parse optional action=reject lines and forward any
@@ -2241,7 +2490,10 @@ def _draft_iteration(plan, config, reddit_username):
     # here MUST NOT kill the draft phase; the post pipeline is the critical
     # path. See parse_reject_decisions / _propose_excludes_from_rejects.
     try:
-        rejects = parse_reject_decisions(output)
+        if isinstance(output, dict):
+            rejects = [r for r in (output.get("rejects") or []) if isinstance(r, dict)]
+        else:
+            rejects = parse_reject_decisions(output or "")
         if rejects:
             cand_by_url = {c.get("thread_url"): c for c in candidates if c.get("thread_url")}
             counters = _propose_excludes_from_rejects(
@@ -2261,19 +2513,64 @@ def _draft_iteration(plan, config, reddit_username):
     # preserve ripen annotations, search_topic, etc. from discover phase.
     # Each freshly-written draft is also persisted to reddit_candidates so a
     # later salvage iteration can reuse it without paying the LLM cost again.
+    # Experiment/scenario arms (2026-07-15, mirrors run-twitter-cycle.sh):
+    # collect() reads S4L_EXP_* from THIS process's env once and the same
+    # dict rides onto every candidate below. merge_review_queue.py carries it
+    # through untouched; it does not stamp anything itself.
+    _exps = _collect_exps()
+
     by_url = {d["thread_url"]: d for d in drafted}
     merged = []
     for c in candidates:
         url = c.get("thread_url", "")
         drafted_d = by_url.get(url)
-        if drafted_d and drafted_d.get("text"):
+        if drafted_d and drafted_d.get("draft_a_text"):
             merged_d = dict(c)
-            merged_d["text"] = drafted_d["text"]
+            _text_a = drafted_d.get("draft_a_text") or ""
+            _style_a = drafted_d.get("draft_a_style") or picked_style_a or ""
+            _text_b = drafted_d.get("draft_b_text") or ""
+            _style_b = drafted_d.get("draft_b_style") or picked_style_b or ""
+            # Two-draft card (2026-07-15): drafts[] mirrors twitter's shape
+            # exactly (variant/text/style/assigned_style/assigned_mode) so
+            # s4l_card.py's dual-box rendering, pairwise hover/choice
+            # tracking, and the edit-learning digest apply unchanged — that
+            # machinery already keys off `isinstance(drafts, list) and
+            # len(drafts) == 2`, not platform. Only populate when Draft B
+            # actually came back (defensive; the schema requires it).
+            merged_d["drafts"] = [
+                {
+                    "variant": "a",
+                    "text": _text_a,
+                    "style": _style_a,
+                    "assigned_style": picked_style_a,
+                    "assigned_mode": style_assignment_a.get("mode"),
+                },
+                {
+                    "variant": "b",
+                    "text": _text_b,
+                    "style": _style_b,
+                    "assigned_style": picked_style_b,
+                    "assigned_mode": style_assignment_b.get("mode"),
+                },
+            ] if _text_b else None
+            # Legacy singular mirrors: Draft A is the single-draft
+            # representative, same convention as twitter (validate_or_register,
+            # _db_save_draft, and any older reader expecting `text`/
+            # `engagement_style` sees Draft A's values by default).
+            merged_d["text"] = _text_a
             merged_d["reply_to_url"] = drafted_d.get("reply_to_url")
             merged_d["thread_author"] = drafted_d.get("thread_author") or c.get("thread_author")
             merged_d["thread_title"] = drafted_d.get("thread_title") or c.get("thread_title")
-            merged_d["engagement_style"] = drafted_d.get("engagement_style") or c.get("engagement_style")
+            merged_d["engagement_style"] = _style_a or c.get("engagement_style")
+            # Top-level assigned_style/assigned_mode default to Draft A (the
+            # legacy-mirror draft); the MCP approve_drafts edit path overwrites
+            # these on the card when a human switches to Draft B (mirrors
+            # twitter_post_plan.py's per-candidate override, see
+            # _post_iteration below and index.ts's reddit approval branch).
+            merged_d["assigned_style"] = picked_style_a
+            merged_d["assigned_mode"] = style_assignment_a.get("mode")
             merged_d["action"] = "post"
+            merged_d["experiments"] = dict(_exps)
             merged.append(merged_d)
             _db_save_draft(url, merged_d["text"], merged_d.get("engagement_style"))
         else:
@@ -2293,11 +2590,20 @@ def _draft_iteration(plan, config, reddit_username):
     plan["decisions"] = merged
     plan["draft_cost"] = usage["cost_usd"]
     plan["draft_session_id"] = usage.get("session_id")
+    # Also stamp the key _post_iteration actually reads: in two-phase mode
+    # (draft in process A, post in process B) it re-exports
+    # plan["session_id"] as CLAUDE_SESSION_ID, and this was never set after
+    # discover went programmatic (session attribution silently dropped on
+    # the two-phase path until 2026-07-14).
+    plan["session_id"] = usage.get("session_id")
     plan["phase"] = "draft"
     # Stash the picker assignment so _post_iteration (which runs in a
     # separate process via JSON-serialized plan) can pass it to
     # validate_or_register for USE-mode drift coercion + INVENT-mode gating.
-    plan["style_assignment"] = style_assignment
+    # This is the BATCH-LEVEL fallback (Draft A); per-decision
+    # assigned_style/assigned_mode (set above, and overridable by a human
+    # draft-switch) takes precedence in _post_iteration when present.
+    plan["style_assignment"] = style_assignment_a
     return plan
 
 
@@ -2331,6 +2637,23 @@ def _post_iteration(plan, reddit_username):
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     active_campaigns = load_active_reddit_campaigns()
+    # Persona posts never carry a product campaign suffix (2026-07-17): the
+    # reddit analog of the X lane's TWITTER_TAIL_LINK_RATE=0. Resolved from
+    # config (persona:true on the plan's project), NOT from lane env; the
+    # MCP approval poster runs env-less, and config is the durable truth.
+    if active_campaigns:
+        _plan_proj = (plan.get("project_name") or "").lower()
+        try:
+            _is_persona = any(
+                p.get("persona") is True and (p.get("name") or "").lower() == _plan_proj
+                for p in (load_config().get("projects") or [])
+            )
+        except Exception:
+            _is_persona = False
+        if _is_persona:
+            print(f"[post_reddit] persona project {_plan_proj!r}: campaign "
+                  f"suffixes disabled for this plan")
+            active_campaigns = []
     if active_campaigns:
         for c in active_campaigns:
             print(f"[post_reddit] active campaign id={c['id']} "
@@ -2340,6 +2663,10 @@ def _post_iteration(plan, reddit_username):
     failed = 0
 
     for i, decision in enumerate(decisions):
+        # Heartbeat the posting-active flag per row so readers see a fresh
+        # stamp for the whole drain (rows are ~45s + 180s inter-post sleeps;
+        # the reader freshness window is 120s, so re-stamp before EACH row).
+        _stamp_posting_active()
         thread_url = decision["thread_url"]
         reply_to_url = decision.get("reply_to_url")
         text = decision["text"]
@@ -2349,9 +2676,25 @@ def _post_iteration(plan, reddit_username):
         # back to the assigned one (so picker authority is preserved even if
         # the drafter ignores the assignment). In INVENT mode (5% slot),
         # registers the new style into engagement_styles_registry via
-        # /api/v1/engagement-styles/registry. assigned_style/assigned_mode
-        # come from pick_style_for_post() above; without them the picker's
-        # choice would be silently overridable by the model.
+        # /api/v1/engagement-styles/registry.
+        #
+        # Two-draft cards (2026-07-15): each decision may carry its OWN
+        # (assigned_style, assigned_mode) reflecting whichever draft is
+        # actually posting — either Draft A (stamped at plan-write time) or
+        # Draft B (stamped by the MCP approve_drafts edit path when a human
+        # switched drafts on the review card). Without this, every card
+        # would coerce back to the single batch-wide Draft A assignment even
+        # when it posted under Draft B's style, silently corrupting the
+        # engagement_style label the picker's performance stats are learned
+        # from. Mirrors twitter_post_plan.py's identical per-candidate
+        # override. Falls back to the batch-level assignment for any
+        # decision that predates this (assigned_mode key absent).
+        if "assigned_mode" in decision:
+            _cand_style = decision.get("assigned_style")
+            _cand_mode = decision.get("assigned_mode")
+        else:
+            _cand_style = (style_assignment or {}).get("style")
+            _cand_mode = (style_assignment or {}).get("mode")
         engagement_style, _style_action = validate_or_register(
             decision,
             source_post={
@@ -2360,10 +2703,15 @@ def _post_iteration(plan, reddit_username):
                 "post_id": None,
                 "model": decision.get("model"),
             },
-            assigned_style=(style_assignment or {}).get("style"),
-            assigned_mode=(style_assignment or {}).get("mode"),
+            assigned_style=_cand_style,
+            assigned_mode=_cand_mode,
         )
         search_topic = decision.get("search_topic") or None
+        # The draft-prompt arm rides the decision's experiments dict (stamped
+        # at draft time by _collect_exps after pick_draft_prompt_arm); posts
+        # get it via log_post -> reddit_tools.py --draft-prompt-variant so
+        # per-arm readouts cover reddit rows exactly like twitter's.
+        draft_prompt_variant = (decision.get("experiments") or {}).get("draft_prompt")
 
         applied_campaign_ids = []
         for camp in active_campaigns:
@@ -2467,7 +2815,8 @@ def _post_iteration(plan, reddit_username):
                      # draft phase used a reused/cached draft (no Claude
                      # call) — that's fine, audit just records no trace.
                      generation_trace_path=plan.get("generation_trace_path"),
-                     link_source=audience_page_link_source)
+                     link_source=audience_page_link_source,
+                     draft_prompt_variant=draft_prompt_variant)
             bump_campaigns("posts", new_post_id, applied_campaign_ids)
             # Backfill post_links.post_id for the codes minted at wrap time
             # so /api/short-links/<code> resolver knows which post each
@@ -2536,7 +2885,10 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "Deep_Ad1959")
+    # Resolve through the one account resolver (env -> config); never a hardcoded
+    # username. Empty = "unknown account" rather than impersonating the repo owner.
+    from account_resolver import resolve as _resolve_account
+    reddit_username = _resolve_account("reddit") or ""
 
     if args.phase == "phase0":
         # Hard-expire stale pending rows + re-assign salvageable rows to the
@@ -2623,10 +2975,28 @@ def main():
             sys.exit(2)
         with open(args.in_path) as f:
             plan = json.load(f)
+        # Hard preflight: _post_iteration shells to reddit_browser.py, the only
+        # Playwright importer on this rail. If the resolved interpreter can't
+        # import it the owned runtime is missing/half-provisioned and every post
+        # would die with CDP_ERROR. Fail LOUD with a distinct signal instead.
+        # Gated on real decisions so an empty plan still exits clean.
+        if plan.get("decisions"):
+            _chk = subprocess.run(
+                [PYTHON, "-c", "import playwright"],
+                capture_output=True, text=True,
+            )
+            if _chk.returncode != 0:
+                print(f"[post_reddit] FATAL runtime_incomplete: interpreter {PYTHON!r} "
+                      f"cannot import playwright — the owned Python runtime is missing or "
+                      f"unprovisioned. Run the `runtime` install (action:'install') before "
+                      f"posting. stderr: {(_chk.stderr or '').strip()[:300]}", file=sys.stderr)
+                sys.exit(3)
         try:
+            _stamp_posting_active()
             posted, failed = _post_iteration(plan, reddit_username)
             print(f"[post_reddit] phase=post project={plan.get('project_name')} posted={posted} failed={failed}")
         finally:
+            _clear_posting_active()
             # Clean up the generation_trace temp file. By this point every
             # post that landed has the trace JSONB persisted to its row,
             # so the on-disk file is redundant. Best-effort delete.

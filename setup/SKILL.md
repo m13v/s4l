@@ -1,6 +1,6 @@
 ---
 name: social-autoposter-setup
-description: "Set up social-autoposter for a new user end to end. Installs/repairs the runtime, discovers product and voice context, connects X/Twitter, seeds search topics, and verifies with a draft cycle. Use when: 'set up social autoposter', 'install social autoposter', 'configure social posting'."
+description: "Set up social-autoposter for a new user end to end. Installs/repairs the runtime, discovers product and voice context, connects X/Twitter, seeds search topics, schedules the draft autopilot, and verifies it produces a draft. Use when: 'set up social autoposter', 'install social autoposter', 'configure social posting'."
 ---
 
 # Social Autoposter Setup
@@ -13,7 +13,7 @@ goal, not as the beginning of an interview.
 - Keep taking the next safe setup action until the system is working end to end.
 - Do not ask whether to run setup, install a dependency, inspect status, connect
   X, scan the profile, research the website, save inferred fields, seed topics,
-  retry a recoverable failure, or run the draft-only verification. Do them.
+  or retry a recoverable failure. Do them.
 - An explicit request to set up social-autoposter authorizes its owned local
   runtime installation and importing only x.com/twitter.com session cookies
   into its managed browser. Briefly warn that macOS keychain prompts may appear,
@@ -25,8 +25,14 @@ goal, not as the beginning of an interview.
   cannot be discovered or safely inferred. The usual legitimate blocker is:
   there is no configured project, no clear product URL in context or the X
   profile, and no way to identify what product to market.
-- Never post a draft or enable autopilot during setup unless the user explicitly
-  asked for that. A draft-only cycle is safe and required for verification.
+- Never post a draft during setup unless the user explicitly asked for that.
+- Never hand-run the X cycle. Do not run `run-twitter-cycle.sh`,
+  `claude_job.py`, or any cycle script directly, and never offer to "trigger a
+  cycle" or "run one now" so a draft appears faster. Only the launchd kicker may
+  fire the cycle, with its required environment. A manual kick produces an
+  empty-plan artifact and blocks the autopilot. Verification means scheduling
+  the autopilot and letting the kicker drive it; you wait and poll, you never
+  trigger.
 - Do not edit the MCP server, plugin source, or an unrelated user workspace to
   work around setup failures. Use the product's setup/install tools.
 
@@ -36,12 +42,17 @@ Do not report setup complete until all of these are true:
 
 1. The owned runtime is installed and ready.
 2. At least one project is ready with name, website, description, ICP, voice,
-   and search topics.
-3. Search topics have been seeded into the backend.
+   and search topics. For the personal-brand persona, the search topics and the
+   grounding corpus come from the user's dictation interview (below), not from
+   the profile scan alone.
+3. Search topics have been seeded into the backend. Seeding is POSTPONED until
+   after the dictation interview so the topics reflect what the user wants to be
+   in conversations about, not only what they already posted.
 4. X is connected and the real handle has been auto-detected.
-5. `draft_cycle` has been run without posting. A returned review batch is the
-   strongest success signal. If X simply has no matching supply, report that
-   precise result only after configuration/auth/runtime checks pass.
+5. The draft autopilot is scheduled and has produced a draft card without
+   posting. A returned/pending review batch is the strongest success signal. If X
+   simply has no matching supply, report that precise result only after
+   configuration/auth/runtime checks pass.
 
 ## Architecture
 
@@ -52,12 +63,15 @@ Do not report setup complete until all of these are true:
   `DATABASE_URL`.
 - **Search topics**: the X cycle reads `project_search_topics`, seeded
   automatically from each project's `search_topics`. No topics means nothing
-  to scan.
+  to scan. `search_topics` is the ONLY field that changes what gets scanned;
+  every other persona field only shapes the draft after a thread is found. For
+  the persona, the profile scan is backward-looking (only what the user already
+  posted), so topics are sourced primarily from the dictation interview.
 
 ## Choose the path
 
 - If the social-autoposter MCP tools are connected (`project_config`, `runtime`,
-  `draft_cycle`, `autopilot`, `get_stats`), use the MCP path.
+  `queue_setup`, `approve_drafts`, `get_stats`, `dashboard`), use the MCP path.
   Do not hand-edit `config.json`.
 - If only the CLI/skill is installed, use the CLI fallback.
 
@@ -97,16 +111,60 @@ If X is not connected:
    `connect_x` after sign-in and continue.
 
 Once connected, call `project_config` with `action:'profile_scan'`. Treat the returned
-bio, links, recent posts, and replies as grounding truth for:
+bio, links, recent posts, and replies as grounding truth for the VOICE, not as the
+primary source of topics (the scan only shows what they already posted):
 
 - profession/identity;
 - voice, casing, phrasing, and tone;
 - ICP;
-- recurring themes and 5-15 literal X search topics;
-- wording or claims the user avoids.
+- wording or claims the user avoids;
+- recurring themes (reinforcement for topics, not the origin).
 
 Do not ask the user to approve the inferred voice during initial setup. Save a
 specific, conservative best draft and mention afterward that it can be edited.
+
+Then run the DICTATION INTERVIEW before extracting topics or seeding. This is
+where the persona's `search_topics` and grounding corpus come from. Keep the
+framing CHILL: this is a casual brain-dump, not a form. Invite the user to
+answer the following in ONE spoken dictation (the Claude input box already
+supports dictation, so they talk once and you split the answers into fields),
+and make clear there is no pressure: they can answer as much or as little as
+they like, skip anything, and come back to the rest whenever they feel like it.
+Preface the list with one short low-key line saying exactly that (e.g. "No
+pressure here, ramble as much or as little as you want; you can always come
+back to this later."), then ask verbatim as a single numbered list:
+
+1. Who are you, and what do you want to be known for? (→ description)
+2. What subjects could you talk about for an hour, work and non-work? (→
+   `search_topics`; this is the load-bearing answer, it is the only thing that
+   decides what gets scanned on X)
+3. Your most contrarian takes — what does everyone in your field get wrong, and
+   what did you used to believe that you have reversed on? (→ content_angle +
+   corpus)
+4. What can you explain in 5 minutes that took you years, and what mistake do you
+   watch beginners make over and over? (→ content_angle + corpus)
+5. Best or worst thing that happened to you recently, and a failure you learned
+   the most from? (→ corpus, keeps drafts current)
+6. Who do you love or hate reading online, and any lines or phrases you say a
+   lot? (→ voice calibration)
+7. Anything off-limits (topics, companies, people), and how spicy can we get —
+   safe, opinionated, or provocative? (→ content_guardrails + voice.never)
+
+From the dictation, synthesize the fields: `search_topics` primarily from answer
+2 (fold in recurring scan themes only as reinforcement), the rest from the other
+answers. Keep the RAW transcript VERBATIM as the persona corpus (do not
+paraphrase; the actual numbers, opinions, and phrasing are what make drafts sound
+like them). Pass it as `content_corpus` when you call `engagement_mode` (or
+`project_config`); it is stored in the `persona_corpus.txt` sidecar, not
+config.json. If the user answers only some questions, take what they gave,
+continue setup without nagging for the rest, and mention once that they can
+answer the remaining questions any time later to make drafts sound more like
+them. If the user declines or gives nothing usable, fall back to scan-derived
+topics.
+
+Only after the dictation is captured do you set the engagement mode / save the
+persona, which seeds the topics. Do not seed topics from the scan before the
+dictation.
 
 ### 3. Discover and research the product
 
@@ -150,11 +208,21 @@ If required fields remain, first attempt to derive them from the sources already
 collected. Ask the user only if a genuinely unknowable required field blocks
 readiness. Optional/recommended fields never justify stopping setup.
 
-### 5. Verify end to end
+### 5. Schedule the autopilot + verify end to end
 
-Run `draft_cycle`. It scans X and drafts replies for review; it posts nothing.
+Schedule the draft autopilot: call `queue_setup`, then for EACH returned task
+call the host tool `create_scheduled_task` (taskId, cronExpression, prompt
+verbatim; "already exists" is fine). The autopilot then drafts on its own — the
+launchd kicker fires a draft-only cycle and the queue worker drafts the replies;
+nothing posts. Then wait: poll the `dashboard` tool until the pending-draft
+count rises; a returned review batch is the strongest success signal.
 
-If it returns a fixable reason, fix it and retry in the same setup run:
+Do not hand-run a cycle to make this happen faster, and do not offer the user to
+trigger one. Scheduling the autopilot is the only sanctioned way to produce the
+verification draft; the kicker drives it on its own minute-by-minute schedule.
+
+If no card appears, diagnose the fixable reason, fix it, and let the autopilot
+retry on its next scheduled cycle:
 
 - missing topics: derive/add topics through `project_config`, then retry;
 - runtime/browser-harness/Chrome issue: run/repair the owned runtime, then retry;
@@ -178,7 +246,9 @@ turning it into instructions for the user.
 
 1. Install/repair: `npx -y social-autoposter@latest init`
 2. Inspect `~/social-autoposter/config.json` and preserve existing projects.
-3. Discover the product and voice using the same evidence order above.
+3. Discover the product and voice using the same evidence order above. For a
+   personal-brand persona, run the dictation interview (the 7 questions above)
+   and take `search_topics` + the raw corpus from it, scan themes as backup.
 4. Write a complete project with name, website, description, ICP, voice, and
    `search_topics`.
 5. Seed topics:
@@ -187,9 +257,12 @@ turning it into instructions for the user.
    `python3 ~/social-autoposter/scripts/setup_twitter_auth.py connect`
    The user may need to approve a macOS keychain prompt or sign in once in the
    managed browser; continue automatically afterward.
-7. Verify without posting:
-   `DRAFT_ONLY=1 TWITTER_PAGE_GEN_RATE=0 bash ~/social-autoposter/skill/run-twitter-cycle.sh`
-8. Do not load launchd/autopilot jobs unless explicitly requested.
+7. Do not load launchd/autopilot jobs unless explicitly requested, and never
+   hand-run `run-twitter-cycle.sh` or any cycle script to "verify." A manual
+   kick produces an empty-plan artifact and blocks the autopilot. The cycle runs
+   only when the launchd autopilot is scheduled and the kicker fires it. In CLI
+   fallback, setup is configured once the project is saved, topics are seeded,
+   and X is connected; the first draft appears after the autopilot is scheduled.
 
 ## Completion summary
 
@@ -203,7 +276,7 @@ Runtime:       ready
 Project:       NAME — ready
 Topics seeded: N
 X/Twitter:     @HANDLE
-Verification:  draft cycle completed without posting
+Verification:  autopilot produced a draft (not posted)
 Autopilot:     off
 Stats:         https://s4l.ai/stats/HANDLE
 ```

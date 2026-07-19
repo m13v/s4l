@@ -27,7 +27,7 @@ Output (stdout, --json or default): a JSON list shaped like
     [{"project": "...", "query": "...", "source": "proven|seed",
       "clicks": <int>, "posts": <int>, "composite": <int>}, ...]
 ranked strongest-first. `_discover_iteration` consumes the `query` field, caps to
-SAPS_REDDIT_MAX_SEARCHES, and runs each via reddit_tools.cmd_search.
+S4L_REDDIT_MAX_SEARCHES, and runs each via reddit_tools.cmd_search.
 
 Usage:
     python3 scripts/reddit_query_bank.py --project fazm

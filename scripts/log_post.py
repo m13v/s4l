@@ -91,7 +91,7 @@ from version import read_version as read_autoposter_version
 # post path goes straight through log_post.py (no candidate/plan pipeline like
 # Twitter's twitter_post_plan.py), so the picker-coercion engine has to live
 # here. When the caller passes --assigned-style/--assigned-mode (sourced from
-# saps_pick_style in run-linkedin.sh), we call validate_or_register exactly
+# s4l_pick_style in run-linkedin.sh), we call validate_or_register exactly
 # like twitter_post_plan.py::post_one so (a) USE-mode drift coerces back to the
 # assigned style and (b) INVENT-mode inventions land in
 # engagement_styles_registry via the /api/v1/engagement-styles/registry POST.
@@ -122,30 +122,40 @@ def parse_urn_ids(*sources):
 
 VALID_PLATFORMS = ("reddit", "twitter", "linkedin", "github_issues", "moltbook")
 
-DEFAULT_ACCOUNTS = {
-    "reddit": "Deep_Ad1959",
-    "linkedin": "Matthew Diakonov",
-    "github_issues": "m13v",
-    "moltbook": "matthew-autoposter",
+# Maps log_post's platform strings to account_resolver's platform keys.
+# (log_post uses "github_issues"; account_resolver uses "github".)
+_RESOLVER_PLATFORM = {
+    "twitter": "twitter",
+    "reddit": "reddit",
+    "linkedin": "linkedin",
+    "github_issues": "github",
+    "moltbook": "moltbook",
 }
 
 
 def _resolve_default_account(platform: str) -> str:
-    """Return the canonical account handle for `platform` on this machine.
+    """Return the configured account handle for `platform` on this machine.
 
-    Twitter is multi-machine-aware: each machine declares its own handle via
-    `AUTOPOSTER_TWITTER_HANDLE` env or `accounts.twitter.handle` in
-    config.json, and `twitter_account.resolve_handle()` returns the
-    normalized form (no `@` prefix). Other platforms keep their static
-    defaults until each gets the same multi-machine treatment.
+    Resolved ONLY from env (`AUTOPOSTER_<PLATFORM>_*`) or config.json
+    (`accounts.<platform>.*`) via account_resolver. There are NO hardcoded
+    handle fallbacks: a misconfigured install must never silently post under
+    another person's identity. The old per-platform defaults
+    (m13v_/Deep_Ad1959/Matthew Diakonov/m13v/matthew-autoposter) did exactly
+    that, stamping every unconfigured install's rows with the repo owner's
+    handle and polluting the shared DB across accounts.
 
-    Returns empty string when nothing is configured; the caller's
+    Returns "" when nothing is configured; the caller's
     `args.account or _resolve_default_account(...)` chain still lets an
-    explicit `--account` flag win.
+    explicit `--account` flag win, and an empty value surfaces the misconfig
+    instead of impersonating someone.
     """
-    if platform == "twitter":
-        return resolve_twitter_handle() or ""
-    return DEFAULT_ACCOUNTS.get(platform, "")
+    try:
+        import account_resolver
+        return account_resolver.resolve(
+            _RESOLVER_PLATFORM.get(platform, platform)
+        ) or ""
+    except Exception:
+        return ""
 
 
 def coerce_engagement_style(args):
@@ -155,7 +165,7 @@ def coerce_engagement_style(args):
     records the same coerced/assigned style as a successful one (otherwise
     INVENT-mode model names leak onto rejected rows and pollute the per-style
     report). When the caller passed --assigned-style/--assigned-mode (from
-    saps_pick_style in run-linkedin.sh), call validate_or_register exactly
+    s4l_pick_style in run-linkedin.sh), call validate_or_register exactly
     like twitter_post_plan.py::post_one:
       - USE-mode drift coerces back to the assigned name
       - INVENT-mode + well-formed --new-style registers in the registry
@@ -363,7 +373,7 @@ def main():
                              "--is-recommendation, which is intent.")
     parser.add_argument("--assigned-style", default=None,
                         help="The engagement style the programmatic picker "
-                             "(saps_pick_style / pick_style_for_post) assigned for "
+                             "(s4l_pick_style / pick_style_for_post) assigned for "
                              "this post. When present alongside --assigned-mode, "
                              "log_post runs validate_or_register so USE-mode drift "
                              "is coerced back to this name and INVENT-mode names "
@@ -426,6 +436,15 @@ def main():
                              "longer passes this flag; keep it for old rows and "
                              "manual/backfill writes to posts.length_arm. Expected "
                              "values: 'treatment' or 'control'.")
+    parser.add_argument("--draft-prompt-variant", default=None,
+                        help="Draft-prompt A/B arm for Twitter posts: 'treatment' "
+                             "(decoupled draft directive; reply stands on its own, "
+                             "no forced concede->pivot to product) or 'control' "
+                             "(current directive). Assigned per cycle in "
+                             "run-twitter-cycle.sh and read from S4L_DRAFT_PROMPT_VARIANT "
+                             "by twitter_post_plan.py. NULL for non-Twitter rows and "
+                             "rows pre-dating the experiment. Stored in "
+                             "posts.draft_prompt_variant.")
     parser.add_argument("--urns", default=None,
                         help="LinkedIn-only: comma- or whitespace-separated list "
                              "of 16-19 digit URN IDs that identify this post "
@@ -564,6 +583,8 @@ def main():
         body["link_source"] = args.link_source
     if args.tail_link_variant:
         body["tail_link_variant"] = args.tail_link_variant
+    if args.draft_prompt_variant:
+        body["draft_prompt_variant"] = args.draft_prompt_variant
     if args.target_chars:
         body["target_chars"] = args.target_chars
     if args.length_arm:

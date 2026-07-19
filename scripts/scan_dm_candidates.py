@@ -25,7 +25,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from project_topics import topics_for_project
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 # Min-word floor to promote a public reply into a DM candidate.
 # X replies are natively shorter (quote-tweets, @-mentions), so the bar is lower.
 # Reddit floor lowered to 4 on 2026-04-21 after data showed 4-9 word Reddit
@@ -114,11 +120,6 @@ TRANSIENT_SKIP_REASON_PATTERNS = (
     "%transient_browser_failure%",
 )
 
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
 
 
 def word_count(text):
@@ -193,17 +194,22 @@ def get_excluded_authors(config, platform):
     excluded.add("[deleted]")
 
     if platform == "reddit":
-        reddit_account = config.get("accounts", {}).get("reddit", {}).get("username", "")
+        # The ONE resolver (also covers the reddit_account login-truth key).
+        from account_resolver import resolve as _resolve_account
+        reddit_account = _resolve_account("reddit") or ""
         if reddit_account:
             excluded.add(reddit_account.lower())
     elif platform == "linkedin":
-        linkedin_name = config.get("accounts", {}).get("linkedin", {}).get("name", "")
+        from account_resolver import resolve as _resolve_li
+        linkedin_name = _resolve_li("linkedin") or ""
         if linkedin_name:
             excluded.add(linkedin_name.lower())
         for p in config.get("exclusions", {}).get("linkedin_profiles", []):
             excluded.add(p.lower())
     elif platform == "x":
-        twitter_handle = config.get("accounts", {}).get("twitter", {}).get("handle", "").lstrip("@")
+        # The resolver normalizes (strips @) and covers env + mirror fallback.
+        from account_resolver import resolve as _resolve_tw
+        twitter_handle = _resolve_tw("twitter") or ""
         if twitter_handle:
             excluded.add(twitter_handle.lower())
         for t in config.get("exclusions", {}).get("twitter_accounts", []):

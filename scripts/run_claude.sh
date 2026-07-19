@@ -18,6 +18,14 @@
 
 set -uo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 if [ $# -lt 2 ]; then
     echo "Usage: run_claude.sh <script_tag> <claude args...>" >&2
     exit 2
@@ -30,6 +38,36 @@ SCRIPT_TAG="$1"; shift
 # need to stamp claude_session_id) before invoking the wrapper.
 SESSION_ID="${CLAUDE_SESSION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
 export CLAUDE_SESSION_ID="$SESSION_ID"
+
+# ---------------------------------------------------------------------------
+# Queue routing seam (queue lane 2026-06-23; env-var-free routing 2026-07-06).
+#
+# Routing is decided by the script tag alone. Tags mapped in
+# scripts/claude_job.py TAG_TO_TYPE are pure text->JSON calls and ALWAYS route
+# through the job queue: claude_job.py enqueues the prompt + --json-schema,
+# BLOCKS until the every-minute s4l-worker scheduled task processes it, and
+# prints a claude `--output-format json`-shaped envelope to stdout so the
+# pipeline's existing parsers are unchanged. Every other tag ALWAYS falls
+# through to the real `claude -p` below.
+#
+# There is no per-machine or per-plist switch (S4L_CLAUDE_PROVIDER removed
+# 2026-07-06): the same tag routes the same way on operator Macs and customer
+# boxes. TAG_TO_TYPE is the single source of truth AND the migration
+# checklist: moving a lane onto the queue means adding its tag there,
+# nothing else.
+#
+# The prompt reaches us either as a trailing positional arg (Phase 1 queries) or
+# piped on stdin (Phase 2b prep); claude_job.py handles both. `exec` inherits
+# stdin so the piped form passes through, and propagates the helper's exit code
+# (0 = result, 79 = timed-out/no worker firing, like a quota skip).
+# ---------------------------------------------------------------------------
+S4L_QUEUE_REPO="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+S4L_QUEUE_PY="${S4L_PYTHON:-python3}"
+if "$S4L_QUEUE_PY" "$S4L_QUEUE_REPO/scripts/claude_job.py" \
+        eligible --tag "$SCRIPT_TAG" 2>/dev/null; then
+    exec "$S4L_QUEUE_PY" "$S4L_QUEUE_REPO/scripts/claude_job.py" \
+        provider --tag "$SCRIPT_TAG" -- "$@"
+fi
 
 # ---------------------------------------------------------------------------
 # Quota preflight + post-hoc detection (added 2026-05-02).
@@ -162,6 +200,16 @@ _sa_cleanup() {
     rm -f "$SIDE_LOG"
     rm -f "$ACTIVE_FILE"
 
+    # Disarm the deathwatch (see the arm call in the retry loop below). This
+    # path SIGKILLs $CLAUDE_PG's process group a few lines down as ordinary
+    # TERM/INT/HUP handling (e.g. the watchdog killing a genuinely hung run),
+    # so it must disarm too — otherwise a normal forced shutdown would
+    # misreport as an unexpected death once that kill lands.
+    if [ -n "${_SA_DW_JOB:-}" ]; then
+        python3 "$REPO_DIR/scripts/producer_deathwatch.py" disarm --job-id "$_SA_DW_JOB" \
+            >/dev/null 2>&1 || true
+    fi
+
     # Sweep orphan claude descendants. Process groups survive the parent's
     # death (kids reparented to launchd keep their PGID), so killing
     # `kill -- -PGID` reaches every grandchild, including ones reparented
@@ -270,8 +318,31 @@ EOF
         { claude --session-id "$SESSION_ID" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} "$@" | tee -a "$SIDE_LOG"; exit "${PIPESTATUS[0]}"; } &
         CLAUDE_PG=$!
         set +m
+        # Dead-man's-switch (2026-07-09): every non-queue-routed tag (reddit,
+        # linkedin, github, moltbook, instagram, dm-outreach-*, ...) blocks
+        # here exactly like claude_job.py's queue provider does, with the
+        # same silent-death risk (SIGKILL/OOM/hard crash while waiting).
+        # Watches THIS SCRIPT's own pid ($$), not $CLAUDE_PG: if only the
+        # claude child dies, `wait` unblocks normally and this script keeps
+        # running (RC-checked, logged, retried) — no observability gap.
+        # The gap is when the WHOLE TREE (this script included) is killed
+        # together, which is what actually happened in the salvage-orphan
+        # cases this was built for. Arm per-attempt (job id includes
+        # $CLAUDE_PG so a retry never collides with a still-unwinding prior
+        # attempt's watcher); disarm right after `wait` returns AND from
+        # _sa_cleanup's trap (that path SIGKILLs $CLAUDE_PG's group as
+        # ordinary TERM/INT/HUP handling, which must disarm too or a normal
+        # watchdog-triggered shutdown would misreport as an unexpected
+        # death). See scripts/producer_deathwatch.py.
+        _SA_DW_JOB="${SESSION_ID}-${CLAUDE_PG}"
+        python3 "$REPO_DIR/scripts/producer_deathwatch.py" arm \
+            --watch-pid "$$" --job-id "$_SA_DW_JOB" --qtype "$SCRIPT_TAG" \
+            --batch "${BATCH_ID:-${SA_CYCLE_ID:--}}" --call-path direct \
+            >/dev/null 2>&1 || true
         wait "$CLAUDE_PG"
         RC=$?
+        python3 "$REPO_DIR/scripts/producer_deathwatch.py" disarm --job-id "$_SA_DW_JOB" \
+            >/dev/null 2>&1 || true
         if [ "$RC" -ne 127 ]; then
             break
         fi

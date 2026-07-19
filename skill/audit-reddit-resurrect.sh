@@ -20,8 +20,11 @@ _release_reddit_lease() {
 python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
     echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
 trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
-if ! ensure_reddit_browser_for_backend 2>&1; then
-    echo "[audit-reddit-resurrect] WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+ensure_reddit_browser_for_backend 2>&1
+_ensure_rc=$?
+hc_exit_if_deferred "$_ensure_rc" "reddit-harness"
+if [ "$_ensure_rc" != "0" ]; then
+    echo "[audit-reddit-resurrect] WARNING: reddit-harness bootstrap failed (rc=$_ensure_rc); falling back to ensure_browser_healthy reddit"
     ensure_browser_healthy "reddit"
 fi
 acquire_lock "audit-reddit-resurrect" 3600
@@ -38,7 +41,7 @@ AUDIT_HELPER="$REPO_DIR/scripts/audit_helper.py"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/audit-reddit-resurrect-$(date +%Y-%m-%d_%H%M%S).log"
 
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"; echo "[$(date +%H:%M:%S)] $*"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG_FILE"; echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 RUN_START=$(date +%s)
 log "=== Reddit resurrect audit: $(date) ==="

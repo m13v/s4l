@@ -42,7 +42,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+# THE canonical config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir /
+# S4L_REPO_DIR aware, mtime-cached. Replaces this file's hand-rolled loader and
+# its hardcoded config path (the S4L-4H dead-path class on customer boxes).
+import os as _cfg_os, sys as _cfg_sys
+_cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
+from config import config_path as _canonical_config_path, load_config
+CONFIG_PATH = _canonical_config_path()
 
 
 def _valid_chat_url(platform, url):
@@ -76,21 +82,28 @@ def _valid_chat_url(platform, url):
     return u
 
 
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {}
 
 
 def get_our_account(config, platform):
     accounts = config.get("accounts", {})
+    # No hardcoded fallback on any platform: a default handle/username/name stamped
+    # on a DM silently mis-attributes it to the repo owner. Resolve from config / env
+    # through the one resolver; "" means unknown (caller decides how to degrade).
+    from account_resolver import resolve as _resolve_account
     if platform == "reddit":
-        return accounts.get("reddit", {}).get("username", "Deep_Ad1959")
+        return accounts.get("reddit", {}).get("username") or _resolve_account("reddit") or ""
     elif platform == "linkedin":
-        return accounts.get("linkedin", {}).get("name", "Matthew Diakonov")
+        return accounts.get("linkedin", {}).get("name") or _resolve_account("linkedin") or ""
     elif platform == "x":
-        return accounts.get("twitter", {}).get("handle", "@m13v_").lstrip("@")
+        # Twitter fails LOUD if unresolved (an outbound DM must carry a real
+        # sender); reddit/linkedin above degrade to "" since their callers can.
+        h = _resolve_account("twitter")
+        if not h:
+            raise RuntimeError(
+                "no Twitter handle configured (accounts.twitter.handle / "
+                "AUTOPOSTER_TWITTER_HANDLE); refusing to stamp a fallback account "
+                "on an outbound DM to avoid wrong-attribution. Run connect_x first.")
+        return h.lstrip("@")
     return "unknown"
 
 

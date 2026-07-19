@@ -31,7 +31,9 @@
 # fail-open posture so a transient browser hiccup never crashes the invent job.
 set -uo pipefail
 
-REPO_DIR="$HOME/social-autoposter"
+# Honor S4L_REPO_DIR (set by the MCP wrapper + the kicker on .mcpb installs)
+# so the plugin's installed package resolves lock.sh and twitter_scan.
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 HARNESS_BIN="$HOME/.local/bin/browser-harness"
 
 QUERIES_JSON="${1:?queries_json path required}"

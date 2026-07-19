@@ -25,7 +25,6 @@ function findPython(home, preferred) {
   return (
     findFirst([
       preferred,
-      process.env.SAPS_PYTHON,
       path.join(home, ".social-autoposter-mcp", "runtime", ".venv", "bin", "python3"),
       "/opt/homebrew/bin/python3",
       "/usr/local/bin/python3",
@@ -52,7 +51,6 @@ function runDoctorSync(options = {}) {
   const home = options.home || os.homedir();
   const repoDir =
     options.repoDir ||
-    process.env.SAPS_REPO_DIR ||
     path.join(home, "social-autoposter");
   const python = findPython(home, options.python);
   const harness = path.join(home, ".local", "bin", "browser-harness");
@@ -150,6 +148,14 @@ function runDoctorSync(options = {}) {
         "expected",
         "deferred until X connection to avoid an unexpected keychain prompt"
       );
+    }
+    // Once the durable cookie mirror is populated, the X session no longer
+    // depends on this keychain item (see twitter_cookie_mirror.py — it exists
+    // precisely so a locked/missing Safe Storage key isn't fatal). Skip the
+    // probe instead of re-triggering + re-failing it on every doctor run;
+    // same mirrorCount() gate keychain_autolock already uses below.
+    if (mirrorCount() > 0) {
+      return result("pass", "skipped — durable cookie mirror already covers this");
     }
     const r = spawnSync(
       "security",
@@ -313,6 +319,52 @@ function runDoctorSync(options = {}) {
           `auto-locks after ${seconds}s with no durable mirror`,
           "re-run connect_x to create the mirror"
         );
+  });
+
+  add("autopilot_kicker", "Autopilot draft kicker installed + loaded", () => {
+    if (process.platform !== "darwin") {
+      return result("pass", "not applicable on this platform");
+    }
+    const label = "com.m13v.social-twitter-cycle";
+    const plist = path.join(
+      home,
+      "Library",
+      "LaunchAgents",
+      `${label}.plist`
+    );
+    const onDisk = fs.existsSync(plist);
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const printed = spawnSync(
+      "launchctl",
+      ["print", `gui/${uid}/${label}`],
+      { encoding: "utf8", timeout: 10000 }
+    );
+    const loaded = printed.status === 0;
+    if (loaded && onDisk) {
+      return result("pass", "kicker plist installed and loaded in launchd");
+    }
+    if (phase === "pre_connect") {
+      return result(
+        "expected",
+        "kicker installs after a project (or the personal-brand persona) is ready"
+      );
+    }
+    if (onDisk && !loaded) {
+      return result(
+        "fail",
+        "kicker plist exists but is NOT loaded in launchd (no drafts will be produced)",
+        "run runtime action:'install', or bootstrap the plist: " +
+          `launchctl bootstrap gui/${uid} ${plist}`
+      );
+    }
+    // plist missing: could be a legitimately-unconfigured box, so warn (non-blocking)
+    // rather than hard-fail — but make it visible so a stuck autopilot is caught.
+    return result(
+      "warn",
+      "autopilot kicker not installed (no drafts until it is)",
+      "finish setup: choose a mode (engagement_mode) and schedule the autopilot " +
+        "(queue_setup). The kicker auto-installs once a project or the persona is ready."
+    );
   });
 
   const completedChecks = checks.map((check) => {

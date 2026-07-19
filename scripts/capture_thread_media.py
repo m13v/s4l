@@ -205,8 +205,8 @@ def main():
     reposts = 0
     access_checked = 0
     access_not_visible = 0
-    access_check_limit = int(os.environ.get("SAPS_TWITTER_EMPTY_MEDIA_ACCESS_CHECKS", "3"))
-    access_wait_ms = int(os.environ.get("SAPS_TWITTER_EMPTY_MEDIA_ACCESS_WAIT_MS", "4000"))
+    access_check_limit = int(os.environ.get("S4L_TWITTER_EMPTY_MEDIA_ACCESS_CHECKS", "3"))
+    access_wait_ms = int(os.environ.get("S4L_TWITTER_EMPTY_MEDIA_ACCESS_WAIT_MS", "4000"))
     empty_capture_unreliable = None
     for cid, url in pairs:
         rec = by_url.get(url) or {}

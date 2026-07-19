@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Regression test for two recurring bug classes documented across many past
+incidents (X handle -> hardcoded "m13v_" impersonation, DEFAULT_ACCOUNTS,
+bare "python3" reply/post subprocess call sites that lack Playwright on a
+fresh install): a missing config value silently substituting a plausible
+(but wrong, or crash-prone) default instead of failing loudly.
+
+Two checks:
+
+1. check_no_bare_playwright_subprocess() -- static scan of scripts/*.py and
+   seo/*.py for `subprocess.run/check_output/check_call/Popen(["python3", ...])`
+   call sites whose target script imports playwright. A script that needs
+   Playwright must be launched via the pinned interpreter
+   (`PYTHON = os.environ.get("S4L_PYTHON") or sys.executable`, see
+   scripts/twitter_post_plan.py:131), never the literal "python3" -- bare
+   "python3" resolves to the caller's system Python on PATH, which has no
+   Playwright on a fresh install, and the subprocess dies silently
+   (no_reply_json / no_such_module errors surfaced only in production,
+   see bug_twitter_reply_bare_python3_no_playwright.md).
+
+2. check_account_resolver_hard_fails() -- account_resolver.resolve()/require()
+   must return None / raise on missing config, never fall back to a real
+   person's handle (the "m13v_" / DEFAULT_ACCOUNTS impersonation bug, see
+   bug_twitter_handle_scrape_brittle_m13v_fallback.md and
+   bug_multitenant_no_install_scoping_account_fallback.md).
+
+3. check_style_assignment_render_agrees_with_pick() -- an engagement-style
+   picker (engagement_styles.pick_style_for_post/pick_exploration_style)
+   and the prompt renderer (get_assigned_style_prompt) must never disagree
+   about what was assigned, on any platform, under any draft-prompt
+   experiment arm; whatever a picker assigns must also survive
+   validate_or_register() unmodified. Deliberately asserts nothing about
+   what any specific arm's CONTENT is (arms are experiments and will keep
+   changing) -- only that the picker and the renderer agree with each
+   other for whatever they currently do. Guards against the class of bug
+   where a special-case decision lives in only one of the two functions:
+   one platform's driver hand-patches around the gap, the next platform's
+   driver (calling the picker directly) doesn't, and a real post lands
+   with the wrong engagement_style, silently coerced by
+   validate_or_register's drift protection (2026-07-17, see commit
+   2723662d and the Reddit r/saasbuild incident it fixed).
+
+Run:
+    python3 scripts/test_no_silent_fallbacks.py
+Exit 0 = all pass; non-zero with FAIL lines otherwise.
+"""
+from __future__ import annotations
+
+import ast
+import os
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCAN_DIRS = [os.path.join(REPO_ROOT, "scripts"), os.path.join(REPO_ROOT, "seo")]
+SUBPROCESS_FUNCS = {"run", "check_output", "check_call", "Popen", "call"}
+
+# file:line entries explicitly reviewed and confirmed safe to leave as bare
+# "python3" (target does not import playwright, or the target path could not
+# be resolved statically and was hand-verified). Every entry must carry a
+# one-line reason -- this is a reviewed exception list, not a way to silence
+# noise.
+ALLOWLIST = {
+    # e.g. "scripts/some_script.py:42": "targets log_run.py, no playwright import",
+}
+
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(f"{'PASS' if cond else 'FAIL'}  {name}" + (f"  -- {detail}" if detail else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+# ---------------------------------------------------------------------------
+# Check 1: bare "python3" spawning a playwright-dependent script
+# ---------------------------------------------------------------------------
+
+def _imports_playwright(tree):
+    """True iff the AST contains a real `import playwright[...]` or
+    `from playwright[...] import ...` statement, anywhere in the file
+    (module-level or nested inside a function). Deliberately AST-based, not
+    a substring search on the source text -- several scripts (engage_reddit.py,
+    post_reddit.py, twitter_post_plan.py) contain the STRING "import
+    playwright" as a `python -c "import playwright"` preflight-check
+    argument without ever importing it in their own process; a text search
+    misclassifies those as playwright-dependent."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "playwright" or alias.name.startswith("playwright.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and (node.module == "playwright" or node.module.startswith("playwright.")):
+                return True
+    return False
+
+
+def _find_playwright_dependent_scripts():
+    """Basename -> True for every scanned .py file that actually imports
+    playwright (module-level or inside a function -- either way the
+    interpreter running that file needs Playwright installed)."""
+    dependent = set()
+    for d in SCAN_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    src = f.read()
+                tree = ast.parse(src, filename=path)
+            except (OSError, SyntaxError):
+                continue
+            if _imports_playwright(tree):
+                dependent.add(name)
+    return dependent
+
+
+def _const_str(node, literals, file_path):
+    """Best-effort static string resolution: literals, known module-level
+    names, `__file__` (resolved to the real path of the file being scanned),
+    and os.path.join/expanduser/dirname/abspath of resolvable parts -- this
+    covers the repo's common `REPO_DIR = os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))` idiom. Not full data-flow analysis --
+    anything else resolves to None and is reported separately, never
+    silently treated as safe."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id == "__file__":
+            return file_path
+        return literals.get(node.id)
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "join" and node.args:
+            parts = [_const_str(a, literals, file_path) for a in node.args]
+            if all(p is not None for p in parts):
+                return os.path.join(*parts)
+        if isinstance(func, ast.Attribute) and func.attr in ("expanduser", "dirname", "abspath", "normpath") and len(node.args) == 1:
+            inner = _const_str(node.args[0], literals, file_path)
+            if inner is not None:
+                if func.attr == "expanduser":
+                    return os.path.expanduser(inner)
+                if func.attr == "dirname":
+                    return os.path.dirname(inner)
+                if func.attr == "abspath":
+                    return os.path.abspath(inner)
+                if func.attr == "normpath":
+                    return os.path.normpath(inner)
+    return None
+
+
+def _resolve_module_literals(tree, file_path):
+    literals = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            val = _const_str(node.value, literals, file_path)
+            if val is not None:
+                literals[node.targets[0].id] = val
+    return literals
+
+
+def _scan_file(path, playwright_scripts, fails, notes):
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    try:
+        tree = ast.parse(src, filename=path)
+    except SyntaxError:
+        return
+    literals = _resolve_module_literals(tree, path)
+    rel = os.path.relpath(path, REPO_ROOT)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_subprocess_call = (
+            isinstance(func, ast.Attribute)
+            and func.attr in SUBPROCESS_FUNCS
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess"
+        )
+        if not is_subprocess_call or not node.args:
+            continue
+        first_arg = node.args[0]
+        if not isinstance(first_arg, ast.List) or not first_arg.elts:
+            continue
+        interp = first_arg.elts[0]
+        if not (isinstance(interp, ast.Constant) and interp.value in ("python3", "python")):
+            continue
+        if len(first_arg.elts) < 2:
+            continue
+
+        key = f"{rel}:{node.lineno}"
+        if key in ALLOWLIST:
+            continue
+
+        target = _const_str(first_arg.elts[1], literals, path)
+        if target is None:
+            notes.append((key, "target script path not statically resolvable -- review manually"))
+            continue
+
+        basename = os.path.basename(target)
+        if basename in playwright_scripts:
+            fails.append((key, f'spawns {basename} (imports playwright) via bare "{interp.value}"'))
+
+
+def check_no_bare_playwright_subprocess():
+    playwright_scripts = _find_playwright_dependent_scripts()
+    fails, notes = [], []
+    for d in SCAN_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if name.endswith(".py"):
+                _scan_file(os.path.join(d, name), playwright_scripts, fails, notes)
+
+    print(
+        f"  scanned {sum(1 for d in SCAN_DIRS for _ in os.listdir(d) if _.endswith('.py')) if all(os.path.isdir(d) for d in SCAN_DIRS) else '?'} "
+        f"files; {len(playwright_scripts)} playwright-dependent scripts: {', '.join(sorted(playwright_scripts))}"
+    )
+    for key, reason in notes:
+        print(f"  NOTE  {key}  -- {reason}")
+
+    check("no bare-python3 subprocess call targets a playwright-dependent script", not fails,
+          f"{len(fails)} violation(s)" if fails else "")
+    for key, reason in fails:
+        print(f"        FAIL  {key}  -- {reason}")
+    if fails:
+        print(
+            '        fix: route through PYTHON = os.environ.get("S4L_PYTHON") or sys.executable '
+            "instead of the literal \"python3\" (pattern: scripts/twitter_post_plan.py:131)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Check 2: account_resolver must hard-fail, never impersonate
+# ---------------------------------------------------------------------------
+
+def check_account_resolver_hard_fails():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import account_resolver  # noqa: E402
+
+    saved_load_config = account_resolver._load_config
+    saved_durable_handle = account_resolver._durable_handle
+    saved_env = dict(os.environ)
+    try:
+        # Strip every account-related env var + simulate an empty config.json
+        # (no accounts section at all -- the "fresh install, nothing
+        # configured yet" state).
+        for k in list(os.environ):
+            if k.startswith("AUTOPOSTER_"):
+                del os.environ[k]
+        account_resolver._load_config = lambda: {}
+        # Also stub the durable identity store (2026-07-17, added alongside
+        # account_resolver's _durable_handle): resolve() falls through to it
+        # as a THIRD source after env/config, so on any machine with a real
+        # twitter_cookie_mirror (this box included) "no config" alone no
+        # longer means "nothing resolvable" -- the real connected account's
+        # own handle would still come back and fail this "fresh install"
+        # simulation for the wrong reason. Stub it the same way _load_config
+        # is stubbed so this test isolates all three sources, not just one.
+        account_resolver._durable_handle = lambda key: None
+
+        for platform in ("twitter", "reddit", "linkedin", "github", "moltbook"):
+            result = account_resolver.resolve(platform)
+            check(f'resolve("{platform}") with no config returns None (not a hardcoded fallback)',
+                  result is None, f"got {result!r}")
+
+        raised = False
+        try:
+            account_resolver.require("twitter")
+        except RuntimeError:
+            raised = True
+        check('require("twitter") with no config raises RuntimeError (hard-fail, never impersonate)', raised)
+
+        # Positive case: a real configured value still resolves correctly,
+        # so this test can't be satisfied by breaking resolve() outright.
+        account_resolver._load_config = lambda: {"accounts": {"twitter": {"handle": "@some_handle"}}}
+        result = account_resolver.resolve("twitter")
+        check('resolve("twitter") returns the configured handle when config IS present',
+              result == "some_handle", f"got {result!r}")
+    finally:
+        account_resolver._load_config = saved_load_config
+        account_resolver._durable_handle = saved_durable_handle
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+
+# ---------------------------------------------------------------------------
+# Check 3: engagement-style picker and prompt renderer must never disagree
+# ---------------------------------------------------------------------------
+
+def check_style_assignment_render_agrees_with_pick():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import engagement_styles as es
+    import draft_prompt_core as dpc
+
+    saved_env = os.environ.get("S4L_DRAFT_PROMPT_VARIANT")
+    try:
+        # dpc.ARM_TREATMENT is whatever the CURRENT draft-prompt experiment's
+        # specially-handled arm is called -- read from its one source of
+        # truth, never duplicated as a literal here, so a future rename
+        # (e.g. treatment_v4 -> treatment_v5) needs no change to this test.
+        # This is also the arm that resolves without any network call in
+        # both functions under test, so this check stays fast and offline.
+        os.environ["S4L_DRAFT_PROMPT_VARIANT"] = dpc.ARM_TREATMENT
+        for platform in ("twitter", "reddit", "linkedin", "github", "moltbook"):
+            pickers = (
+                ("pick_style_for_post",
+                 lambda p=platform: es.pick_style_for_post(p, context="posting")),
+                ("pick_exploration_style",
+                 lambda p=platform: es.pick_exploration_style(p, context="posting", exclude=set())),
+            )
+            for label, picker in pickers:
+                assignment = picker()
+                if not assignment or assignment.get("mode") != "use" or not assignment.get("style"):
+                    continue  # nothing assigned this call -- nothing to cross-check
+
+                rendered = es.get_assigned_style_prompt(platform, assignment, context="posting")
+                check(
+                    f"{platform}/{label}: render names the exact style it was handed",
+                    assignment["style"] in rendered,
+                    f"assigned={assignment['style']!r}",
+                )
+
+                decision = {"engagement_style": assignment["style"], "new_style": None}
+                validated_style, action = es.validate_or_register(
+                    decision,
+                    assigned_style=assignment["style"],
+                    assigned_mode=assignment["mode"],
+                )
+                check(
+                    f"{platform}/{label}: assignment survives validate_or_register unmodified",
+                    action in ("valid", "registered") and validated_style == assignment["style"],
+                    f"assigned={assignment['style']!r} action={action!r} got={validated_style!r}",
+                )
+    finally:
+        if saved_env is None:
+            os.environ.pop("S4L_DRAFT_PROMPT_VARIANT", None)
+        else:
+            os.environ["S4L_DRAFT_PROMPT_VARIANT"] = saved_env
+
+
+def main():
+    print("-- check 1: no bare-python3 subprocess spawning a playwright-dependent script --")
+    check_no_bare_playwright_subprocess()
+    print("-- check 2: account_resolver hard-fails instead of impersonating --")
+    check_account_resolver_hard_fails()
+    print("-- check 3: engagement-style picker and renderer agree, on every platform --")
+    check_style_assignment_render_agrees_with_pick()
+
+    if FAILS:
+        print(f"\n{len(FAILS)} FAILURE(S):")
+        for name in FAILS:
+            print(f"  - {name}")
+        return 1
+    print("\nALL PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,6 +7,16 @@ Resolution order for each platform (first non-empty wins):
      checked-in file). Twitter retains the legacy `AUTOPOSTER_TWITTER_HANDLE`
      name as an alias.
   2. The matching field in `config.json` -> `accounts.<platform>.<field>`.
+  3. The platform's durable identity store, when it has one. Today only
+     twitter does: the keychain-independent cookie mirror stamps the live
+     @handle at connect time (see twitter_cookie_mirror). This is the SAME
+     ground truth the session posts through, so it's a safe last resort where
+     a hardcoded fallback would not be. It exists because config.json is not a
+     reliable single home for the handle: onboarding populated the mirror but
+     not always config (the "posts land 0/N, no_account_configured" bug), so
+     making config the ONLY source made it a single point of failure. There is
+     deliberately NO hardcoded default anywhere in this resolver; a missing
+     handle returns None and callers refuse rather than impersonate an account.
 
 The handle is normalized:
   - leading `@` is stripped (twitter)
@@ -22,17 +32,24 @@ Returns None if neither source has a value. Callers should treat None as
 
 Platform key map:
     twitter   -> accounts.twitter.handle           (env: AUTOPOSTER_TWITTER_HANDLE)
-    reddit    -> accounts.reddit.username          (env: AUTOPOSTER_REDDIT_USERNAME)
+    reddit    -> reddit_account.username (login ground truth, when present)
+                 else accounts.reddit.username     (env: AUTOPOSTER_REDDIT_USERNAME)
     linkedin  -> accounts.linkedin.name            (env: AUTOPOSTER_LINKEDIN_NAME)
     github    -> accounts.github.username          (env: AUTOPOSTER_GITHUB_USERNAME)
     moltbook  -> accounts.moltbook.username        (env: AUTOPOSTER_MOLTBOOK_USERNAME)
 """
 from __future__ import annotations
 
-import json
 import os
-from functools import lru_cache
+import sys
 from typing import Optional
+
+# THE config loader (scripts/config.py): S4L_CONFIG_PATH / state-dir canonical
+# home / S4L_REPO_DIR resolution + mtime-based caching. Rolling our own here
+# (the pre-2026-07-17 lru_cache + dirname(__file__) read) bypassed all of that
+# and could read a different config.json than the rest of the pipeline.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import load_config as _load_config  # noqa: E402
 
 _PLATFORM_CONFIG_FIELD = {
     "twitter":  ("twitter",  "handle"),
@@ -70,15 +87,22 @@ def normalize(handle: Optional[str]) -> Optional[str]:
     return h or None
 
 
-@lru_cache(maxsize=1)
-def _load_config() -> dict:
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg_path = os.path.join(repo_root, "config.json")
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+def _durable_handle(key: str) -> Optional[str]:
+    """Best-effort read of the platform's durable identity store, or None.
+
+    The durable store is written once at connect time and survives a fresh
+    install / keychain re-lock / Cookies-DB wipe, so it's the ground-truth last
+    resort when neither env nor config carries the handle. Only twitter has one
+    today (the cookie mirror); other platforms return None (env + config only).
+    Never raises: an unimportable/empty store must not break resolution.
+    """
+    if key in ("twitter", "x"):
+        try:
+            import twitter_cookie_mirror  # optional dep; scripts-dir sibling
+            return normalize((twitter_cookie_mirror.load_meta() or {}).get("handle"))
+        except Exception:
+            return None
+    return None
 
 
 def resolve(platform: str) -> Optional[str]:
@@ -92,11 +116,31 @@ def resolve(platform: str) -> Optional[str]:
     if env_value:
         return env_value
 
-    section, field = _PLATFORM_CONFIG_FIELD[key]
     cfg = _load_config()
+
+    # Reddit's login ground truth outranks the plain config field: the top-level
+    # `reddit_account` block is the auth-bearing "who this machine actually logs
+    # in as" record (operator machines / VMs). Drift between it and
+    # accounts.reddit.username broke the VM's post-permalink lookup (wrong
+    # username -> JS found 0 matching comments -> pipeline recorded `failed`
+    # despite the comment landing). This is THE ONLY place both keys are read;
+    # every caller goes through resolve("reddit") so they can never disagree
+    # about the winner again.
+    if key == "reddit":
+        legacy = normalize(((cfg.get("reddit_account") or {}).get("username")))
+        if legacy:
+            return legacy
+
+    section, field = _PLATFORM_CONFIG_FIELD[key]
     accounts = cfg.get("accounts") or {}
     block = accounts.get(section) or {}
-    return normalize(block.get(field))
+    config_value = normalize(block.get(field))
+    if config_value:
+        return config_value
+
+    # Last resort: the durable identity store (twitter cookie mirror). Keeps
+    # config.json from being a single point of failure without ever guessing.
+    return _durable_handle(key)
 
 
 def require(platform: str) -> str:

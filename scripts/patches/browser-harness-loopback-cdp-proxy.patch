@@ -1,0 +1,118 @@
+diff --git a/src/browser_harness/admin.py b/src/browser_harness/admin.py
+index c72a8fb..64addee 100644
+--- a/src/browser_harness/admin.py
++++ b/src/browser_harness/admin.py
+@@ -5,6 +5,7 @@ import subprocess
+ import sys
+ import tempfile
+ import time
++import urllib.parse
+ import urllib.request
+ from pathlib import Path
+ 
+@@ -445,8 +446,29 @@ def _stop_cloud_browser(browser_id):
+         pass
+ 
+ 
++_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
++
++
++def cdp_urlopen(url, timeout=15):
++    """urlopen for CDP endpoints: never send loopback traffic through a proxy.
++
++    urllib's default opener honors proxy env vars AND macOS system proxy
++    settings (scutil --proxy). On a box with a system-wide proxy (e.g. a local
++    gost/ISP forwarder) every 127.0.0.1 CDP probe gets routed to the proxy and
++    comes back 403 Forbidden — Chrome then looks unreachable/"wedged" while
++    curl (env proxies only) and Playwright (own websocket stack) work fine.
++    Loopback must always connect direct; non-loopback CDP URLs keep the
++    default proxy behavior (a remote/cloud CDP endpoint may legitimately need
++    the proxy for reachability).
++    """
++    host = (urllib.parse.urlsplit(url).hostname or "").lower()
++    if host in ("127.0.0.1", "localhost", "::1"):
++        return _NO_PROXY_OPENER.open(url, timeout=timeout)
++    return urllib.request.urlopen(url, timeout=timeout)
++
++
+ def _cdp_ws_from_url(cdp_url):
+-    return json.loads(urllib.request.urlopen(f"{cdp_url}/json/version", timeout=15).read())["webSocketDebuggerUrl"]
++    return json.loads(cdp_urlopen(f"{cdp_url}/json/version", timeout=15).read())["webSocketDebuggerUrl"]
+ 
+ 
+ def _has_local_gui():
+diff --git a/src/browser_harness/daemon.py b/src/browser_harness/daemon.py
+index 0f0f255..de51934 100644
+--- a/src/browser_harness/daemon.py
++++ b/src/browser_harness/daemon.py
+@@ -5,8 +5,22 @@ from collections import deque
+ from pathlib import Path
+ 
+ from . import _ipc as ipc
++from .admin import cdp_urlopen
+ from cdp_use.client import CDPClient
+ 
++# s4l_no_proxy_ws: the daemon's CDP traffic is loopback; never let ANY client
++# in this process route it through a proxy. websockets>=14 autodetects proxies
++# at dial time via urllib.request.proxy_bypass()/getproxies() (which on macOS
++# include SYSTEM proxy settings from scutil --proxy), so a box-wide forwarder
++# turns the CDP WS dial into a proxied CONNECT that fails ("proxy rejected
++# connection: HTTP 503") — same failure class as the urllib 403 that
++# cdp_urlopen fixes for the HTTP lookup. Neutralize resolution process-wide:
++# the daemon's only non-loopback traffic (browser-use cloud API) works direct.
++# Both lookups happen at call time via module attributes, so this holds
++# regardless of import order.
++urllib.request.getproxies = lambda: {}  # type: ignore[assignment]
++urllib.request.proxy_bypass = lambda host: 1  # type: ignore[assignment]
++
+ 
+ def _load_env():
+     repo_root = Path(__file__).resolve().parents[2]
+@@ -113,7 +127,7 @@ def get_ws_url():
+         base_url = url.rstrip("/")
+         while time.time() < deadline:
+             try:
+-                return json.loads(urllib.request.urlopen(f"{base_url}/json/version", timeout=5).read())["webSocketDebuggerUrl"]
++                return json.loads(cdp_urlopen(f"{base_url}/json/version", timeout=5).read())["webSocketDebuggerUrl"]
+             except urllib.error.HTTPError as e:
+                 last_err = e
+                 if e.code == 404 and (ws := _ws_from_devtools_active_port(url)):
+@@ -139,7 +153,7 @@ def get_ws_url():
+         deadline = time.time() + 30
+         while time.time() < deadline:
+             try:
+-                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())["webSocketDebuggerUrl"]
++                return json.loads(cdp_urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())["webSocketDebuggerUrl"]
+             except urllib.error.HTTPError as e:
+                 # Chrome 147+ disables /json/* HTTP discovery on the default user-data-dir;
+                 # the ws path Chrome wrote to DevToolsActivePort still works.
+@@ -153,7 +167,7 @@ def get_ws_url():
+         )
+     for probe_port in (9222, 9223):
+         try:
+-            with urllib.request.urlopen(f"http://127.0.0.1:{probe_port}/json/version", timeout=1) as r:
++            with cdp_urlopen(f"http://127.0.0.1:{probe_port}/json/version", timeout=1) as r:
+                 return json.loads(r.read())["webSocketDebuggerUrl"]
+         except (OSError, KeyError, ValueError):
+             continue
+diff --git a/src/browser_harness/run.py b/src/browser_harness/run.py
+index 8ab1f0f..cbd3835 100644
+--- a/src/browser_harness/run.py
++++ b/src/browser_harness/run.py
+@@ -9,6 +9,7 @@ if hasattr(sys.stdout, "reconfigure"):
+ 
+ from .admin import (
+     _version,
++    cdp_urlopen,
+     NAME,
+     daemon_alive,
+     ensure_daemon,
+@@ -59,7 +60,7 @@ USAGE = """Usage:
+ def _local_chrome_listening():
+     for port in (9222, 9223):
+         try:
+-            urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.3).close()
++            cdp_urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.3).close()
+             return True
+         except OSError: pass
+     return False

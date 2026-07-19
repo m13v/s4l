@@ -12,6 +12,14 @@
 
 set -euo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 REPO_DIR="${REPO_DIR:-$HOME/social-autoposter}"
 BASE_URL="${AUTOPOSTER_API_BASE:-https://s4l.ai}"
 LOG_DIR="$REPO_DIR/skill/logs"
@@ -28,12 +36,23 @@ HDR=$("$PYTHON_BIN" "$REPO_DIR/scripts/identity.py" header 2>>"$LOG_FILE") || {
   exit 1
 }
 
+# Attach the S4L autopilot scheduled-task folder state (parity with the .mcpb
+# heartbeat) so the server can tell centrally whether the queue-worker tasks are
+# running from ~/.s4l-worker or are still mislocated. Best-effort: any failure
+# falls back to an empty body so the heartbeat itself never depends on it.
+BODY='{}'
+if ST=$("$PYTHON_BIN" "$REPO_DIR/scripts/scheduled_tasks_snapshot.py" --summary 2>>"$LOG_FILE"); then
+  if [ -n "$ST" ]; then
+    BODY="{\"scheduled_tasks\":$ST}"
+  fi
+fi
+
 # POST so the server can refresh the volatile fields (last_ip, last_seen_at).
 RESP=$(curl -fsS -m 20 \
   -X POST \
   -H "X-Installation: $HDR" \
   -H "content-type: application/json" \
-  -d '{}' \
+  -d "$BODY" \
   -w "\n__HTTP__%{http_code}__%{time_total}s" \
   "$BASE_URL/api/v1/installations/heartbeat" 2>>"$LOG_FILE") || {
   log "FAIL curl exit=$?"

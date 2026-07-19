@@ -121,18 +121,42 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
       # is defect "owner=OTHER" (wipes a live peer's lock -> double-hold).
       if _sa_we_own_lock "$d"; then
         _sa_lock_event trap_rm "$_lname" "$(_sa_lock_owner_tag "$d")"
-        echo "[lock] trap-released $_lname pid=$$ at $(date +%H:%M:%S)" >&2
+        echo "[lock] trap-released $_lname pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
         rm -rf "$d"
       else
         _sa_lock_event trap_rm_skipped "$_lname" "$(_sa_lock_owner_tag "$d")"
-        echo "[lock] trap-release SKIPPED $_lname pid=$$ (not owner) at $(date +%H:%M:%S)" >&2
+        echo "[lock] trap-release SKIPPED $_lname pid=$$ (not owner) at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
       fi
     done
     for t in ${_SA_LOCK_TICKETS[@]+"${_SA_LOCK_TICKETS[@]}"}; do
       rm -f "$t"
     done
   }
-  trap _sa_release_locks EXIT INT TERM HUP
+  trap _sa_release_locks EXIT
+  # 2026-07-12: INT/TERM/HUP release locks AND EXIT, instead of sharing the
+  # plain EXIT handler. Scenario this fixes (observed 2026-07-12 12:02:09,
+  # engage-dm-replies.sh pid 72465): a stray signal fired the old combined
+  # trap, which released BOTH held locks and then RESUMED the script (bash
+  # continues after a trapped signal when the handler doesn't exit). The run
+  # kept driving the shared twitter Chrome without its twitter-browser lock,
+  # the twitter cycle legitimately acquired the freed lock and navigated the
+  # same tab mid-send, and all 3 send-dm attempts died with
+  # thread_url_redirected ("shared-tab drift", human_dm_replies id 100045).
+  # A signaled run must never continue lock-protected work: log WHICH signal
+  # hit (the old single-line event gave no clue), clean up once, exit 128+N.
+  # Scripts that install their own combined traps after sourcing this file
+  # (e.g. run-twitter-cycle.sh's _sa_combined_exit) still override these.
+  _sa_exit_on_signal() {
+    local _sig="$1" _code="$2"
+    _sa_lock_event signal_exit "-" "signal=$_sig"
+    echo "[lock] caught SIG${_sig} pid=$$; releasing locks and exiting $_code at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+    _sa_release_locks
+    trap - EXIT
+    exit "$_code"
+  }
+  trap '_sa_exit_on_signal INT 130' INT
+  trap '_sa_exit_on_signal TERM 143' TERM
+  trap '_sa_exit_on_signal HUP 129' HUP
 fi
 
 acquire_lock() {
@@ -223,7 +247,7 @@ acquire_lock() {
           [ "$_existing" != "$ticket_file" ] && _new_t+=("$_existing")
         done
         _SA_LOCK_TICKETS=(${_new_t[@]+"${_new_t[@]}"})
-        echo "[lock] acquired $name pid=$$ at $(date +%H:%M:%S) waited=${waited}s" >&2
+        echo "[lock] acquired $name pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ) waited=${waited}s" >&2
         _sa_lock_event acquired "$name" "waited=${waited}s"
         break
       fi
@@ -231,31 +255,71 @@ acquire_lock() {
       # We're head-of-queue but lock_dir exists. Either the holder is alive
       # and active (normal — wait), or they died uncleanly. Apply the same
       # stale-detection used pre-FIFO.
+      # 2026-07-07 hardening: twice (2026-07-06 20:36, 2026-07-07 11:10) this
+      # block reclaimed linkedin-browser from a LIVE run-linkedin holder, and
+      # the old single-line event gave no clue WHICH branch fired. Now:
+      #   - every reclaim records reason=no_pidfile|dead_pid|age
+      #   - stat_mtime's 0-on-failure sentinel no longer counts as ancient
+      #     (now-0 made the age check treat a fresh lock as 56 years old)
+      #   - a 1s re-verify runs before rm so a one-poll misread (transient
+      #     cat/kill -0 flake) cannot yank a live peer's lock
       local should_remove=false
+      local stale_reason=""
       if [ ! -f "$lock_dir/pid" ]; then
         should_remove=true
+        stale_reason="no_pidfile"
       else
         local holder_pid
         holder_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
         if [ -z "$holder_pid" ] || ! kill -0 "$holder_pid" 2>/dev/null; then
           should_remove=true
+          stale_reason="dead_pid:${holder_pid:-empty}"
         fi
       fi
-      # Safety net: remove any lock older than 3 hours regardless. Watchdog's
-      # per-script caps (45m default, 120m for stats_reddit/github-engage) will
-      # SIGTERM a hung holder long before this fires.
-      if [ -d "$lock_dir" ]; then
-        local lock_age
-        lock_age=$(( $(date +%s) - $(stat_mtime "$lock_dir") ))
-        if [ "$lock_age" -gt 10800 ]; then
-          should_remove=true
+      # Safety net: remove any lock older than 3 hours regardless of holder
+      # liveness. Watchdog's per-script caps (45m default, 120m for
+      # stats_reddit/github-engage) will SIGTERM a hung holder long before
+      # this fires.
+      if ! $should_remove && [ -d "$lock_dir" ]; then
+        local lock_age lock_mtime
+        lock_mtime=$(stat_mtime "$lock_dir")
+        if [ "$lock_mtime" -gt 0 ]; then
+          lock_age=$(( $(date +%s) - lock_mtime ))
+          if [ "$lock_age" -gt 10800 ]; then
+            should_remove=true
+            stale_reason="age:${lock_age}s"
+          fi
         fi
       fi
       if $should_remove; then
-        _sa_lock_event stale_reclaim "$name" "$(_sa_lock_owner_tag "$lock_dir")"
-        echo "Removing stale $name lock"
-        rm -rf "$lock_dir"
-        continue
+        sleep 1
+        if [ ! -d "$lock_dir" ]; then
+          # Holder (or its trap) removed it during our re-verify window; loop
+          # back and race mkdir normally.
+          continue
+        fi
+        local still_stale=false
+        if [ ! -f "$lock_dir/pid" ]; then
+          still_stale=true
+        else
+          local recheck_pid
+          recheck_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+          if [ -z "$recheck_pid" ] || ! kill -0 "$recheck_pid" 2>/dev/null; then
+            still_stale=true
+          elif [ "${stale_reason#age:}" != "$stale_reason" ]; then
+            # Age-based reclaim is deliberate even with a live (hung) holder.
+            still_stale=true
+          fi
+        fi
+        if $still_stale; then
+          _sa_lock_event stale_reclaim "$name" "reason=$stale_reason $(_sa_lock_owner_tag "$lock_dir")"
+          echo "Removing stale $name lock (reason=$stale_reason)"
+          rm -rf "$lock_dir"
+          continue
+        fi
+        _sa_lock_event stale_reclaim_aborted "$name" "reason=$stale_reason $(_sa_lock_owner_tag "$lock_dir")"
+        echo "[lock] stale-reclaim ABORTED for $name pid=$$ (initial reason=$stale_reason; holder alive on re-verify)" >&2
+        # Not stale after all — fall through to the normal wait path.
       fi
     fi
 
@@ -630,10 +694,10 @@ release_lock() {
   if _sa_we_own_lock "$lock_dir"; then
     _sa_lock_event release "$name" "$(_sa_lock_owner_tag "$lock_dir")"
     rm -rf "$lock_dir"
-    echo "[lock] released $name pid=$$ at $(date +%H:%M:%S)" >&2
+    echo "[lock] released $name pid=$$ at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
   else
     _sa_lock_event release_skipped "$name" "$(_sa_lock_owner_tag "$lock_dir")"
-    echo "[lock] release SKIPPED $name pid=$$ (not owner) at $(date +%H:%M:%S)" >&2
+    echo "[lock] release SKIPPED $name pid=$$ (not owner) at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
   fi
   # Rebuild the lock stack without this entry so the EXIT trap doesn't try to
   # rm it again (harmless, but keeps the stack honest if release_lock is paired
@@ -644,4 +708,61 @@ release_lock() {
     [ "$d" != "$lock_dir" ] && new_stack+=("$d")
   done
   _SA_LOCK_DIRS=(${new_stack[@]+"${new_stack[@]}"})
+}
+
+# ---- whole-run pipeline singleton (generalized 2026-07-14) ------------------
+# acquire_pipeline_singleton NAME
+#
+# One-driver-per-resource lock for an ENTIRE pipeline run, generalized from
+# linkedin-backend.sh's _acquire_linkedin_pipeline_lock (2026-05-30; read the
+# incident comments there for why every semantic below is load-bearing):
+#   - try once (mkdir /tmp/s4l-<NAME>-pipeline.lock); NO waiting/queueing (the
+#     2026-06-04/05 wait experiment starved the comment poster).
+#   - reclaim when the recorded holder pid is dead.
+#   - re-entrant per top-level script: an env flag survives same-process
+#     re-calls, and a holder-pid==$$ check survives subshell/pipe call sites
+#     (where the env export is lost but $$ is still the script pid).
+#   - a DIFFERENT live pipeline holds it -> return the RESERVED SKIP CODE 78.
+#     Callers MUST check for 78 in the PARENT shell and exit 0 (skip this
+#     fire; launchd re-fires on cadence). `exit` inside this function only
+#     kills the caller's subshell (2026-07-06 incident), and `kill -TERM $$`
+#     is neutered by lock.sh's TERM trap, so the rc contract is the ONLY
+#     mechanism that works.
+#   - NO release trap on purpose: the next pipeline's dead-pid check reclaims
+#     a finished run's dir, and adding a trap would clobber the parent
+#     scripts' EXIT/INT/TERM/HUP run_monitor traps.
+acquire_pipeline_singleton() {
+  local _ps_name="${1:?pipeline singleton name}"
+  local _ps_dir="/tmp/s4l-${_ps_name}-pipeline.lock"
+  local _ps_flag_var="_S4L_PIPE_LOCK_HELD_$(printf '%s' "$_ps_name" | tr -c 'A-Za-z0-9' '_')"
+  # Already held by THIS process (re-entry across phases) -> proceed.
+  if [ "$(eval "printf '%s' \"\${${_ps_flag_var}:-0}\"")" = "1" ]; then
+    return 0
+  fi
+  local _ps_who="${S4L_PIPELINE_NAME:-$(basename "${0:-${_ps_name}-pipeline}")}"
+  while : ; do
+    if mkdir "$_ps_dir" 2>/dev/null; then
+      echo "$$" > "$_ps_dir/pid"
+      echo "$_ps_who" > "$_ps_dir/holder"
+      eval "export ${_ps_flag_var}=1"
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_ps_name}-pipeline lock ACQUIRED by $_ps_who (pid $$)" >&2
+      return 0
+    fi
+    local _ps_h_pid _ps_h_who
+    _ps_h_pid="$(cat "$_ps_dir/pid" 2>/dev/null || echo "")"
+    _ps_h_who="$(cat "$_ps_dir/holder" 2>/dev/null || echo "?")"
+    # Re-entry when the acquiring call ran in a subshell/pipe: the env flag
+    # was lost with that subshell, but the recorded holder pid is still OURS.
+    if [ "$_ps_h_pid" = "$$" ]; then
+      eval "export ${_ps_flag_var}=1"
+      return 0
+    fi
+    if [ -z "$_ps_h_pid" ] || ! kill -0 "$_ps_h_pid" 2>/dev/null; then
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_ps_name}-pipeline lock: reclaiming stale lock (dead holder ${_ps_h_who} pid ${_ps_h_pid:-unknown})" >&2
+      rm -rf "$_ps_dir"
+      continue
+    fi
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_ps_name}-pipeline lock: held by ${_ps_h_who} (pid ${_ps_h_pid}); ${_ps_who} skipping this fire (rc=78)" >&2
+    return 78
+  done
 }

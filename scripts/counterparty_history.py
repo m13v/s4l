@@ -83,10 +83,25 @@ def _conversation_root(platform, post_id, their_comment_url):
     return f"url:{their_comment_url.rsplit('/', 1)[0]}"
 
 
+# Same-author reply cap advisory (2026-07-14): a run of near-identical
+# corrections to one person over a short window reads as one-note bot
+# behavior even when each individual reply was earned. This is a SOFT
+# nudge appended to the history block, not a hard skip, since a genuine
+# direct question from the author (see get_counterparty_history_block)
+# still earns a reply past the threshold; only a deterministic count-based
+# gate would wrongly suppress that case.
+RECENT_CAP_WINDOW_HOURS = 48
+RECENT_CAP_THRESHOLD = 3
+
+
 def _fetch_author_summary(platform, author, days=7):
     """Compute bot/loop-judgment stats for `author` in the last `days` window.
 
-    Returns a one-line summary string (or "" when there is no history).
+    Returns (summary_line, recent_replied_count). summary_line is "" when
+    there is no history. recent_replied_count is how many of our replies to
+    this author landed inside RECENT_CAP_WINDOW_HOURS, used for the same-
+    author cap advisory below.
+
     Signals: total candidates, our replied count, our skipped count,
     distinct conversation roots, our_replies / distinct_roots ratio (the
     "engagement-loop shape" metric — closer to 1.0 = farm-shaped), skip
@@ -94,7 +109,7 @@ def _fetch_author_summary(platform, author, days=7):
     clean), span_hours.
     """
     if not author:
-        return ""
+        return "", 0
     since_ts = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
     try:
         resp = api_get(
@@ -114,11 +129,11 @@ def _fetch_author_summary(platform, author, days=7):
             f"{platform}/@{author}: {e}",
             file=sys.stderr,
         )
-        return ""
+        return "", 0
 
     total = len(rows)
     if total == 0:
-        return ""
+        return "", 0
 
     replied = sum(1 for r in rows if r.get("status") == "replied")
     skipped = sum(1 for r in rows if r.get("status") == "skipped")
@@ -142,13 +157,29 @@ def _fetch_author_summary(platform, author, days=7):
     if len(timestamps) >= 2:
         span_h = (max(timestamps) - min(timestamps)).total_seconds() / 3600.0
 
-    return (
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=RECENT_CAP_WINDOW_HOURS)
+    recent_replied = 0
+    for r in rows:
+        if r.get("status") != "replied":
+            continue
+        ts = r.get("replied_at") or r.get("discovered_at")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt >= recent_cutoff:
+            recent_replied += 1
+
+    summary_line = (
         f"SUMMARY (last {days}d): {total} candidates, {replied} our_replies, "
         f"{skipped} skipped ({skip_pct:.1f}% skip_rate), "
         f"{distinct_roots} distinct conversation_roots "
         f"(replies/root={ratio:.2f}, closer to 1.0 = farm-shaped), "
         f"span={span_h:.1f}h"
     )
+    return summary_line, recent_replied
 
 
 def _fetch_dm_history(platform, author, post_id):
@@ -302,7 +333,7 @@ def get_counterparty_history_block(platform, author, current_post_id=None, curre
         sum_fut = ex.submit(_fetch_author_summary, platform, author, 7)
         same_post_disengage, dm_lines = dm_fut.result()
         pub_lines = pub_fut.result()
-        summary_line = sum_fut.result()
+        summary_line, recent_replied = sum_fut.result()
 
     if not dm_lines and not pub_lines and not summary_line:
         return same_post_disengage, ""
@@ -317,6 +348,13 @@ def get_counterparty_history_block(platform, author, current_post_id=None, curre
     if summary_line:
         parts.append("")
         parts.append(summary_line)
+    if recent_replied >= RECENT_CAP_THRESHOLD:
+        parts.append(
+            f"\nCAUTION: we've already replied to @{author} {recent_replied} times in the "
+            f"last {RECENT_CAP_WINDOW_HOURS}h. Repeating the same correction again reads as "
+            "one-note bot behavior. Only reply again if they asked a direct question or raised "
+            "a genuinely new point; otherwise let this one go or shift to a different angle."
+        )
     if dm_lines:
         parts.append("\n### DM threads on other posts")
         parts.append("\n".join(dm_lines))

@@ -35,16 +35,28 @@ except Exception:
     _fgl = None
 from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E402
 from project_topics import topics_for_project  # noqa: E402
+from virality import age_decay as _shared_age_decay, TWITTER_HALF_LIFE_HOURS  # noqa: E402
 
 
 # Freshness window (in hours) for the expire-stale gate that flips stale
 # pending rows to status='expired'. Sourced from the FRESHNESS_HOURS env the
 # cycle exports (run-twitter-cycle.sh) so the expiry ceiling is configured in
 # ONE place. Falls back to 18 when unset (e.g. ad-hoc / --expire-only runs) to
-# preserve the historical default. NOTE: the gate is on discovered_at
-# (discovery age), not tweet_posted_at; for logic D (≤1h discovery freshness)
-# the two are within ~1h of each other.
+# preserve the historical default.
+#
+# 2026-07-15: the gate now measures thread age (tweet_posted_at), not
+# discovery age (discovered_at) — see EXPIRE_BASIS below. It used to be
+# discovered_at; that was harmless while discovery was capped at 1h (the two
+# stayed within ~1h of each other), but wrong once discovery widened to 6h
+# alongside this ceiling (a discovered_at-based gate would then let real
+# thread age reach ~12h before expiring).
 EXPIRE_FRESHNESS_HOURS = int(os.environ.get("FRESHNESS_HOURS") or "18")
+
+# Opt-in basis param for the expire-stale route (see
+# ~/social-autoposter-website twitter-candidates/expire-stale): the route
+# defaults to discovered_at for every other install, so this is passed
+# explicitly rather than changing the route's default.
+EXPIRE_BASIS = "tweet_posted_at"
 
 
 # Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
@@ -149,7 +161,9 @@ def calculate_virality_score(tweet):
 
     # 6. Age decay: half-life of 6 hours (softened from 3h)
     # 3h = 71%, 6h = 50%, 12h = 25%, 18h = 12.5%
-    age_decay = math.exp(-0.1155 * age_hours)  # ln(2)/6
+    # Shared with the Reddit scorer (scripts/virality.py, 2026-07-18); only
+    # the half-life differs (6h here vs 7 days there).
+    age_decay = _shared_age_decay(age_hours, TWITTER_HALF_LIFE_HOURS)
 
     # 7. Retweet ratio bonus
     rt_bonus = 1.0 + min(rt_ratio * 2, 1.0)  # up to 2x for high RT ratio
@@ -527,8 +541,10 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
             # composite unique gives each account its own candidate row.
             # Without this, account A's 'posted' status on tweet X would lock
             # account B out of the same tweet (ON CONFLICT preserved 'posted').
-            # Defaults server-side to 'm13v_' if omitted; new callers should
-            # always pass it explicitly.
+            # If omitted, the server stamps a per-install 'unknown:<install_id>'
+            # sentinel (2026-07-18; it used to default to 'm13v_', silently
+            # impersonating the repo owner). Callers should always pass it —
+            # _resolve_twitter_handle() covers env -> config -> cookie mirror.
             "our_account": _twitter_handle or "",
             # Repost provenance (2026-06-04). The scan derives the author from
             # the status URL, so author_handle/tweet_url already point at the
@@ -599,7 +615,10 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     # Expire old pending candidates past the freshness window. This is a
     # freshness GATE (status flip), not a delete — we keep the row forever
     # for analytics.
-    api_post("/api/v1/twitter-candidates/expire-stale", {"freshness_hours": EXPIRE_FRESHNESS_HOURS})
+    api_post(
+        "/api/v1/twitter-candidates/expire-stale",
+        {"freshness_hours": EXPIRE_FRESHNESS_HOURS, "basis": EXPIRE_BASIS},
+    )
 
     # NO PRUNING. We keep every twitter_candidates row forever (chosen, skipped,
     # expired) so we can audit project routing, skip reasons, growth dynamics,
@@ -664,7 +683,7 @@ def main():
         # it off and prints the count.
         resp = api_post(
             "/api/v1/twitter-candidates/expire-stale",
-            {"freshness_hours": EXPIRE_FRESHNESS_HOURS},
+            {"freshness_hours": EXPIRE_FRESHNESS_HOURS, "basis": EXPIRE_BASIS},
         )
         expired = (resp.get("data") or {}).get("expired_count", 0)
         print(f"Expired {expired} old pending candidates (no row deletion)")

@@ -29,7 +29,16 @@ Usage:
 
 Output (stdout, last line is JSON):
   {"ok": true, "handle": "...", "profile": {...}, "posts": [...],
-   "comments": [...], "counts": {...}, "grounding_instructions": "..."}
+   "comments": [...], "top_posts": [...], "top_replies": [...],
+   "counts": {...}, "grounding_instructions": "..."}
+
+top_posts / top_replies are the same items ranked by real engagement
+(likes*3 + retweets*5 + replies*2), each stamped with rank + engagement_score.
+On /with_replies each reply also carries `parent` = {author, text, url} (the
+tweet it replied to, best-effort DOM-adjacent pairing), and the top posts get
+their thread continuation expanded (`thread`: [tweet texts]) by visiting the
+permalink. scripts/voice_exemplars.py turns these into voice.examples +
+persona_corpus.txt exemplars.
 """
 
 from __future__ import annotations
@@ -47,9 +56,17 @@ except Exception:  # pragma: no cover
     create_connection = None  # type: ignore[assignment]
 
 CDP = os.environ.get(
-    "SAPS_TWITTER_CDP_URL",
+    "S4L_TWITTER_CDP_URL",
     os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555"),
 ).rstrip("/")
+
+# Bump whenever the scraping/ranking logic changes materially enough that an
+# install's existing scan should be considered stale and worth redoing, even
+# though it "succeeded" under the old code (e.g. the 2026-07-15 stall-detection
+# fix: old scans from accounts where S4L posts heavily silently undercounted
+# organic replies). scripts/voice_exemplars.py stamps this alongside
+# examples_scanned_at and treats a lower stamped version as a rescan trigger.
+SCANNER_VERSION = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +199,11 @@ def scrape_profile(send) -> dict:
 # --------------------------------------------------------------------------- #
 _TIMELINE_JS_TMPL = r"""(function(){
   var ME=%s; // lowercase handle without @
+  var WITH_PARENTS=%s; // true only on /with_replies: pair each reply with the
+                       // other-author article directly above it (same
+                       // conversation cell renders parent then our reply)
   var out=[];
+  var lastOther=null;
   var arts=document.querySelectorAll('article');
   for(var i=0;i<arts.length;i++){
     var art=arts[i];
@@ -194,10 +215,8 @@ _TIMELINE_JS_TMPL = r"""(function(){
       var mm=hh.match(/^\/([A-Za-z0-9_]{1,15})$/);
       if(mm){authorHandle=mm[1].toLowerCase();break;}
     }
-    if(authorHandle && authorHandle!==ME) continue; // skip others' posts (reposts/quotes/threads)
     var tEl=art.querySelector('[data-testid="tweetText"]');
     var text=tEl?(tEl.innerText||'').trim():'';
-    if(!text) continue;
     // permalink + id
     var url='';var id='';
     var statusLinks=art.querySelectorAll('a[href*="/status/"]');
@@ -206,6 +225,16 @@ _TIMELINE_JS_TMPL = r"""(function(){
       var sm=sh.match(/\/status\/(\d+)/);
       if(sm){id=sm[1];url='https://x.com'+sh.split('?')[0];break;}
     }
+    if(authorHandle && authorHandle!==ME){
+      // Someone else's article. On /with_replies it is the parent of our next
+      // reply in the same conversation cell; remember it. On the posts tab it
+      // is a repost/quote we simply skip (WITH_PARENTS=false there).
+      if(WITH_PARENTS && text){
+        lastOther={author:'@'+authorHandle,text:text.slice(0,500),url:url};
+      }
+      continue;
+    }
+    if(!text) continue;
     // reply? presence of a "Replying to" header in the cell
     var isReply=false, replyTo='';
     var spans=art.querySelectorAll('span,div');
@@ -226,15 +255,21 @@ _TIMELINE_JS_TMPL = r"""(function(){
       var m=al.match(/([\d,]+)/);
       return m?parseInt(m[1].replace(/,/g,''),10):0;
     }
-    out.push({text:text,url:url,id:id,is_reply:isReply,reply_to:replyTo,
-              likes:metric('like'),replies:metric('reply'),retweets:metric('retweet')});
+    var item={text:text,url:url,id:id,is_reply:isReply,reply_to:replyTo,
+              likes:metric('like'),replies:metric('reply'),retweets:metric('retweet')};
+    if(WITH_PARENTS){
+      item.parent=lastOther; // may be null (their own standalone post)
+      lastOther=null;        // consume: never pair one parent with two replies
+    }
+    out.push(item);
   }
   return JSON.stringify(out);
 })()"""
 
 
 def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
-                    exclude_ids: "set | None" = None) -> list:
+                    exclude_ids: "set | None" = None,
+                    capture_parents: bool = False) -> list:
     """Scroll the current timeline, collecting up to `want` of the user's OWN
     authored articles (in DOM order = newest first). `exclude_ids` drops items
     already captured elsewhere — that's how the comments pass (/with_replies)
@@ -245,12 +280,25 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
     End-of-feed is detected by COLLECTED-COUNT STALL, not scrollHeight: x.com
     virtualizes the timeline (unloads off-screen articles and keeps total height
     ~constant while swapping content), so scrollHeight plateaus even mid-feed and
-    would false-trigger an early stop. We instead stop when no NEW item has been
-    captured for `STALL_LIMIT` consecutive scrolls (after a min number of scrolls),
-    scrolling to the bottom each step to force the next lazy-load batch."""
+    would false-trigger an early stop. We instead stop when no NEW article has
+    been observed for `STALL_LIMIT` consecutive scrolls (after a min number of
+    scrolls), scrolling to the bottom each step to force the next lazy-load batch.
+
+    Stall detection tracks EVERY distinct article observed (`seen_keys`),
+    including ones dropped via `exclude_ids`, not just the KEPT pool (`seen`).
+    On an install where S4L has been posting heavily, /with_replies is
+    dominated by the account's own already-excluded S4L posts; a long run of
+    those looks identical to `seen` not growing, which used to trip
+    STALL_LIMIT and abandon the scroll after only a few screens (found
+    2026-07-15: an active persona account returned only 1 usable organic
+    reply from a --comments 150 scan). Tracking all distinct keys means a
+    dense run of excluded posts still counts as feed progress, so the scan
+    keeps scrolling until it actually runs out of new articles."""
     seen: dict[str, dict] = {}
+    seen_keys: set = set()
     exclude_ids = exclude_ids or set()
-    expr = _TIMELINE_JS_TMPL % json.dumps(me.lower())
+    expr = _TIMELINE_JS_TMPL % (json.dumps(me.lower()),
+                                "true" if capture_parents else "false")
     STALL_LIMIT = 4
     stall = 0
     for n in range(max_scrolls):
@@ -259,17 +307,21 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
             batch = json.loads(raw)
         except Exception:
             batch = []
-        before = len(seen)
+        before = len(seen_keys)
         for item in batch:
             key = item.get("id") or item.get("url") or item.get("text", "")[:80]
-            if not key or key in seen or key in exclude_ids:
+            if not key:
+                continue
+            seen_keys.add(key)
+            if key in seen or key in exclude_ids:
                 continue
             seen[key] = item
         if len(seen) >= want:
             break
-        # No new items this pass? Count it as a stall. Give the feed a few
-        # consecutive empty scrolls (lazy-load can lag) before declaring the end.
-        if len(seen) == before and n > 0:
+        # No new article at all this pass (kept or excluded)? Count it as a
+        # stall. Give the feed a few consecutive empty scrolls (lazy-load can
+        # lag) before declaring the end.
+        if len(seen_keys) == before and n > 0:
             stall += 1
             if stall >= STALL_LIMIT:
                 break
@@ -283,6 +335,113 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
     return items[:want]
 
 
+def _own_posted_ids() -> set:
+    """Status ids of everything S4L itself has posted from this install, via
+    /api/v1/posts (install-scoped by the X-Installation header). Used to keep
+    the bot's own output OUT of the author-voice exemplar pool: on accounts
+    where S4L has been active, a recency scan is dominated by S4L drafts, and
+    feeding those back as 'the author's voice' is a feedback loop. Best-effort:
+    any failure (offline, fresh install, no API) returns an empty set and the
+    scan proceeds unfiltered."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get  # noqa: PLC0415
+        import re
+        ids: set = set()
+        # The route caps limit at 500, so walk the FULL posting history with a
+        # forward posted_at cursor (order_dir=asc + since>=). On prolific
+        # accounts a single newest-500 page misses older S4L posts that the
+        # profile scan still reaches (bit the operator account: 12.8k posted
+        # statuses, 2 of 5 picked exemplars were S4L's own). The since filter
+        # is inclusive, so overlap rows dedupe via the set; a page whose max
+        # posted_at equals the cursor would loop and breaks instead.
+        cursor = None
+        for _ in range(80):  # hard cap 40k statuses
+            q = {"platform": "twitter", "has_our_url": "true", "limit": 500,
+                 "order_by": "posted_at", "order_dir": "asc"}
+            if cursor:
+                q["since"] = cursor
+            resp = api_get("/api/v1/posts", q)
+            rows = ((resp or {}).get("data") or {}).get("posts") or []
+            for r in rows:
+                m = re.search(r"/status/(\d+)", str(r.get("our_url") or ""))
+                if m:
+                    ids.add(m.group(1))
+            if len(rows) < 500:
+                break
+            page_max = max((r.get("posted_at") or "" for r in rows), default="")
+            if not page_max or page_max == cursor:
+                break
+            cursor = page_max
+        return ids
+    except Exception as e:
+        print(f"[scan_x_profile] own-posts exclusion unavailable: {e}", file=sys.stderr)
+        return set()
+
+
+# --------------------------------------------------------------------------- #
+# Engagement ranking + thread expansion for exemplar extraction.
+# --------------------------------------------------------------------------- #
+def _engagement_score(item: dict) -> int:
+    """Same weighting everywhere exemplars are ranked (voice_exemplars.py
+    re-derives it if absent): a retweet is a stronger signal than a like,
+    a like stronger than a reply-back."""
+    return (int(item.get("likes") or 0) * 3
+            + int(item.get("retweets") or 0) * 5
+            + int(item.get("replies") or 0) * 2)
+
+
+def rank_top(items: list, n: int = 5) -> list:
+    """Top n items by engagement, stamped with rank + engagement_score.
+    Zero-engagement items still rank (small accounts often have nothing else);
+    the score on each entry lets downstream decide what to keep."""
+    ranked = sorted(items, key=_engagement_score, reverse=True)[:n]
+    out = []
+    for i, it in enumerate(ranked, 1):
+        e = dict(it)
+        e["rank"] = i
+        e["engagement_score"] = _engagement_score(it)
+        out.append(e)
+    return out
+
+
+_THREAD_JS_TMPL = r"""(function(){
+  var ME=%s;
+  var out=[];var started=false;
+  var arts=document.querySelectorAll('article');
+  for(var i=0;i<arts.length;i++){
+    var art=arts[i];
+    var authorHandle='';
+    var links=art.querySelectorAll('a[href^="/"]');
+    for(var j=0;j<links.length;j++){
+      var hh=links[j].getAttribute('href')||'';
+      var mm=hh.match(/^\/([A-Za-z0-9_]{1,15})$/);
+      if(mm){authorHandle=mm[1].toLowerCase();break;}
+    }
+    var tEl=art.querySelector('[data-testid="tweetText"]');
+    var text=tEl?(tEl.innerText||'').trim():'';
+    if(authorHandle===ME && text){out.push(text);started=true;}
+    else if(started){break;} // first non-ME article after the run = end of thread
+  }
+  return JSON.stringify(out);
+})()"""
+
+
+def expand_thread(send, me: str, url: str) -> list:
+    """Visit a post's permalink and return the consecutive run of the user's own
+    tweets starting at the focal one ([focal, continuation, ...]). Length 1 =
+    not a thread. Bonus: the permalink shows full text, so this also untruncates
+    posts the timeline cut with 'Show more'. Best-effort; [] on failure."""
+    if not url or not _navigate(send, url, settle=3.5, expect="/status/"):
+        return []
+    raw = _eval(send, _THREAD_JS_TMPL % json.dumps(me.lower())) or "[]"
+    try:
+        parts = json.loads(raw)
+    except Exception:
+        parts = []
+    return parts if isinstance(parts, list) else []
+
+
 GROUNDING_INSTRUCTIONS = (
     "You now have this user's real X profile (bio, original posts, and their own "
     "replies). Use it as GROUND TRUTH to draft their autoposter config fields in "
@@ -294,9 +453,15 @@ GROUNDING_INSTRUCTIONS = (
     "capitalization habits, emoji/punctuation usage, and recurring phrases or tics. "
     "Write the `voice` field so a reply drafted with it would be indistinguishable "
     "from something they'd actually type.\n"
-    "3. GOLDEN-RULE EXAMPLES: pick 2-4 of their strongest real replies/posts "
-    "verbatim and keep them as exemplars (these become few-shot anchors). Choose "
-    "ones that show the target reply behavior: helpful, specific, in-voice.\n"
+    "3. GOLDEN-RULE EXAMPLES: `top_replies` and `top_posts` are already ranked by "
+    "REAL engagement (each entry carries likes/retweets/replies, engagement_score, "
+    "the parent tweet it replied to, and thread continuations). From them keep up "
+    "to 5 replies verbatim as exemplars, skipping throwaway one-liners that show "
+    "no voice; on small accounts engagement is sparse, so judge voice quality too. "
+    "STORE them in the project's `voice.examples` (every drafter on every platform "
+    "mirrors that field), or run "
+    "`voice_exemplars.py apply --scan <scan.json> --project <name>` to write "
+    "voice.examples + the persona_corpus.txt exemplar section deterministically.\n"
     "4. PHRASE BANK: list the kinds of phrases / openers / sign-offs they reuse, "
     "and any words/claims they clearly AVOID (for `content_guardrails`).\n"
     "5. ICP: infer who they engage with (who they reply to, what communities) to "
@@ -312,8 +477,12 @@ GROUNDING_INSTRUCTIONS = (
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--handle", default=None, help="@handle to scan (default: live logged-in handle)")
-    ap.add_argument("--posts", type=int, default=20, help="max original posts to collect")
-    ap.add_argument("--comments", type=int, default=50, help="max replies/comments to collect")
+    ap.add_argument("--posts", type=int, default=60, help="max original posts to collect")
+    ap.add_argument("--comments", type=int, default=150, help="max replies/comments to collect")
+    ap.add_argument("--top", type=int, default=5, help="how many top posts/replies to rank")
+    ap.add_argument("--expand-threads", type=int, default=3,
+                    help="visit this many top posts' permalinks to capture thread "
+                         "continuations + full text (0 = off)")
     args = ap.parse_args()
 
     if create_connection is None:
@@ -345,18 +514,47 @@ def main() -> int:
                                expect=f"/{handle}")
         profile = scrape_profile(send) if on_profile else {}
 
-        # 2. Original posts (current page = posts tab).
-        posts = scrape_timeline(send, handle, args.posts) if on_profile else []
+        # 2. Everything S4L itself posted from this install gets excluded from
+        #    BOTH surfaces (posts and replies): the exemplars must be the
+        #    human's writing, not the bot's own output echoed back.
+        s4l_ids = _own_posted_ids()
+        if s4l_ids:
+            print(f"[scan_x_profile] excluding {len(s4l_ids)} s4l-posted statuses "
+                  "from the exemplar pool", file=sys.stderr)
+
+        # 3. Original posts (current page = posts tab). max_scrolls tracks the
+        #    requested depth: the scan is programmatic, so scrolling deeper
+        #    costs only time, and end-of-feed stall detection stops it early
+        #    on small accounts.
+        posts = (scrape_timeline(send, handle, args.posts,
+                                 max_scrolls=max(30, args.posts),
+                                 exclude_ids=s4l_ids)
+                 if on_profile else [])
         post_ids = {p.get("id") for p in posts if p.get("id")}
 
-        # 3. Replies / comments = the user's own articles on /with_replies that
+        # 4. Replies / comments = the user's own articles on /with_replies that
         #    are NOT among the original posts (set subtraction, not DOM text).
         on_replies = _navigate(send, f"https://x.com/{handle}/with_replies",
                                settle=4.0, expect=f"/{handle}/with_replies")
         comments = (
-            scrape_timeline(send, handle, args.comments, exclude_ids=post_ids)
+            scrape_timeline(send, handle, args.comments,
+                            max_scrolls=max(30, args.comments),
+                            exclude_ids=post_ids | s4l_ids,
+                            capture_parents=True)
             if on_replies else []
         )
+
+        # 5. Rank both surfaces by real engagement, then expand the top posts'
+        #    permalinks to capture thread continuations (and untruncated text).
+        top_posts = rank_top(posts, args.top)
+        top_replies = rank_top(comments, args.top)
+        for tp in top_posts[:max(args.expand_threads, 0)]:
+            parts = expand_thread(send, handle, tp.get("url") or "")
+            if parts:
+                if len(parts[0]) > len(tp.get("text") or ""):
+                    tp["text"] = parts[0]  # permalink text is never truncated
+                if len(parts) > 1:
+                    tp["thread"] = parts
 
         result = {
             "ok": True,
@@ -365,9 +563,29 @@ def main() -> int:
             "profile": profile,
             "posts": posts,
             "comments": comments,
-            "counts": {"posts": len(posts), "comments": len(comments)},
+            "top_posts": top_posts,
+            "top_replies": top_replies,
+            "counts": {"posts": len(posts), "comments": len(comments),
+                       "s4l_posted_excluded": len(s4l_ids)},
             "grounding_instructions": GROUNDING_INSTRUCTIONS,
+            "scanner_version": SCANNER_VERSION,
         }
+
+        # Persist the corpus beside config.json so the later project-save step
+        # (setup writes the project, then voice_exemplars.py auto-applies the
+        # exemplars) works without a re-scan. The scan can run BEFORE config.json
+        # exists on a fresh onboarding, hence mkdir. Best-effort: the scan is
+        # still fully usable from stdout if the write fails.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import s4l_mode
+            sidecar = s4l_mode.config_path().parent / "last_profile_scan.json"
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_text(json.dumps(result, ensure_ascii=False))
+            result["scan_file"] = str(sidecar)
+        except Exception:
+            result["scan_file"] = None
+
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except Exception as e:

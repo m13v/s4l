@@ -1,0 +1,70 @@
+/* S4L "add your product" widget.
+ * Reuses the dashboard palette tokens (panel.css :root) — black/white/grayscale
+ * only, with the host's injected CSS variables and grayscale fallbacks. No
+ * chromatic color: hierarchy comes from weight, size, and spacing. */
+
+.pl-wrap {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 18px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pl-head { display: flex; flex-direction: column; gap: 4px; }
+.pl-title { margin: 0; font-size: 17px; font-weight: 650; }
+.pl-sub { margin: 0; font-size: 13px; color: var(--muted); }
+.pl-muted { color: var(--muted); font-weight: 400; }
+
+.pl-form { display: flex; flex-direction: column; gap: 8px; }
+.pl-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+
+.pl-input {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  padding: 11px 12px;
+  color: var(--fg);
+  /* Faint fill + a frame derived from the text color (not the host's --border,
+     which can be near-invisible) so the field clearly reads as an input on ANY
+     host theme. Grayscale only: --fg is the theme's text color, never a hue. */
+  background: color-mix(in oklab, var(--fg) 5%, var(--bg));
+  border: 1.5px solid color-mix(in oklab, var(--fg) 34%, transparent);
+  border-radius: 9px;
+  outline: none;
+  transition: border-color .12s, box-shadow .12s, background .12s;
+}
+.pl-input::placeholder { color: var(--muted); }
+.pl-input:hover { border-color: color-mix(in oklab, var(--fg) 50%, transparent); }
+.pl-input:focus {
+  border-color: var(--fg);
+  background: var(--bg);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--fg) 14%, transparent);
+}
+
+.pl-btn {
+  font: inherit;
+  font-weight: 560;
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--btn-border);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  margin-top: 4px;
+}
+.pl-btn:hover { background: var(--card); }
+.pl-btn.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
+.pl-btn.primary:hover { opacity: 0.9; }
+.pl-btn[disabled] { opacity: 0.5; cursor: default; }
+
+.pl-status {
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+.pl-log { font-size: 12px; color: var(--muted); min-height: 1em; white-space: pre-wrap; }
