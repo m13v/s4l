@@ -58,25 +58,6 @@ python3 ~/social-autoposter/scripts/scan_moltbook_replies.py
 python3 ~/social-autoposter/scripts/update_stats.py --quiet
 ```
 
-Optional reviewed TweetClaw import for X/Twitter source discovery:
-
-```bash
-python3 ~/social-autoposter/scripts/tweetclaw_candidates.py \
-  --file /path/to/reviewed-tweetclaw-results.json \
-  --project "PROJECT_NAME" \
-  --search-topic "agent workflows" \
-  --query "agent workflows min_faves:10" \
-  | python3 ~/social-autoposter/scripts/score_twitter_candidates.py
-```
-
-Use this only after a human or agent has reviewed public TweetClaw results from
-OpenClaw. It turns search tweets, search tweet replies, user lookup, follower
-export, media links, monitor tweets, or webhook evidence into the same candidate
-shape used by the existing scorer. It does not post tweets, post tweet replies,
-send direct messages, upload media, call the S4L API, or drive the browser. The
-existing scorer in the second command performs the normal scoring and upsert
-step.
-
 ---
 
 ## Workflow: Post (`/social-autoposter`)
@@ -167,7 +148,7 @@ WHERE source_summary LIKE '%' || %s || '%' AND posted_at >= NOW() - INTERVAL '30
 ORDER BY posted_at DESC;
 ```
 
-**NEVER post the same or similar content to multiple subreddits.** This is the #1 AI detection red flag. Each post must be unique to its community.
+**NEVER post the same or similar content to multiple subreddits.** Duplicate cross-posts read as spam and get removed. Each post must be unique to its community.
 
 ### 2. Pick one target community
 
@@ -175,7 +156,7 @@ Choose the single best subreddit from `config.json → subreddits` for this topi
 
 ### 3. Draft the post
 
-**Anti-AI-detection checklist** (must pass ALL before posting):
+**Pre-post checklist** (must pass ALL before posting):
 
 - [ ] No em dashes (—). Use regular dashes (-) or commas instead
 - [ ] No markdown headers (##) or bold (**) in Reddit posts
@@ -187,7 +168,7 @@ Choose the single best subreddit from `config.json → subreddits` for this topi
 - [ ] Does NOT link to any project in the post body — earn attention first
 - [ ] Not too long — 2-4 short paragraphs max for Reddit
 
-**Read it out loud.** If it sounds like a blog post or a ChatGPT response, rewrite it.
+**Read it out loud.** If it sounds like a blog post or generic AI copy, rewrite it.
 
 ### 4. Post it
 
@@ -212,7 +193,7 @@ After posting, you MUST:
 - Check for comments within 2-4 hours
 - Reply to every substantive comment within 24 hours
 - Replies should be casual, conversational, expand the topic — NOT polished paragraphs
-- If someone accuses the post of being AI: respond genuinely, mention a specific personal detail
+- If someone asks whether the post is AI or a bot: acknowledge it briefly, do not argue, do not pitch, and prefer disengaging (same policy as the engage pipeline's meta-callout handling)
 
 ---
 
@@ -301,14 +282,14 @@ Visit each post URL via browser. Check status (active/deleted/removed/inactive).
 6. **On Moltbook, write as an agent.** "my human" not "I".
 7. **Log everything.**
 
-### Anti-AI-Detection (applies to ALL content)
+### Writing style (applies to ALL content)
 
-8. **No em dashes (—).** Use commas, periods, or regular dashes (-) instead. Em dashes are the #1 "ChatGPT tell."
+8. **No em dashes (—).** Use commas, periods, or regular dashes (-) instead.
 9. **No markdown formatting in Reddit.** No headers (##), no bold (**text**), no numbered lists. Write in plain paragraphs.
 10. **Never cross-post.** One post per topic per community.
 11. **Include imperfections.** Contractions, sentence fragments, casual asides, occasional lowercase.
 12. **Vary your openings.** Don't always start with credentials. Sometimes just jump into the topic.
-13. **Reply to comments on your posts.** Zero engagement on your own post = bot signal. Reply within 24h.
+13. **Reply to comments on your posts.** Reply within 24h; an unanswered thread of your own looks neglected.
 
 ### Bad vs Good (Comments)
 
