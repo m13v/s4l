@@ -11,7 +11,7 @@ drafts, and track the results.
 
 - Website: https://s4l.ai
 - Pricing: https://s4l.ai/pricing
-- Source: https://github.com/m13v/social-autoposter
+- Source: https://github.com/m13v/s4l
 
 ## What S4L does
 
@@ -97,6 +97,24 @@ Important properties:
 - Keeps secrets such as `.env`, `config.json`, browser profiles, logs, and local
   databases out of Git.
 - Uses approval-first drafting as the default operating mode.
+
+## Optional TweetClaw source import
+
+[TweetClaw](https://github.com/Xquik-dev/tweetclaw) can provide reviewed public
+X records to the existing candidate scorer. Install it separately, export the
+results to JSON, then run:
+
+```bash
+python3 scripts/tweetclaw_candidates.py \
+  --file /path/to/reviewed-tweetclaw-results.json \
+  --project "PROJECT_NAME" \
+  --search-topic "agent workflows" \
+  --query "agent workflows min_faves:10" \
+  | python3 scripts/score_twitter_candidates.py
+```
+
+The importer only normalizes local JSON. It does not post, send messages, call
+the S4L API, or control a browser.
 
 ## Develop from source
 

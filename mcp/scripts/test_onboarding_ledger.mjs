@@ -28,7 +28,7 @@ try {
     home: stateDir,
     repoDir: path.join(stateDir, "missing-repo"),
   });
-  assert.equal(report.checks.length, 11);
+  assert.equal(report.checks.length, 12);
   assert.equal(
     report.checks.find((check) => check.id === "x_cookie_mirror")?.status,
     "expected",
@@ -78,7 +78,7 @@ try {
   assert.equal(ledger.pendingBackendEvents(opts).length, saved.events.length - 1);
 
   const snapshot = ledger.publicSnapshot(opts);
-  assert.equal(snapshot.milestones.length, 7);
+  assert.equal(snapshot.milestones.length, 9);
   assert.equal(snapshot.doctor.phase, "full");
   assert.ok(fs.existsSync(path.join(stateDir, "onboarding-progress.json")));
 } finally {
