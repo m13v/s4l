@@ -2879,7 +2879,7 @@ def main():
     parser.add_argument("--batch-id", dest="batch_id", default=None,
                         help="Cycle-level batch_id (e.g. rdcycle-YYYYMMDD-HHMMSS). Used by "
                              "--phase phase0 / --phase salvage / --phase discover to attribute "
-                             "rows in reddit_candidates and reddit_batches. Required for "
+                             "rows in reddit_candidates. Required for "
                              "phase0 and salvage; optional for discover (defaults to a "
                              "per-discover synthetic id).")
     args = parser.parse_args()
