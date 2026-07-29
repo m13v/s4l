@@ -68,18 +68,5 @@ CREATE INDEX IF NOT EXISTS idx_rc_status_attempt  ON reddit_candidates(status, a
 CREATE INDEX IF NOT EXISTS idx_rc_drafted_at      ON reddit_candidates(drafted_at)
     WHERE drafted_at IS NOT NULL;
 
--- Per-cycle phase tracking. Phase 0's salvage SQL reads current_phase /
--- phase_started_at to apply per-phase budgets so peer cycles' long-running
--- ripen sleeps (5 min) don't get salvaged out from under live owners.
--- Mirrors twitter_batches; we keep the schema identical for pattern reuse.
-CREATE TABLE IF NOT EXISTS reddit_batches (
-    batch_id          TEXT PRIMARY KEY,
-    owner_pid         INTEGER,
-    owner_host        TEXT,
-    current_phase     TEXT,
-    phase_started_at  TIMESTAMPTZ DEFAULT NOW(),
-    started_at        TIMESTAMPTZ DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_reddit_batches_phase_started_at
-    ON reddit_batches(phase_started_at);
+-- reddit_batches (twitter_batches-style phase tracking) was created here on
+-- 2026-05-06 but no code ever wrote to it; dropped 2026-07-29.
