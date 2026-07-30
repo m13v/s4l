@@ -118,6 +118,10 @@ class _Worker(threading.Thread):
                 self._prev_app = name
                 self._prev_app_pid = pid
             return
+        # Suppress focus on EVERY harness activation, BEFORE the telemetry
+        # dedupe — the log is rate-limited, but hiding must fire every time or
+        # a fast pop-burst would leave later pops sitting in the foreground.
+        self._suppress_focus(pid, details)
         now = time.time()
         key = (cause, pid)
         if key == self._last_key and now - self._last_emit_at < _DEDUPE_SECONDS:
@@ -139,6 +143,8 @@ class _Worker(threading.Thread):
             "[browser-foreground] " + json.dumps(payload, ensure_ascii=False),
             context="browser-foreground",
         )
+
+    def _suppress_focus(self, pid, details):
         # OS-LEVEL FOCUS SUPPRESSION (2026-07-30). The per-path code fixes
         # (bh-harness activate suppression, tab reuse/park) each cover ONE way
         # of driving Chrome; the reddit pipeline reaches it via a DIFFERENT
@@ -147,13 +153,10 @@ class _Worker(threading.Thread):
         # acts on the OS window event itself, so it covers EVERY connector:
         # when an OFFSCREEN automation harness (window parked at negative Y —
         # twitter/reddit/linkedin; NOT the onscreen setup-login window) grabs
-        # the foreground, hide that specific Chrome process by pid. macOS then
-        # returns focus to the app the user was in. Screenshots/clicks are
+        # the foreground, hide that specific Chrome process by pid, then force
+        # focus back to the app the user was in. Screenshots/clicks are
         # unaffected (CDP is offscreen-raster + synthetic input; the occlusion
         # flags keep hidden tabs painting). Escape hatch: S4L_NO_HARNESS_HIDE.
-        self._suppress_focus(pid, details)
-
-    def _suppress_focus(self, pid, details):
         if os.environ.get("S4L_NO_HARNESS_HIDE"):
             return
         pos = details.get("window_position") or ""
