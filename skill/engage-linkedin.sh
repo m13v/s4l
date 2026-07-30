@@ -278,27 +278,36 @@ RESET_COUNT=$(li_reset_processing 2)
 
 PENDING_COUNT=$(li_reply_count pending)
 
+# ---- PACING PREFLIGHT (the enforceable half of the pacing gate) -----------
+# The per-reply Step 3b gate inside the Phase B prompt is the fine-grained
+# control, but it depends on the model obeying an instruction. This preflight
+# is the hard stop: when a 24h/72h ceiling is already blown there is nothing
+# Phase B could legally post, so we skip the phase before paying for browser
+# bootstrap, the pending pull and a Claude run.
+#
+# rc=78 ("stop") zeroes PENDING_COUNT rather than exiting, deliberately: an
+# early exit here would skip the run summary and the dashboard metric line at
+# the bottom of this script, and a pipeline that goes quiet WITHOUT reporting
+# is precisely how the 2026-07-20 outage stayed invisible for nine days.
+# rc=75 ("wait") still enters the phase; the per-reply gate sleeps the short
+# remainder itself.
+_LI_PACE_RC=0
+_LI_PACE_OUT="$("$PY_BIN" "$REPO_DIR/scripts/linkedin_pacing.py" check 2>&1)" || _LI_PACE_RC=$?
+log "PACING: $_LI_PACE_OUT"
+if [ "$_LI_PACE_RC" -eq 78 ] && [ "$PENDING_COUNT" -ne 0 ]; then
+    log "PACING: ceiling reached; skipping Phase B this fire ($PENDING_COUNT rows stay pending)"
+    PENDING_COUNT=0
+    LI_PACED_OUT=1
+fi
+
 if [ "$PENDING_COUNT" -eq 0 ]; then
-    log "Phase B: No pending LinkedIn replies. Done!"
+    if [ "${LI_PACED_OUT:-0}" -eq 1 ]; then
+        log "Phase B: held back by the pacing gate, not by an empty queue."
+    else
+        log "Phase B: No pending LinkedIn replies. Done!"
+    fi
 else
     log "Phase B: $PENDING_COUNT pending LinkedIn replies to process"
-
-    # ---- PACING PREFLIGHT (enforceable half of the pacing gate) -----------
-    # The per-reply gate in the Phase B prompt is the fine-grained control, but
-    # it depends on the model obeying it. This preflight is the hard stop: if a
-    # 24h/72h ceiling is already blown there is nothing Phase B could legally
-    # post, so skip the whole phase before paying for browser bootstrap, the
-    # DB pull and a Claude run. rc=78 = "stop", matching the repo's existing
-    # rc=78 skip convention. rc=75 ("wait") still enters the phase, because the
-    # per-reply gate can sleep the short remainder itself.
-    _LI_PACE_RC=0
-    _LI_PACE_OUT="$("$PY_BIN" "$REPO_DIR/scripts/linkedin_pacing.py" check 2>&1)" || _LI_PACE_RC=$?
-    if [ "$_LI_PACE_RC" -eq 78 ]; then
-        log "PACING: $_LI_PACE_OUT"
-        log "PACING: ceiling reached; skipping Phase B this fire (rows stay pending)"
-        exit 0
-    fi
-    log "PACING: $_LI_PACE_OUT"
 
     # Pull the full pending batch via the next-pending endpoint (no DATABASE_URL).
     # The route applies the same ordering the old json_agg query used (our own
