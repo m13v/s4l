@@ -106,6 +106,10 @@ export function run(
     // can be aborted out-of-band — used to preempt an in-flight scan when the
     // user approves a post (posting takes the browser immediately).
     onSpawn?: (child: ChildProcess) => void;
+    // Written to the child's stdin, then stdin is closed. Used to pass secrets
+    // (e.g. an Authorization header via curl -H @-) without exposing them in
+    // argv / `ps` output.
+    stdin?: string;
   } = {}
 ): Promise<RunResult> {
   return new Promise((resolve) => {
@@ -117,6 +121,17 @@ export function run(
       opts.onSpawn?.(child);
     } catch {
       /* a spawn observer must never break the run */
+    }
+    if (opts.stdin != null) {
+      // Swallow async pipe errors (e.g. EPIPE when the child exits before
+      // reading) — an unhandled stream error would crash the whole process.
+      child.stdin.on("error", () => {});
+      try {
+        child.stdin.write(opts.stdin);
+        child.stdin.end();
+      } catch {
+        /* a closed stdin must never break the run */
+      }
     }
     let stdout = "";
     let stderr = "";
