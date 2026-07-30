@@ -103,6 +103,26 @@ def _envi(name, default):
         return default
 
 
+# --- interval GENERATION (not just a ceiling) ------------------------------
+# A pure floor+ceiling cap produces a clipped, bimodal shape: run flat out at
+# the floor until the hourly ceiling bites, then stall. Measured on the first
+# version of this file: 59% of all gaps sat exactly at the 120s floor and NOTHING
+# landed in the 3-10 minute band. That is a sharper machine signature than the
+# unpaced behaviour it replaced, so the floor alone is not pacing.
+#
+# Instead we model arrivals as a POISSON PROCESS: each gap is drawn from an
+# exponential distribution whose mean is set so the daily budget spreads across
+# the active window. Exponential arrivals are memoryless, naturally varied
+# (CV ~= 1.0 by construction), and produce no pile-up at any particular value.
+# MIN_GAP_S survives only as a clamp for the short tail.
+#
+# The draw is DETERMINISTIC in the timestamp of the previous action. This is
+# essential: the gate gets polled repeatedly while waiting, and a fresh random
+# draw per call would let the caller "reroll until lucky", collapsing the whole
+# distribution back onto the floor.
+ACTIVE_START_H = _envi("LI_PACE_ACTIVE_START_H", 8)    # local hour, inclusive
+ACTIVE_END_H   = _envi("LI_PACE_ACTIVE_END_H", 22)     # local hour, exclusive
+MAX_GAP_S      = _envi("LI_PACE_MAX_GAP_S", 4 * 3600)
 MIN_GAP_S      = _envi("LI_PACE_MIN_GAP_S", 120)
 CV_FLOOR       = _envf("LI_PACE_CV_FLOOR", 0.25)
 CV_WINDOW      = _envi("LI_PACE_CV_WINDOW", 10)
@@ -172,6 +192,50 @@ def _recent_timestamps(hours=72):
         conn.close()
 
 
+def _active_seconds_per_day():
+    span = (ACTIVE_END_H - ACTIVE_START_H) % 24
+    return (span or 24) * 3600
+
+
+def _in_active_window(dt_local):
+    h = dt_local.hour
+    if ACTIVE_START_H == ACTIVE_END_H:
+        return True
+    if ACTIVE_START_H < ACTIVE_END_H:
+        return ACTIVE_START_H <= h < ACTIVE_END_H
+    return h >= ACTIVE_START_H or h < ACTIVE_END_H  # window wraps midnight
+
+
+def _seconds_to_window_open(dt_local):
+    """Seconds until the active window next opens. 0 if already open."""
+    if _in_active_window(dt_local):
+        return 0
+    nxt = dt_local.replace(hour=ACTIVE_START_H, minute=0, second=0, microsecond=0)
+    if nxt <= dt_local:
+        nxt += timedelta(days=1)
+    return (nxt - dt_local).total_seconds()
+
+
+def _target_gap(last_ts):
+    """Exponentially-distributed target gap, deterministic in `last_ts`.
+
+    mean = active_seconds_per_day / MAX_PER_24H, so a full day's budget spreads
+    naturally across the active window instead of bunching at a floor.
+
+    Determinism matters: see the CONFIG note. Same last_ts always yields the
+    same target, so polling cannot reroll its way down to MIN_GAP_S.
+    """
+    import hashlib
+
+    mean = _active_seconds_per_day() / max(MAX_PER_24H, 1)
+    digest = hashlib.sha256(last_ts.isoformat().encode("utf-8")).digest()
+    # 53 bits -> uniform in [0,1); nudged off the endpoints for the log below.
+    u = int.from_bytes(digest[:7], "big") / float(1 << 56)
+    u = min(max(u, 1e-9), 1 - 1e-9)
+    gap = -mean * math.log(1.0 - u)  # inverse-CDF of Exponential(1/mean)
+    return max(MIN_GAP_S, min(gap, MAX_GAP_S))
+
+
 def _gaps(ts):
     return [
         (b - a).total_seconds()
@@ -236,14 +300,31 @@ def evaluate(now=None, timestamps=None):
                         f"1h cap reached ({len(in_1h)}/{MAX_PER_1H})",
                         max(wait, 60))
 
-    # ---- minimum gap ------------------------------------------------------
+    # ---- active-hours window ----------------------------------------------
+    # Humans do not comment uniformly around the clock. Observed spans were
+    # 20-24h/day, which is itself a tell independent of volume.
+    now_local = now.astimezone()
+    to_open = _seconds_to_window_open(now_local)
+    if to_open > 0:
+        return decision("wait", RC_WAIT,
+                        f"outside active window "
+                        f"{ACTIVE_START_H:02d}:00-{ACTIVE_END_H:02d}:00 local",
+                        to_open)
+
+    # ---- sampled inter-action interval (the actual pacing) ----------------
+    # Not a flat floor: a per-gap draw from an exponential, so the resulting
+    # distribution is continuous instead of piling up at a single value.
     if ts:
-        since_last = (now - max(ts)).total_seconds()
-        if since_last < MIN_GAP_S:
+        last = max(ts)
+        since_last = (now - last).total_seconds()
+        target = _target_gap(last)
+        if since_last < target:
             return decision("wait", RC_WAIT,
-                            f"min gap not met ({int(since_last)}s < {MIN_GAP_S}s)",
-                            MIN_GAP_S - since_last,
-                            seconds_since_last=int(since_last))
+                            f"sampled interval not elapsed "
+                            f"({int(since_last)}s < {int(target)}s target)",
+                            target - since_last,
+                            seconds_since_last=int(since_last),
+                            target_gap_s=int(target))
 
     # ---- cadence regularity -----------------------------------------------
     # CRITICAL: both this rule and the spread rule below must be evaluated
