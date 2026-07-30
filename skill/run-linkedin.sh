@@ -106,30 +106,6 @@ export SA_CYCLE_ID="$BATCH_ID"
 
 echo "=== LinkedIn Post Run: $(date) (batch=$BATCH_ID) ===" | tee "$LOG_FILE"
 
-# ---- PACING GATE (2026-07-30) --------------------------------------------
-# This pipeline is the LARGER of the two LinkedIn write paths: it logged 67-74
-# actions/day via log_post.py in the week before the 2026-07-20 session kill,
-# against ~23/day from engage-linkedin.sh. Gating only that other script would
-# have left ~75% of our LinkedIn footprint unpaced.
-#
-# Placed BEFORE Phase A on purpose. Phase B posts exactly ONE comment per fire,
-# so a single per-run check is sufficient, and bailing here also skips Phase A
-# discovery (~$10-15 of Claude spend) rather than paying for candidates we are
-# not allowed to act on.
-#
-# Any non-allow verdict skips the fire outright: this job is on a 15-minute
-# launchd cadence, so the next fire re-checks shortly. We deliberately do not
-# sleep inside the run and hold the browser lock while waiting.
-if [ "$LINKEDIN_BACKEND" = "browser" ]; then
-    _LI_PACE_RC=0
-    _LI_PACE_OUT="$(python3 "$REPO_DIR/scripts/linkedin_pacing.py" check 2>&1)" || _LI_PACE_RC=$?
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] PACING: $_LI_PACE_OUT" | tee -a "$LOG_FILE"
-    if [ "$_LI_PACE_RC" -ne 0 ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] PACING: skipping this fire (rc=$_LI_PACE_RC); next fire re-checks in ~15min" | tee -a "$LOG_FILE"
-        exit 0
-    fi
-fi
-
 # 2026-05-01: lock policy was changed from "hold for the entire run" to
 # "hold only while a Claude phase is actively driving the browser". The old
 # policy meant a single 25-45min cycle held linkedin-browser exclusively for
