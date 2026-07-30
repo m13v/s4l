@@ -136,6 +136,38 @@ class _Worker(threading.Thread):
             "[browser-foreground] " + json.dumps(payload, ensure_ascii=False),
             context="browser-foreground",
         )
+        # OS-LEVEL FOCUS SUPPRESSION (2026-07-30). The per-path code fixes
+        # (bh-harness activate suppression, tab reuse/park) each cover ONE way
+        # of driving Chrome; the reddit pipeline reaches it via a DIFFERENT
+        # path (reddit_browser.py Playwright connect/new_page) that bypasses
+        # them, and a raw external Playwright connect bypasses everything. This
+        # acts on the OS window event itself, so it covers EVERY connector:
+        # when an OFFSCREEN automation harness (window parked at negative Y —
+        # twitter/reddit/linkedin; NOT the onscreen setup-login window) grabs
+        # the foreground, hide that specific Chrome process by pid. macOS then
+        # returns focus to the app the user was in. Screenshots/clicks are
+        # unaffected (CDP is offscreen-raster + synthetic input; the occlusion
+        # flags keep hidden tabs painting). Escape hatch: S4L_NO_HARNESS_HIDE.
+        self._suppress_focus(pid, details)
+
+    def _suppress_focus(self, pid, details):
+        if os.environ.get("S4L_NO_HARNESS_HIDE"):
+            return
+        pos = details.get("window_position") or ""
+        try:
+            offscreen = any(int(float(v)) < 0 for v in pos.split(",")[:2])
+        except Exception:
+            offscreen = False
+        if not offscreen:
+            return  # onscreen (e.g. setup login) — leave it visible
+        try:
+            from AppKit import NSRunningApplication
+
+            ra = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if ra is not None:
+                ra.hide()  # returns focus to the previously-active app
+        except Exception:
+            pass
 
     def run(self):
         while True:
