@@ -99,7 +99,22 @@ def _reddit_page(pw):
     try:
         browser = pw.chromium.connect_over_cdp(ws)
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-        page = ctx.new_page()
+        # Reuse an existing reddit tab instead of new_page(). new_page() opens
+        # a fresh tab on the reddit homepage and STEALS OS FOCUS every call —
+        # this ran ~per-strike and was the reddit focus-pop the other reddit
+        # helpers (reddit_browser / reddit_browser_fetch) already fixed but
+        # this 2026-07-17 ban-check never did. Navigating a background tab does
+        # not pop. Prefer a tab already on reddit.com; else pages[0]; else
+        # create one. Left OPEN for reuse (cleanup_harness_tabs trims to one).
+        page = None
+        for pg in ctx.pages:
+            if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
+                page = pg
+                break
+        if page is None and ctx.pages:
+            page = ctx.pages[0]
+        if page is None:
+            page = ctx.new_page()
         page.set_default_timeout(20000)
         return browser, page
     except Exception:
