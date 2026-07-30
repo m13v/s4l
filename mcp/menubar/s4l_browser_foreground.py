@@ -79,6 +79,7 @@ class _Worker(threading.Thread):
         super().__init__(daemon=True, name="s4l-browser-foreground")
         self._pid_cache = {}  # pid -> (is_harness, details dict)
         self._prev_app = None  # last non-harness frontmost app name
+        self._prev_app_pid = None  # ...and its pid, for precise re-activation
         self._last_key = None  # (cause, pid) of last emitted event
         self._last_emit_at = 0.0
         self._suppressed = 0
@@ -108,12 +109,14 @@ class _Worker(threading.Thread):
         if "chrome" not in low and "chromium" not in low:
             if cause == "activated" and name:
                 self._prev_app = name
+                self._prev_app_pid = pid
             return
         is_harness, details = self._classify(pid)
         if not is_harness:
             # The user's own Chrome counts as their workspace too.
             if cause == "activated" and name:
                 self._prev_app = name
+                self._prev_app_pid = pid
             return
         now = time.time()
         key = (cause, pid)
@@ -165,7 +168,18 @@ class _Worker(threading.Thread):
 
             ra = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             if ra is not None:
-                ra.hide()  # returns focus to the previously-active app
+                ra.hide()  # order the harness window out
+            # hide() alone does NOT reliably return focus here: all three
+            # harnesses share the "Google Chrome Beta" bundle, so hiding one
+            # process can leave the app-level active state on a sibling. Force
+            # focus back to the app the user was actually in.
+            if self._prev_app_pid and self._prev_app_pid != pid:
+                prev = NSRunningApplication.runningApplicationWithProcessIdentifier_(
+                    self._prev_app_pid
+                )
+                # NSApplicationActivateIgnoringOtherApps = 1 << 1
+                if prev is not None and not prev.isTerminated():
+                    prev.activateWithOptions_(1 << 1)
         except Exception:
             pass
 
