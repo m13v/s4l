@@ -292,10 +292,22 @@ PENDING_COUNT=$(li_reply_count pending)
 # rc=75 ("wait") still enters the phase; the per-reply gate sleeps the short
 # remainder itself.
 _LI_PACE_RC=0
-_LI_PACE_OUT="$("$PY_BIN" "$REPO_DIR/scripts/linkedin_pacing.py" check 2>&1)" || _LI_PACE_RC=$?
-log "PACING: $_LI_PACE_OUT"
-if [ "$_LI_PACE_RC" -eq 78 ] && [ "$PENDING_COUNT" -ne 0 ]; then
-    log "PACING: ceiling reached; skipping Phase B this fire ($PENDING_COUNT rows stay pending)"
+_LI_PACE_JSON="$("$PY_BIN" "$REPO_DIR/scripts/linkedin_pacing.py" check --json 2>&1)" || _LI_PACE_RC=$?
+_LI_PACE_WAIT=$(printf '%s' "$_LI_PACE_JSON" | "$PY_BIN" -c \
+    'import json,sys
+try: print(int(json.load(sys.stdin).get("wait_seconds", 0)))
+except Exception: print(0)' 2>/dev/null || echo 0)
+log "PACING: $_LI_PACE_JSON"
+
+# Skip Phase B when a ceiling is blown (rc=78) OR when the next slot is far off
+# (rc=75 with a long wait). The long-wait case is mostly the overnight
+# active-hours window: without this we would spin up a full Claude session that
+# is forbidden from posting anything for the next several hours. Short waits
+# (< 15 min) still enter the phase, since drafting takes time anyway and the
+# per-reply Step 3b gate can sleep the small remainder.
+if [ "$PENDING_COUNT" -ne 0 ] && { [ "$_LI_PACE_RC" -eq 78 ] || \
+     { [ "$_LI_PACE_RC" -eq 75 ] && [ "${_LI_PACE_WAIT:-0}" -gt 900 ]; }; }; then
+    log "PACING: not postable now (rc=$_LI_PACE_RC, next slot in ${_LI_PACE_WAIT}s); skipping Phase B ($PENDING_COUNT rows stay pending)"
     PENDING_COUNT=0
     LI_PACED_OUT=1
 fi
