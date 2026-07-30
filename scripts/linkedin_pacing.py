@@ -7,40 +7,57 @@ now, or should we wait / stop for today". Every LinkedIn write path calls
 
 Why this exists
 ---------------
-Until 2026-07-29 the LinkedIn comment path had NO pacing control at all: no
-minimum gap, no jitter, no hourly cap, no per-day comment cap. The human-looking
-cadence on healthy days was an accident of queue availability and lock
-contention, not a control. When those incidentally vanished on 2026-07-18/20 the
-pipeline emitted a 60s +/- 29s metronome (23 comments inside 22 minutes) and the
-session was killed the same evening.
+Until 2026-07-29 the LinkedIn write path had NO pacing control at all: no
+minimum gap, no jitter, no hourly cap, no per-day cap. The human-looking cadence
+on healthy days was an accident of queue availability and lock contention, not a
+control. Observed inter-action gaps routinely bottomed out at 0-3 SECONDS.
 
-The discriminating statistic is the COEFFICIENT OF VARIATION (sd/mean) of the
-inter-comment gaps. Measured over every active LinkedIn day 2026-05-30..07-20:
+TWO ACTION STREAMS - counting only one is the trap
+--------------------------------------------------
+LinkedIn writes land in two different tables and BOTH must be counted:
 
-    healthy days      CV 1.92 .. 4.35     (bursty, long idle stretches)
-    2026-06-05  n=5   CV 0.79
-    2026-07-18  n=6   CV 0.52
-    2026-07-20  n=23  CV 0.49   <- session killed that evening
+    replies (replied_at)  engage-linkedin.sh - replying to comments on our posts
+    posts   (posted_at)   run-linkedin.sh    - commenting on others' posts,
+                                               via log_post.py, status='active'
 
-CV is cheap, needs no new data source, and separates cleanly at ~1.0. Note that
-CV alone is NOT sufficient: a stream of 5s/40s/2s gaps scores a high CV while
-being far too fast. So we enforce a hard floor AND variance AND volume ceilings.
+The first cut of this gate counted only `replies` and therefore saw ~25% of
+reality: it read 2026-07-20 as 23 actions when the true figure was 90, and read
+2026-07-19 as ZERO when it was 73. Any future edit that narrows this query to a
+single table silently disables most of the gate. Only rows with status='active'
+count as real writes; log_post.py also records rejected candidates.
 
-Caveat, stated plainly: we do NOT have proof that pacing caused any specific
-logout. Three of the six logouts happened at entirely ordinary cadence. What we
-do know is that this account is flagged (LinkedIn's own words: "temporary
-restriction for automated activity" twice, "automation tool detected" once) and
-that every active stretch so far has ended in a session kill (6 for 6). These
-ceilings are therefore a deliberately conservative bet, not a proven safe point.
-Treat the numbers as an experiment to be revised as evidence accumulates.
+What the data does and does NOT support
+---------------------------------------
+Combined-stream daily figures, 2026-07-06..07-20:
+
+    n/day      65 .. 96 actions
+    per hour   2.9 .. 4.4
+    CV         0.32 .. 1.26   on EVERY day, healthy or not
+
+An earlier draft of this file claimed CV (sd/mean of inter-action gaps)
+separated logout days from healthy ones at ~1.0. That was an artifact of the
+replies-only subsample. On the full stream it does NOT separate: 2026-07-14 ran
+96 actions at CV 0.72 with no logout, and 2026-07-20 ran 90 at CV 0.78 and was
+killed. We therefore do NOT rely on CV as a predictor; it is retained only at a
+very low floor to catch a true metronome, which remains bad regardless of
+whether it predicts a logout.
+
+Stated plainly: we have NO statistic that reliably separates logout days from
+healthy days. What we do know is (a) this account is flagged, in LinkedIn's own
+words ("temporary restriction for automated activity" twice, "automation tool
+detected" once), (b) every active stretch so far has ended in a session kill,
+6 for 6, and (c) 65-96 automated actions a day with sub-second minimum gaps is
+indefensible in absolute terms whatever the trigger turns out to be. The
+ceilings below are therefore a deliberate ~70% volume cut chosen on judgment,
+NOT a proven safe operating point. Revise them as evidence accumulates.
 
 Ceilings (env-overridable, see CONFIG below):
-    min gap            120s   hard floor between consecutive comments
-    CV floor           1.00   over the last 10 gaps; below it, insert a long pause
-    per rolling 1h     3      (2026-07-20 ran an effective 62/hour)
-    per rolling 24h    10     (days preceding logouts ran 21..31)
-    per rolling 72h    25     (hit 91 before the 2026-06-12 logout)
-    min daily spread   4h     comments must not bunch into one short window
+    min gap            120s   hard floor; observed minimum was 0-3s
+    per rolling 1h     4      observed average was 2.9-4.4/h with bursts
+    per rolling 24h    25     observed 65-96/day
+    per rolling 72h    60     observed ~230/3d
+    CV floor           0.25   true-metronome catch only; NOT a logout predictor
+    min daily spread   4h     actions must not bunch into one short window
 
 CLI
 ---
@@ -87,11 +104,11 @@ def _envi(name, default):
 
 
 MIN_GAP_S      = _envi("LI_PACE_MIN_GAP_S", 120)
-CV_FLOOR       = _envf("LI_PACE_CV_FLOOR", 1.00)
+CV_FLOOR       = _envf("LI_PACE_CV_FLOOR", 0.25)
 CV_WINDOW      = _envi("LI_PACE_CV_WINDOW", 10)
-MAX_PER_1H     = _envi("LI_PACE_MAX_1H", 3)
-MAX_PER_24H    = _envi("LI_PACE_MAX_24H", 10)
-MAX_PER_72H    = _envi("LI_PACE_MAX_72H", 25)
+MAX_PER_1H     = _envi("LI_PACE_MAX_1H", 4)
+MAX_PER_24H    = _envi("LI_PACE_MAX_24H", 25)
+MAX_PER_72H    = _envi("LI_PACE_MAX_72H", 60)
 MIN_SPREAD_S   = _envi("LI_PACE_MIN_SPREAD_S", 4 * 3600)
 # When CV is too low we do not just wait the floor, we inject a long randomized
 # pause to actively break the metronome and pull CV back up.
@@ -122,7 +139,10 @@ def _database_url():
 
 
 def _recent_timestamps(hours=72):
-    """Return replied_at timestamps (UTC, ascending) for the last `hours`.
+    """Every LinkedIn write action in the last `hours`, UTC, ascending.
+
+    UNION of BOTH write streams. See the module docstring: counting only one
+    table silently disables most of this gate.
 
     Raises on any failure so callers can fail closed.
     """
@@ -136,10 +156,16 @@ def _recent_timestamps(hours=72):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "select replied_at from replies "
-                "where platform = %s and replied_at is not null and replied_at >= %s "
-                "order by replied_at",
-                (PLATFORM, since),
+                "select ts from ("
+                "  select posted_at as ts from posts"
+                "   where platform = %s and status = 'active'"
+                "     and posted_at is not null and posted_at >= %s"
+                "  union all"
+                "  select replied_at as ts from replies"
+                "   where platform = %s"
+                "     and replied_at is not null and replied_at >= %s"
+                ") a order by ts",
+                (PLATFORM, since, PLATFORM, since),
             )
             return [r[0] for r in cur.fetchall()]
     finally:
