@@ -278,46 +278,8 @@ RESET_COUNT=$(li_reset_processing 2)
 
 PENDING_COUNT=$(li_reply_count pending)
 
-# ---- PACING PREFLIGHT (the enforceable half of the pacing gate) -----------
-# The per-reply Step 3b gate inside the Phase B prompt is the fine-grained
-# control, but it depends on the model obeying an instruction. This preflight
-# is the hard stop: when a 24h/72h ceiling is already blown there is nothing
-# Phase B could legally post, so we skip the phase before paying for browser
-# bootstrap, the pending pull and a Claude run.
-#
-# rc=78 ("stop") zeroes PENDING_COUNT rather than exiting, deliberately: an
-# early exit here would skip the run summary and the dashboard metric line at
-# the bottom of this script, and a pipeline that goes quiet WITHOUT reporting
-# is precisely how the 2026-07-20 outage stayed invisible for nine days.
-# rc=75 ("wait") still enters the phase; the per-reply gate sleeps the short
-# remainder itself.
-_LI_PACE_RC=0
-_LI_PACE_JSON="$("$PY_BIN" "$REPO_DIR/scripts/linkedin_pacing.py" check --json 2>&1)" || _LI_PACE_RC=$?
-_LI_PACE_WAIT=$(printf '%s' "$_LI_PACE_JSON" | "$PY_BIN" -c \
-    'import json,sys
-try: print(int(json.load(sys.stdin).get("wait_seconds", 0)))
-except Exception: print(0)' 2>/dev/null || echo 0)
-log "PACING: $_LI_PACE_JSON"
-
-# Skip Phase B when a ceiling is blown (rc=78) OR when the next slot is far off
-# (rc=75 with a long wait). The long-wait case is mostly the overnight
-# active-hours window: without this we would spin up a full Claude session that
-# is forbidden from posting anything for the next several hours. Short waits
-# (< 15 min) still enter the phase, since drafting takes time anyway and the
-# per-reply Step 3b gate can sleep the small remainder.
-if [ "$PENDING_COUNT" -ne 0 ] && { [ "$_LI_PACE_RC" -eq 78 ] || \
-     { [ "$_LI_PACE_RC" -eq 75 ] && [ "${_LI_PACE_WAIT:-0}" -gt 900 ]; }; }; then
-    log "PACING: not postable now (rc=$_LI_PACE_RC, next slot in ${_LI_PACE_WAIT}s); skipping Phase B ($PENDING_COUNT rows stay pending)"
-    PENDING_COUNT=0
-    LI_PACED_OUT=1
-fi
-
 if [ "$PENDING_COUNT" -eq 0 ]; then
-    if [ "${LI_PACED_OUT:-0}" -eq 1 ]; then
-        log "Phase B: held back by the pacing gate, not by an empty queue."
-    else
-        log "Phase B: No pending LinkedIn replies. Done!"
-    fi
+    log "Phase B: No pending LinkedIn replies. Done!"
 else
     log "Phase B: $PENDING_COUNT pending LinkedIn replies to process"
 
@@ -505,24 +467,6 @@ MANDATORY reply flow for every item:
           mode ($PICKED_MODE=invent) craft a NEW snake_case style name not in the
           curated block above and pass it as the [engagement_style] arg in Step 5.
           Professional but casual. NEVER em dashes. Match parent post language.
-  Step 3b: PACING GATE - MANDATORY, run this IMMEDIATELY BEFORE every single
-          post in Step 4. Never post two replies without a fresh check in
-          between; never batch several posts behind one check.
-             python3 $REPO_DIR/scripts/linkedin_pacing.py check --json
-          Read the JSON "action" field and obey it exactly:
-            "allow" (exit 0) -> proceed to Step 4 for THIS reply only.
-            "wait"  (exit 75) -> sleep the returned "wait_seconds", then
-                                 re-run the check. If it still says wait after
-                                 3 attempts, LEAVE the row pending (do NOT mark
-                                 skipped) and move to the next reply; the next
-                                 cycle will pick it up.
-            "stop"  (exit 78) -> a 24h/72h ceiling is blown. STOP POSTING
-                                 ENTIRELY for this run. Leave all remaining
-                                 rows pending and finish the run cleanly.
-          Do NOT try to out-think, average, or "catch up on" this gate; it is
-          the control that keeps our comment cadence from looking like a
-          metronome. On 2026-07-20 an unpaced run put 23 comments out in 22
-          minutes at 60s +/- 29s and the session was killed that evening.
   Step 4: post reply (OAuth API first, browser fallback)
   Step 5: python3 reply_db.py replied ID "text" [url] [engagement_style] [is_recommendation]   <- mark AFTER success. engagement_style is the style name you applied (in USE mode the assigned '${PICKED_STYLE}'). is_recommendation="1" only when you mentioned a project (Tier 2/3).
 If Step 5 fails, the item stays 'processing' and will be reset to 'pending' on the next run.
