@@ -78,6 +78,7 @@ existing "db_unavailable -> script already fails closed" rule in run-linkedin.sh
 
 import argparse
 import json
+import math
 import os
 import random
 import statistics
