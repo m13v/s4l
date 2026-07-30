@@ -482,18 +482,69 @@ def _latest_from_github_redirect():
         return None
 
 
+# ---- optional GitHub token (2026-07-30) -----------------------------------
+# Authenticated probes get a 5000/h quota instead of the anonymous 60/h-per-IP
+# quota that silenced the staging update banner on 2026-07-13 and again on
+# 2026-07-30 (rate-limited staging probe degraded to the prerelease-blind
+# releases/latest redirect, so a staging box resolved stable and never saw the
+# rc). Sources, in order: GITHUB_TOKEN / GH_TOKEN env, then `gh auth token`
+# when the gh CLI exists (dev/operator machines; .mcpb boxes have neither and
+# resolve to None instantly). The token is only ever sent to api.github.com,
+# always via stdin (-H @-) so it never appears in `ps` or logs. Keep in
+# lockstep with mcp/src/version.ts::githubToken.
+_gh_tok_cache = {"at": 0.0, "tok": None}
+_GH_TOK_TTL = 900.0
+
+
+def _github_token():
+    now = time.time()
+    if _gh_tok_cache["at"] and now - _gh_tok_cache["at"] < _GH_TOK_TTL:
+        return _gh_tok_cache["tok"]
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
+    if not tok:
+        for gh in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "gh"):
+            try:
+                res = subprocess.run([gh, "auth", "token"],
+                                     capture_output=True, text=True, timeout=5)
+                cand = (res.stdout or "").strip()
+                if res.returncode == 0 and cand:
+                    tok = cand
+                break
+            except FileNotFoundError:
+                continue
+            except Exception:
+                break
+    _gh_tok_cache.update(at=now, tok=tok)
+    return tok
+
+
 # Conditional-request state lives in the SHARED cache file (latest-release.json)
 # so the ETag survives process boundaries: short-lived shell-outs used to pay a
 # full 200 per process; now every probe sends If-None-Match and gets a free 304
 # between releases.
 def _curl_conditional(url, etag):
-    """GET url with optional If-None-Match. Returns (status, new_etag, body)."""
+    """GET url with optional If-None-Match, authenticated when a GitHub token
+    is available. Returns (status, new_etag, body). On 401 with a token
+    (revoked/expired) retries anonymously so a bad token is never worse than
+    no token."""
+    tok = _github_token()
+    status, new_etag, body = _curl_once(url, etag, tok)
+    if status == 401 and tok:
+        _gh_tok_cache.update(tok=None)  # drop the dead token for this process
+        status, new_etag, body = _curl_once(url, etag, None)
+    return status, new_etag, body
+
+
+def _curl_once(url, etag, token):
     args = ["/usr/bin/curl", "-sS", "-m", "10",
             "-H", "Accept: application/vnd.github+json"]
+    if token:
+        args += ["-H", "@-"]  # Authorization arrives via stdin, never argv
     if etag:
         args += ["-H", "If-None-Match: %s" % etag]
     args += ["-w", "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}", url]
-    res = subprocess.run(args, capture_output=True, text=True, timeout=12)
+    res = subprocess.run(args, capture_output=True, text=True, timeout=12,
+                         input=("Authorization: Bearer %s" % token) if token else None)
     status, new_etag, body = 0, None, []
     for line in (res.stdout or "").splitlines():
         if line.startswith("__CURL_STATUS__:"):
