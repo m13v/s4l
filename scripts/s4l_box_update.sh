@@ -73,11 +73,36 @@ channel = ch if ch in ("stable", "staging") else "stable"
 REPO = "m13v/s4l"
 TAG_DL = "https://github.com/%s/releases/download/%s/social-autoposter.mcpb"
 
-def curl(url):
+# Optional GitHub token (2026-07-30): authenticated requests get 5000/h vs the
+# anonymous 60/h-per-IP quota (which, exhausted, makes this resolver fail
+# closed). Sources: GITHUB_TOKEN / GH_TOKEN env, then `gh auth token` when the
+# gh CLI exists (boxes have neither; resolves to None instantly). Sent via
+# stdin (-H @-), never argv. Keep in lockstep with snapshot.py::_github_token.
+def gh_token():
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
+    if not tok:
+        for gh in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "gh"):
+            try:
+                r = subprocess.run([gh, "auth", "token"],
+                                   capture_output=True, text=True, timeout=5)
+                cand = (r.stdout or "").strip()
+                if r.returncode == 0 and cand:
+                    tok = cand
+                break
+            except FileNotFoundError:
+                continue
+            except Exception:
+                break
+    return tok
+
+def curl(url, token=None):
     try:
-        r = subprocess.run(["/usr/bin/curl", "-fsSL", "-m", "15",
-                            "-H", "Accept: application/vnd.github+json", url],
-                           capture_output=True, text=True, timeout=20)
+        args = ["/usr/bin/curl", "-fsSL", "-m", "15",
+                "-H", "Accept: application/vnd.github+json"]
+        if token:
+            args += ["-H", "@-"]
+        r = subprocess.run(args + [url], capture_output=True, text=True, timeout=20,
+                           input=("Authorization: Bearer %s" % token) if token else None)
         return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -93,8 +118,13 @@ def ver_key(v):
     m = re.findall(r"\d+", pre)
     return (nums[0], nums[1], nums[2], 0, int(m[-1]) if m else 0)
 
+_tok = gh_token()
+_url = "https://api.github.com/repos/%s/releases?per_page=30" % REPO
+_raw = curl(_url, _tok)
+if not _raw and _tok:
+    _raw = curl(_url)  # bad token must never be worse than anonymous
 try:
-    rels = json.loads(curl("https://api.github.com/repos/%s/releases?per_page=30" % REPO) or "[]")
+    rels = json.loads(_raw or "[]")
 except Exception:
     rels = []
 best = None
