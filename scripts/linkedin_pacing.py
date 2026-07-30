@@ -245,27 +245,41 @@ def evaluate(now=None, timestamps=None):
                             MIN_GAP_S - since_last,
                             seconds_since_last=int(since_last))
 
-    # ---- cadence regularity (the 2026-07-20 fingerprint) ------------------
-    gaps = _gaps(ts)[-CV_WINDOW:]
+    # ---- cadence regularity -----------------------------------------------
+    # CRITICAL: both this rule and the spread rule below must be evaluated
+    # against the state that WOULD exist if we posted right now, never against
+    # history alone. History does not change while we wait, so a rule phrased
+    # over past gaps can never be satisfied by waiting: an earlier version of
+    # this file compared the last two gaps (120s, 120s -> CV 0.00), told the
+    # caller to sleep, and then returned the identical verdict forever. That
+    # livelocked the pipeline at 3 actions total and cost 1.3 actions/day
+    # instead of the intended ~25. Including the pending gap makes waiting
+    # monotonically increase CV, so the rule always resolves itself.
+    candidate_gap = (now - max(ts)).total_seconds() if ts else None
+    gaps = _gaps(ts)
+    if candidate_gap is not None:
+        gaps = gaps + [candidate_gap]
+    gaps = gaps[-CV_WINDOW:]
     cv = _cv(gaps)
     if cv is not None and cv < CV_FLOOR:
         # Metronomic. Break it with a long randomized pause rather than the floor.
         pause = random.uniform(CV_PAUSE_MIN_S, CV_PAUSE_MAX_S)
         return decision("wait", RC_WAIT,
                         f"cadence too regular (CV={cv:.2f} < {CV_FLOOR:.2f} "
-                        f"over last {len(gaps)} gaps)",
+                        f"over last {len(gaps)} gaps incl. pending)",
                         pause, cv=round(cv, 3))
 
-    # ---- daily spread: do not bunch the day's comments into one window ----
-    if len(in_24h) >= 3:
-        spread = (max(in_24h) - min(in_24h)).total_seconds()
-        # Only bites once we are a meaningful way into the daily allowance.
-        if spread < MIN_SPREAD_S and len(in_24h) >= max(3, MAX_PER_24H // 2):
-            pause = random.uniform(CV_PAUSE_MIN_S, CV_PAUSE_MAX_S)
+    # ---- daily spread: do not bunch the day's actions into one window ------
+    # Same "as if we posted now" framing: `now` is the effective end of the
+    # window, so the spread grows as we wait and the rule cannot livelock.
+    if len(in_24h) >= max(3, MAX_PER_24H // 2):
+        spread = (now - min(in_24h)).total_seconds()
+        if spread < MIN_SPREAD_S:
+            wait = MIN_SPREAD_S - spread
             return decision("wait", RC_WAIT,
                             f"daily spread too tight ({int(spread/60)}min over "
-                            f"{len(in_24h)} comments; want >= {MIN_SPREAD_S//3600}h)",
-                            pause, spread_minutes=int(spread / 60))
+                            f"{len(in_24h)} actions; want >= {MIN_SPREAD_S//3600}h)",
+                            wait, spread_minutes=int(spread / 60))
 
     return decision("allow", RC_ALLOW, "within all pacing limits",
                     cv=(round(cv, 3) if cv is not None else None))
