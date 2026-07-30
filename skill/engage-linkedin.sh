@@ -283,6 +283,23 @@ if [ "$PENDING_COUNT" -eq 0 ]; then
 else
     log "Phase B: $PENDING_COUNT pending LinkedIn replies to process"
 
+    # ---- PACING PREFLIGHT (enforceable half of the pacing gate) -----------
+    # The per-reply gate in the Phase B prompt is the fine-grained control, but
+    # it depends on the model obeying it. This preflight is the hard stop: if a
+    # 24h/72h ceiling is already blown there is nothing Phase B could legally
+    # post, so skip the whole phase before paying for browser bootstrap, the
+    # DB pull and a Claude run. rc=78 = "stop", matching the repo's existing
+    # rc=78 skip convention. rc=75 ("wait") still enters the phase, because the
+    # per-reply gate can sleep the short remainder itself.
+    _LI_PACE_RC=0
+    _LI_PACE_OUT="$("$PY_BIN" "$REPO_DIR/scripts/linkedin_pacing.py" check 2>&1)" || _LI_PACE_RC=$?
+    if [ "$_LI_PACE_RC" -eq 78 ]; then
+        log "PACING: $_LI_PACE_OUT"
+        log "PACING: ceiling reached; skipping Phase B this fire (rows stay pending)"
+        exit 0
+    fi
+    log "PACING: $_LI_PACE_OUT"
+
     # Pull the full pending batch via the next-pending endpoint (no DATABASE_URL).
     # The route applies the same ordering the old json_agg query used (our own
     # posts first, then oldest discovered_at) and returns {replies:[...]}. We
@@ -467,6 +484,24 @@ MANDATORY reply flow for every item:
           mode ($PICKED_MODE=invent) craft a NEW snake_case style name not in the
           curated block above and pass it as the [engagement_style] arg in Step 5.
           Professional but casual. NEVER em dashes. Match parent post language.
+  Step 3b: PACING GATE - MANDATORY, run this IMMEDIATELY BEFORE every single
+          post in Step 4. Never post two replies without a fresh check in
+          between; never batch several posts behind one check.
+             python3 $REPO_DIR/scripts/linkedin_pacing.py check --json
+          Read the JSON "action" field and obey it exactly:
+            "allow" (exit 0) -> proceed to Step 4 for THIS reply only.
+            "wait"  (exit 75) -> sleep the returned "wait_seconds", then
+                                 re-run the check. If it still says wait after
+                                 3 attempts, LEAVE the row pending (do NOT mark
+                                 skipped) and move to the next reply; the next
+                                 cycle will pick it up.
+            "stop"  (exit 78) -> a 24h/72h ceiling is blown. STOP POSTING
+                                 ENTIRELY for this run. Leave all remaining
+                                 rows pending and finish the run cleanly.
+          Do NOT try to out-think, average, or "catch up on" this gate; it is
+          the control that keeps our comment cadence from looking like a
+          metronome. On 2026-07-20 an unpaced run put 23 comments out in 22
+          minutes at 60s +/- 29s and the session was killed that evening.
   Step 4: post reply (OAuth API first, browser fallback)
   Step 5: python3 reply_db.py replied ID "text" [url] [engagement_style] [is_recommendation]   <- mark AFTER success. engagement_style is the style name you applied (in USE mode the assigned '${PICKED_STYLE}'). is_recommendation="1" only when you mentioned a project (Tier 2/3).
 If Step 5 fails, the item stays 'processing' and will be reset to 'pending' on the next run.
