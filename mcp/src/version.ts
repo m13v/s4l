@@ -236,18 +236,68 @@ async function latestFromGithubRedirect(): Promise<string | null> {
   }
 }
 
+// Optional GitHub token (2026-07-30): authenticated probes get 5000/h instead
+// of the anonymous 60/h-per-IP quota that silenced the staging update banner
+// on 2026-07-13 and again on 2026-07-30. Sources, in order: GITHUB_TOKEN /
+// GH_TOKEN env, then `gh auth token` when the gh CLI exists (dev/operator
+// machines; .mcpb boxes have neither and resolve to null instantly). The token
+// is only ever sent to api.github.com, always via stdin (curl -H @-) so it
+// never appears in argv/`ps`, and the `gh auth token` shell-out is noTee so it
+// never reaches the telemetry relay. Keep in lockstep with
+// scripts/snapshot.py::_github_token.
+let ghTokCache: { at: number; tok: string | null } = { at: 0, tok: null };
+const GH_TOK_TTL_MS = 900_000;
+
+async function githubToken(): Promise<string | null> {
+  const now = Date.now();
+  if (ghTokCache.at && now - ghTokCache.at < GH_TOK_TTL_MS) return ghTokCache.tok;
+  let tok = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null;
+  if (!tok) {
+    for (const gh of ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "gh"]) {
+      const res = await run(gh, ["auth", "token"], { timeoutMs: 5000, noTee: true });
+      if (res.code === -1) continue; // not spawnable at this path; try the next
+      const cand = (res.stdout || "").trim();
+      if (res.code === 0 && cand) tok = cand;
+      break;
+    }
+  }
+  ghTokCache = { at: now, tok };
+  return tok;
+}
+
 // Conditional-request state lives in the SHARED cache file (latest-release.json)
 // so the ETag survives process boundaries: short-lived MCP respawns used to pay
 // a full 200 per process; now every probe sends If-None-Match and gets a free
-// 304 between releases.
+// 304 between releases. Probes authenticate when a GitHub token is available;
+// a 401 (revoked/expired token) retries anonymously so a bad token is never
+// worse than no token.
 async function curlConditional(
   url: string,
   etag: string | null
 ): Promise<{ status: number; etag: string | null; body: string }> {
+  const tok = await githubToken();
+  const first = await curlOnce(url, etag, tok);
+  if (first.status === 401 && tok) {
+    ghTokCache = { at: Date.now(), tok: null }; // drop the dead token
+    return curlOnce(url, etag, null);
+  }
+  return first;
+}
+
+async function curlOnce(
+  url: string,
+  etag: string | null,
+  token: string | null
+): Promise<{ status: number; etag: string | null; body: string }> {
   const args = ["-sS", "-m", "10", "-H", "Accept: application/vnd.github+json"];
+  if (token) args.push("-H", "@-"); // Authorization arrives via stdin, never argv
   if (etag) args.push("-H", `If-None-Match: ${etag}`);
   args.push("-w", "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}", url);
-  const res = await run("curl", args, { timeoutMs: 12000, noTee: true });
+  const res = await run("curl", args, {
+    timeoutMs: 12000,
+    noTee: true,
+    stdin: token ? `Authorization: Bearer ${token}` : undefined,
+  });
   let status = 0;
   let newEtag: string | null = null;
   const body: string[] = [];
