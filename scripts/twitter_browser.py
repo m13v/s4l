@@ -1829,6 +1829,60 @@ def read_conversation(thread_url, max_messages=20):
                 const main = document.querySelector('main');
                 if (!main) return {partner_name: '', partner_handle: '', messages: [], total_found: 0};
 
+                // 2026-07-30: X shipped a redesigned chat thread DOM. The
+                // message list is now [data-testid="dm-message-list"] with one
+                // [data-testid="message-<uuid>"] node per bubble and the text
+                // inside [data-testid="message-text-<uuid>"]; the old
+                // li/[role=listitem] structure is gone (this silently zeroed
+                // every read from ~07-28). Direction comes from the bubble
+                // row's computed justify-content: flex-end = ours,
+                // flex-start = theirs (verified against a mixed
+                // conversation). The legacy extraction below stays as the
+                // fallback for any account still on the old DOM.
+                const v2list = main.querySelector('[data-testid="dm-message-list"]');
+                if (v2list) {
+                    const uEl = main.querySelector('[data-testid="dm-conversation-username"]');
+                    if (uEl) partnerName = uEl.textContent.trim();
+                    const handleEls2 = main.querySelectorAll('div, span');
+                    for (const el of handleEls2) {
+                        const t = el.textContent.trim();
+                        if (t.startsWith('@') && t.length > 2 && t.length < 50 &&
+                            !t.includes(' ') && t.substring(1) !== ourHandle) {
+                            partnerHandle = t.substring(1);
+                            break;
+                        }
+                    }
+                    const messages = [];
+                    for (const item of v2list.querySelectorAll('[data-testid^="message-"]')) {
+                        const tid = item.getAttribute('data-testid') || '';
+                        if (tid.startsWith('message-text-')) continue;
+                        const textEl = item.querySelector('[data-testid^="message-text-"]');
+                        let content = ((textEl ? textEl.textContent : item.textContent) || '');
+                        const fullText = item.textContent || '';
+                        const timeMatch = fullText.match(/(\\d{1,2}:\\d{2}\\s*[AP]M)/);
+                        const time = timeMatch ? timeMatch[1] : '';
+                        content = content
+                            .replace(/(\\d{1,2}:\\d{2}\\s*[AP]M)/g, '')
+                            .replace(/(Seen|Delivered|Sent)\\s*$/, '')
+                            .trim();
+                        if (!content) continue;
+                        const isFromUs =
+                            window.getComputedStyle(item).justifyContent === 'flex-end';
+                        messages.push({
+                            sender: isFromUs ? ourHandle : (partnerHandle || partnerName),
+                            content: content,
+                            time: time,
+                            is_from_us: isFromUs,
+                        });
+                    }
+                    return {
+                        partner_name: partnerName,
+                        partner_handle: partnerHandle,
+                        messages: messages.slice(-maxMessages),
+                        total_found: messages.length,
+                    };
+                }
+
                 // Find the conversation panel (the section containing the
                 // message textbox), NOT the sidebar conversation list.
                 // The textbox has aria-label like "Unencrypted message".
@@ -2175,6 +2229,17 @@ def send_dm(thread_url, message, dm_id=None, apply_campaigns=True):
                     msg_box = page.locator(
                         'div[role="textbox"][contenteditable="true"]'
                     ).last
+                    msg_box.wait_for(state="visible", timeout=3000)
+                except Exception:
+                    msg_box = None
+
+            # 2026-07-30 chat redesign: the composer is now a plain
+            # <textarea data-testid="dm-composer-textarea"> (placeholder
+            # "Unencrypted message"), no contenteditable div and no
+            # role/aria-label attributes.
+            if not msg_box:
+                try:
+                    msg_box = page.locator('[data-testid="dm-composer-textarea"]')
                     msg_box.wait_for(state="visible", timeout=3000)
                 except Exception:
                     return {"ok": False, "error": "message_box_not_found"}
