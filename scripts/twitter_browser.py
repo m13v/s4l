@@ -1575,7 +1575,11 @@ def unread_dms(include_requests=False):
                     if (!link) continue;
 
                     const threadUrl = link.href;
-                    if (!threadUrl.match(/\\/i\\/chat\\/[\\d-g]/)) continue;
+                    // Accept both /i/chat/<ids> (primary inbox) and
+                    // /i/chat/requests/<ids> (Message Requests tab). The bare
+                    // "Message requests" row link (/i/chat/requests, no ids)
+                    // still fails the match and stays excluded.
+                    if (!threadUrl.match(/\\/i\\/chat\\/(requests\\/)?[\\d-g]/)) continue;
 
                     let handle = '';
                     const avatarLink = item.querySelector('a[href^="https://x.com/"]');
@@ -2196,6 +2200,21 @@ def send_dm(thread_url, message, dm_id=None, apply_campaigns=True):
 
             if verified and dm_id is not None:
                 _log_twitter_dm_outbound(dm_id, message, minted_codes=minted_link_codes)
+
+            # A verified send on a message-request thread accepts the
+            # request, which moves the conversation to the primary inbox
+            # where the /i/chat/requests/<ids> URL no longer resolves
+            # (X bounces it to the requests list). Canonicalize the stored
+            # chat_url so follow-up sends navigate correctly.
+            if verified and dm_id is not None and "/i/chat/requests/" in thread_url:
+                try:
+                    import http_api
+                    canonical = thread_url.replace("/i/chat/requests/", "/i/chat/")
+                    http_api.api_patch(f"/api/v1/dms/{dm_id}", {"chat_url": canonical})
+                    print(f"[send_dm] request accepted; canonicalized chat_url -> {canonical}",
+                          file=sys.stderr)
+                except Exception as e:
+                    print(f"[send_dm] chat_url canonicalize failed: {e}", file=sys.stderr)
 
             return {
                 "ok": verified,
