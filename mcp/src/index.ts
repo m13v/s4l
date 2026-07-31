@@ -239,10 +239,13 @@ const OVERLAY_WATCH_PLIST = path.join(
   `${OVERLAY_WATCH_LABEL}.plist`
 );
 
-// Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
-// install keeps itself current — the interactive `runtime` tool (action:'update')
-// only helps when
-// a human-facing agent session is open, which an autopilot box never has.
+// Legacy daily self-updater launchd job. BANNED (user decision 2026-07-31):
+// it ran s4l_box_update.sh unattended, which kills and relaunches Claude
+// Desktop with no human in the loop. Updates are user-initiated only (menubar
+// "Update now & restart Claude Desktop", the panel button, `runtime`
+// action:'update', or an operator running s4l_box_update.sh explicitly). The
+// label/plist constants survive so ensureUpdaterRemoved() can clean the job
+// off every box that got it from v1.7.1..v1.7.7-rc.4.
 const UPDATER_LABEL = "com.m13v.social-autoposter-update";
 const UPDATER_PLIST = path.join(
   os.homedir(),
@@ -5333,63 +5336,19 @@ async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: str
   }
 }
 
-// Install/refresh the daily self-updater launchd job. This used to be bundled
-// into the now-deleted `autopilot` MCP tool (removed 2026-06-19, 88bd1cb9):
-// calling `autopilot enable` installed this job as a side effect, so removing
-// the tool silently orphaned it — UPDATER_LABEL/UPDATER_PLIST and the
-// auto_update_on status check survived (buildSnapshot still reports them), but
-// nothing has installed the plist since, on ANY box provisioned after that
-// commit (auto_update_on reads false forever). Restored here as its own
-// deterministic boot-time job, same pattern as its five siblings above.
-//
-// Points at scripts/s4l_box_update.sh, NOT skill/social-autoposter-update.sh:
-// the latter is the npm-lane updater (npm view + npx update) and is a silent
-// no-op on a .mcpb box, which has no npm/npx on PATH (see version.ts). The
-// .mcpb-lane equivalent downloads the .mcpb directly from the channel-resolved
-// GitHub release and unpacks it over the extension dir — see that script's own
-// header for the channel/no-downgrade/retry guards. Default mode there
-// downloads + unpacks + restarts Claude Desktop with NO human in the loop,
-// matching the original bundled updater's intent ("keeps a headless install
-// current"); RunAtLoad so a box that boots already-behind checks promptly.
-async function ensureUpdaterInstalled(): Promise<{ ok: boolean; detail: string }> {
+// Remove the legacy daily self-updater launchd job (see UPDATER_LABEL's
+// comment). Boot-time, idempotent, best-effort: unload the job if launchd has
+// it and delete the plist so the daily silent Claude Desktop restart can never
+// fire again. Do NOT reintroduce an install path for this job — any future
+// auto-update mechanism must be user-visible and user-confirmed.
+async function ensureUpdaterRemoved(): Promise<{ ok: boolean; detail: string }> {
   try {
-    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if ((process.env.S4L_AUTO_UPDATE) === "0") return { ok: false, detail: "disabled (S4L_AUTO_UPDATE=0)" };
-    const logDir = path.join(repoDir(), "skill", "logs");
-    try {
-      fs.mkdirSync(logDir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-    const xml = plistXml({
-      label: UPDATER_LABEL,
-      programArgs: ["/bin/bash", path.join(repoDir(), "scripts", "s4l_box_update.sh")],
-      intervalSecs: 86_400,
-      runAtLoad: true,
-      stdoutLog: path.join(logDir, "launchd-self-update-stdout.log"),
-      stderrLog: path.join(logDir, "launchd-self-update-stderr.log"),
-    });
+    if (process.platform !== "darwin") return { ok: true, detail: "not macOS" };
     const uid = process.getuid ? process.getuid() : 0;
-    let cur: string | null = null;
-    try {
-      cur = fs.readFileSync(UPDATER_PLIST, "utf-8");
-    } catch {
-      cur = null;
-    }
-    let detail: string;
-    if (cur === xml) {
-      const res = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-      detail = `current (load rc=${res.code})`;
-    } else {
-      if (cur !== null) {
-        await unloadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-      }
-      fs.mkdirSync(path.dirname(UPDATER_PLIST), { recursive: true });
-      fs.writeFileSync(UPDATER_PLIST, xml, "utf-8");
-      const res = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
-    }
-    return { ok: true, detail };
+    const existed = fs.existsSync(UPDATER_PLIST);
+    await unloadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
+    if (existed) fs.rmSync(UPDATER_PLIST, { force: true });
+    return { ok: true, detail: existed ? "removed" : "absent" };
   } catch (e: any) {
     return { ok: false, detail: e?.message || String(e) };
   }
@@ -6651,13 +6610,12 @@ async function main() {
   void ensureOverlayWatchInstalled()
     .then((r) => console.error(`[overlay-watch] launchd supervisor: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[overlay-watch] supervisor install failed:", e?.message || e));
-  // Daily self-updater: restored 2026-07-08 after 88bd1cb9 ("Remove autopilot
-  // tool") silently dropped its only install path (it used to be bundled into
-  // the deleted `autopilot enable` action). Best-effort; never blocks boot.
-  // Disable with S4L_AUTO_UPDATE=0.
-  void ensureUpdaterInstalled()
-    .then((r) => console.error(`[self-update] launchd updater: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-    .catch((e) => console.error("[self-update] updater install failed:", e?.message || e));
+  // Silent daily self-updates are banned (user decision 2026-07-31): the job
+  // restarted Claude Desktop unattended. Clean it off every box that got it
+  // from v1.7.1..v1.7.7-rc.4. Best-effort; never blocks boot.
+  void ensureUpdaterRemoved()
+    .then((r) => console.error(`[self-update] legacy launchd updater: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[self-update] updater removal failed:", e?.message || e));
   // Heal installs onboarded before short_links_live defaulted to false: such a
   // project wraps short links against the customer's own domain, which has no
   // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
