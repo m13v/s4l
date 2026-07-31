@@ -403,31 +403,10 @@ Submit the result object now."""
 # -------------------------------------------------------------------- queue
 
 
-def run_gather(ns) -> int:
-    sessions, dropped = gather_sessions(ns.days, ns.budget)
-    if not sessions:
-        print(json.dumps({"ok": False, "reason": "no_eligible_sessions", "days": ns.days}))
-        return 1
-    prompt = build_prompt(sessions)
-    total_chars = len(prompt)
-    print(
-        f"[gather] {len(sessions)} sessions in window ({ns.days}d), "
-        f"{dropped} dropped over budget, prompt {total_chars:,} chars",
-        file=sys.stderr,
-    )
-    for s in sessions:
-        print(
-            f"[gather]   {s['session_id'][:8]} {s['first_ts'][:16]} "
-            f"human_msgs={s['human_msgs']} chars={len(s['body']):,} cwd={s['cwd']}",
-            file=sys.stderr,
-        )
-
-    if ns.dry_run:
-        out = state_dir() / "last_prompt.txt"
-        out.write_text(prompt)
-        print(f"[gather] dry-run: prompt written to {out}, nothing enqueued", file=sys.stderr)
-        return 0
-
+def _run_one_batch(sessions: list[dict], pending_props: list[dict], ns) -> list[dict] | None:
+    """Enqueue one mining job for this batch; return stamped proposals, or None
+    on failure (caller stops the loop and keeps what it has)."""
+    prompt = build_prompt(sessions, pending_props)
     schema_file = state_dir() / "schema.json"
     schema_file.write_text(json.dumps(SCHEMA))
 
@@ -441,7 +420,6 @@ def run_gather(ns) -> int:
         str(schema_file),
         "-p",
     ]
-    print(f"[gather] enqueuing context-mining job (timeout {ns.timeout}s)...", file=sys.stderr)
     try:
         proc = subprocess.run(
             cmd,
@@ -453,7 +431,7 @@ def run_gather(ns) -> int:
         )
     except subprocess.TimeoutExpired:
         print("[gather] hard timeout waiting for the queue result", file=sys.stderr)
-        return 79
+        return None
 
     if proc.returncode == 79:
         print(
@@ -461,11 +439,11 @@ def run_gather(ns) -> int:
             "Desktop open and the s4l-worker task firing?",
             file=sys.stderr,
         )
-        return 79
+        return None
     if proc.returncode != 0:
         print(f"[gather] provider failed rc={proc.returncode}", file=sys.stderr)
         sys.stderr.write((proc.stderr or "")[-2000:] + "\n")
-        return proc.returncode
+        return None
 
     try:
         envelope = json.loads(proc.stdout[proc.stdout.index("{"):])
@@ -475,23 +453,72 @@ def run_gather(ns) -> int:
     except Exception as e:
         print(f"[gather] could not parse result envelope: {e}", file=sys.stderr)
         sys.stderr.write((proc.stdout or "")[-2000:] + "\n")
-        return 1
+        return None
 
-    proposals = obj.get("proposals") or []
     stamped = []
-    for p in proposals:
+    for p in obj.get("proposals") or []:
         pid = "cm-" + hashlib.sha1(
             (p.get("text", "") + p.get("source_session", "")).encode()
         ).hexdigest()[:8]
         p["id"] = pid
         p["mined_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         stamped.append(p)
-    pending_path().write_text(json.dumps({"proposals": stamped}, indent=2, ensure_ascii=False))
+    return stamped
+
+
+def run_gather(ns) -> int:
+    sessions = gather_sessions(ns.days)
+    if not sessions:
+        print(json.dumps({"ok": False, "reason": "no_eligible_sessions", "days": ns.days}))
+        return 1
+    batches = chunk_by_budget(sessions, ns.budget)
+    total_chars = sum(len(s["body"]) for s in sessions)
     print(
-        f"[gather] job done: {len(stamped)} proposals -> {pending_path()}", file=sys.stderr
+        f"[gather] {len(sessions)} sessions in window ({ns.days}d), "
+        f"{total_chars:,} chars -> {len(batches)} batches (budget {ns.budget:,})",
+        file=sys.stderr,
+    )
+
+    if ns.dry_run:
+        out = state_dir() / "last_prompt.txt"
+        out.write_text(build_prompt(batches[0], []))
+        for i, b in enumerate(batches, 1):
+            ids = ", ".join(s["session_id"][:8] for s in b)
+            print(f"[gather]   batch {i}/{len(batches)}: {len(b)} sessions ({ids})", file=sys.stderr)
+        print(f"[gather] dry-run: batch-1 prompt written to {out}, nothing enqueued", file=sys.stderr)
+        return 0
+
+    # carry over any still-pending proposals so batches dedup against them too
+    all_props: list[dict] = _load_pending()
+    known_ids = {p["id"] for p in all_props}
+    failed = 0
+    for i, batch in enumerate(batches, 1):
+        ids = ", ".join(s["session_id"][:8] for s in batch)
+        print(
+            f"[gather] batch {i}/{len(batches)}: {len(batch)} sessions "
+            f"({sum(len(s['body']) for s in batch):,} chars) [{ids}]",
+            file=sys.stderr,
+        )
+        stamped = _run_one_batch(batch, all_props, ns)
+        if stamped is None:
+            failed += 1
+            print(f"[gather] batch {i} failed; stopping loop, keeping prior results", file=sys.stderr)
+            break
+        fresh = [p for p in stamped if p["id"] not in known_ids]
+        known_ids.update(p["id"] for p in fresh)
+        all_props.extend(fresh)
+        pending_path().write_text(
+            json.dumps({"proposals": all_props}, indent=2, ensure_ascii=False)
+        )
+        print(f"[gather] batch {i} done: +{len(fresh)} proposals ({len(all_props)} total)", file=sys.stderr)
+
+    print(
+        f"[gather] run complete: {len(batches) - failed}/{len(batches)} batches, "
+        f"{len(all_props)} pending proposals -> {pending_path()}",
+        file=sys.stderr,
     )
     cmd_review(None)
-    return 0
+    return 0 if not failed else 1
 
 
 # ------------------------------------------------------------------- review
