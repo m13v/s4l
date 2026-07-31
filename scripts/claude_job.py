@@ -76,6 +76,12 @@ TAG_TO_TYPE = {
     # Python and inlined; no Bash tools), mirroring the twitter Phase 2b
     # tool-free conversion, so it rides the same universal worker.
     "post-reddit-draft": "reddit-draft",
+    # Context mining (2026-07-31): scripts/context_mining.py inlines compacted
+    # transcripts + the corpus into one pure text->JSON turn. Execution
+    # guidance lives at the top of the prompt itself (not only in
+    # TYPE_TO_WORKER_NOTES) because an installed-package worker claims with
+    # ITS copy of this map, which may predate this type.
+    "context-mining": "context-mining",
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
@@ -92,6 +98,7 @@ TYPE_TO_ACTIVITY = {
     # must stay concise (user rule 2026-07-14); the platform shows on the
     # review card itself, not in the tray.
     "reddit-draft": ("drafting", "draft"),
+    "context-mining": ("learning", "mining context"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
@@ -139,6 +146,13 @@ TYPE_TO_WORKER_NOTES = {
         "\"rejects\": [...]}. A candidate that fails the gate is simply "
         "absent from posts (add a rejects entry only for the structural "
         "false-positive cases the prompt describes)."
+    ),
+    "context-mining": (
+        "WORKER EXECUTION NOTES (queue metadata; follow while executing the "
+        "prompt below): single-turn, tool-free job. Everything you need is "
+        "inlined in the prompt (transcripts, corpus, prior decisions). Never "
+        "use tools. Read, then submit ONE result object matching the schema: "
+        "{\"proposals\": [...]}. An empty proposals list is a valid answer."
     ),
 }
 
