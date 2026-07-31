@@ -156,8 +156,13 @@ class _Worker(threading.Thread):
         # the foreground, hide that specific Chrome process by pid, then force
         # focus back to the app the user was in. Screenshots/clicks are
         # unaffected (CDP is offscreen-raster + synthetic input; the occlusion
-        # flags keep hidden tabs painting). Escape hatch: S4L_NO_HARNESS_HIDE.
+        # flags keep hidden tabs painting).
+        # DEFAULT OFF (user decision 2026-07-30): only the telemetry above runs
+        # unless S4L_HARNESS_HIDE=1 opts in. S4L_NO_HARNESS_HIDE force-disables
+        # even when the opt-in is set.
         if os.environ.get("S4L_NO_HARNESS_HIDE"):
+            return
+        if os.environ.get("S4L_HARNESS_HIDE") != "1":
             return
         pos = details.get("window_position") or ""
         try:
