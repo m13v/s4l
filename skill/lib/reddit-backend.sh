@@ -149,7 +149,6 @@ ensure_reddit_browser_for_backend() {
     HC_PROFILE_DIR="$HOME/.claude/browser-profiles/reddit-harness" \
     HC_DEFAULT_URL="$_BH_REDDIT_DEFAULT_URL" \
     HC_CDP_URL="${REDDIT_CDP_URL:-$_BH_REDDIT_DEFAULT_URL}" \
-    HC_LAUNCH_URL="about:blank" \
     HC_WINDOW_POS="${BH_REDDIT_WINDOW_POS:-2131,-1032}" \
     HC_WINDOW_SIZE="${BH_REDDIT_WINDOW_SIZE:-911,1016}" \
     HC_PRE_LAUNCH_HOOK=_reddit_defer_if_posting \
