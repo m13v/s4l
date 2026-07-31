@@ -340,14 +340,24 @@ The user is Matthew, a solo founder building S4L (a social-media autoposting age
 
 # What qualifies
 
-- Specific and concrete: names the tool/number/failure mode, not "learned a lot about X".
+- GENERAL: the line states a transferable lesson a stranger in tech could apply to
+  their own work, without knowing this codebase or these products. The specific
+  incident is EVIDENCE (it goes in the quote and the why), not the line itself.
+  Test: would a founder who has never heard of S4L or Fazm reshare this?
 - Durable: still true and useful months from now, not transient state ("the deploy is broken today").
 - Non-obvious: something a smart peer would not already assume. Generic best practices do NOT qualify.
 - First-hand: grounded in what actually happened in these sessions (an experiment, an outage, a metric, a decision and its reasoning, a surprising vendor/platform behavior).
+- SYNTHESIZED: if several incidents (even across sessions) point at one underlying
+  lesson, propose ONE line for the lesson, never one line per incident.
 
 # What never qualifies
 
+- Vendor-specific micro-gotchas (a field length limit, one API's quirky error) unless
+  the line is elevated to the general pattern the gotcha exemplifies.
+- Anything that only matters inside this codebase or product internals.
 - Credentials, API keys, tokens, passwords, account numbers, or anything that looks like one, even partially. If a great insight touches one, redact the secret.
+- Names, handles, or identifying details of customers, users, or other private
+  individuals. Describe them generically ("a stalled user", "an early customer").
 - Private details about clients, other people's finances, legal disputes, or immigration status.
 - Injected harness noise: usage-limit banners, system reminders, scheduler chatter. These appear inside transcripts and are not the user's words.
 - Anything already covered by an existing corpus line (see below), unless you are proposing a REVISION of that line.
@@ -366,7 +376,8 @@ The user is Matthew, a solo founder building S4L (a social-media autoposting age
 
 # Your task
 
-Propose 0-8 corpus changes. Quality over quantity; an empty proposals list is a valid answer. For each proposal:
+Propose 0-3 corpus changes, and only what clears EVERY bar above; most days the
+right answer is 0 or 1. An empty proposals list is a valid, common answer. For each proposal:
 - action: "add" for a new line, or "revise" when a new learning supersedes an existing corpus line (set revises_line to that line's number).
 - text: the corpus line itself. One sentence, self-contained, max ~300 chars, written in the user's plainspoken voice. No hashtags, no em dashes.
 - why: one sentence on why this is worth keeping (what makes it non-obvious or shareable).
