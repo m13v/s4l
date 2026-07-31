@@ -160,7 +160,6 @@ ensure_twitter_browser_for_backend() {
     HC_PROFILE_DIR="$HOME/.claude/browser-profiles/browser-harness" \
     HC_DEFAULT_URL="$_BH_DEFAULT_URL" \
     HC_CDP_URL="${TWITTER_CDP_URL:-$_BH_DEFAULT_URL}" \
-    HC_LAUNCH_URL="${BH_LAUNCH_URL:-https://x.com}" \
     HC_WINDOW_POS="${BH_WINDOW_POS:-3042,-1032}" \
     HC_WINDOW_SIZE="${BH_WINDOW_SIZE:-1024,1013}" \
     HC_EXTRA_FLAGS="--password-store=basic --use-mock-keychain" \
