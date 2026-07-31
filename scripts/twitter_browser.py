@@ -1725,11 +1725,20 @@ def unread_dms(include_requests=False):
             # whole DM pipeline.
             if include_requests:
                 try:
-                    page.goto(
-                        "https://x.com/i/chat/requests",
-                        wait_until="domcontentloaded",
-                    )
-                    page.wait_for_timeout(5000)
+                    # A concurrent pipeline sharing this harness tab can yank
+                    # navigation between our goto and the scrape (landing on
+                    # e.g. a search page), which would silently scrape 0
+                    # request rows. Verify the URL stuck; re-goto up to 2x.
+                    landed = False
+                    for _nav_try in range(3):
+                        page.goto(
+                            "https://x.com/i/chat/requests",
+                            wait_until="domcontentloaded",
+                        )
+                        page.wait_for_timeout(5000)
+                        if "chat/requests" in page.url:
+                            landed = True
+                            break
                     unreachable, reason = _is_x_unreachable(page)
                     if unreachable:
                         print(
@@ -1737,11 +1746,24 @@ def unread_dms(include_requests=False):
                             "returning primary-only results",
                             file=sys.stderr,
                         )
+                    elif not landed:
+                        print(
+                            f"[unread_dms] requests tab navigation hijacked "
+                            f"(landed on {page.url}); returning primary-only "
+                            "results",
+                            file=sys.stderr,
+                        )
                     else:
                         primary_urls = {c["thread_url"] for c in unique}
+                        n_req = 0
                         for c in _scan_sidebar(True):
                             if c["thread_url"] not in primary_urls:
                                 unique.append(c)
+                                n_req += 1
+                        print(
+                            f"[unread_dms] requests tab scanned: {n_req} rows",
+                            file=sys.stderr,
+                        )
                 except Exception as e:
                     print(
                         f"[unread_dms] requests scan failed ({e}); "
