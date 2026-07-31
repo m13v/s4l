@@ -33,7 +33,12 @@
 #   HC_PROFILE_DIR   - Chrome profile dir; also the exact-dir pgrep reap match
 #   HC_DEFAULT_URL   - http://127.0.0.1:<port>; ownership test vs external/BYO
 #   HC_CDP_URL       - actual CDP url (backend passes its <PLATFORM>_CDP_URL)
-#   HC_LAUNCH_URL    - first-tab url (default about:blank)
+#   HC_LAUNCH_URL    - first-tab url (default derived per HC_PLATFORM via
+#                      _hc_default_launch_url; BH_LAUNCH_URL env overrides).
+#                      MUST be a real http(s) page: the harness daemon's
+#                      is_real_page() refuses about:/chrome: tabs, and a
+#                      blank-only Chrome used to trap it in a foreground
+#                      createTarget loop = focus steals (2026-07-31)
 #   HC_WINDOW_POS    - macOS offscreen window position (x,y)
 #   HC_WINDOW_SIZE   - macOS window size (w,h)
 #   HC_EXTRA_FLAGS   - extra platform Chrome flags, ONE STRING, split on
@@ -203,6 +208,22 @@ hc_record_health() {
         > "$_f" 2>/dev/null || true
 }
 
+_hc_default_launch_url() {
+    # Per-platform first-tab / revive url ($1 = platform, default HC_PLATFORM).
+    # ONE map for every backend — the per-backend HC_LAUNCH_URL copies drifted
+    # (twitter had x.com, reddit/linkedin had about:blank, which armed the
+    # daemon's blank-tab focus-steal loop; see cleanup_harness_tabs.py).
+    # robots.txt = static real page, no SPA to crash while parked, same-domain
+    # so tab-reuse preferences still match. Twitter keeps x.com: its post-
+    # launch session-restore hook has always run against the full page.
+    case "${1:-${HC_PLATFORM:-}}" in
+        twitter)  echo "https://x.com" ;;
+        reddit)   echo "https://www.reddit.com/robots.txt" ;;
+        linkedin) echo "https://www.linkedin.com/robots.txt" ;;
+        *)        echo "about:blank" ;;
+    esac
+}
+
 hc_cleanup_tabs() {
     # Close every CDP "page" tab except one. $1 = port, $2 = log label.
     # Delegated to a standalone Python script because bash 3.2 (what launchd
@@ -221,7 +242,15 @@ hc_cleanup_tabs() {
             return 0
         fi
     fi
-    BH_CLEANUP_PORT="$_port" python3 "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
+    # BH_REVIVE_URL lets the script heal a blank-only / tabless Chrome by
+    # (re)establishing one real tab in the BACKGROUND — without it the harness
+    # daemon can never re-attach cleanly (is_real_page rejects about:blank).
+    # Platform derived from the label ("reddit-harness" -> reddit). S4L_PYTHON
+    # (owned runtime venv) has websocket-client; bare python3 degrades to
+    # close-only, same as before.
+    BH_CLEANUP_PORT="$_port" \
+    BH_REVIVE_URL="$(_hc_default_launch_url "${_label%-harness}")" \
+        "${S4L_PYTHON:-python3}" "$_BH_REPO_DIR/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
 # Shared interpreter for the reserved skip code 78 (2026-07-15). Every
@@ -418,7 +447,7 @@ hc_ensure_browser() {
         # pipeline op mints its tab via the background Target.createTarget
         # path) a positional URL argument would force a window and defeat the
         # flag — drop the launch URL in that mode.
-        local _launch_url="${HC_LAUNCH_URL:-about:blank}"
+        local _launch_url="${HC_LAUNCH_URL:-${BH_LAUNCH_URL:-$(_hc_default_launch_url)}}"
         case " ${HC_EXTRA_FLAGS:-} " in
             *" --no-startup-window "*) _launch_url="" ;;
         esac
