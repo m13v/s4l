@@ -551,12 +551,13 @@ if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "twitter" ] || [ "$PLATFORM" = "x" ]; t
     IFS= read -r -d '' PHASE_C_BLOCK <<'PHASE_C_EOF' || true
 ## PHASE C: Scan X/Twitter DMs for new messages
 
-1. Get ALL Twitter DM conversations visible in the sidebar (the script returns the full list, not only unread) and write them to /tmp/twitter_threads.json:
+1. Get ALL Twitter DM conversations visible in the sidebar (the script returns the full list, not only unread), INCLUDING the Message Requests tab (x.com/i/chat/requests), and write them to /tmp/twitter_threads.json:
    ```bash
-   python3 scripts/twitter_browser.py unread-dms > /tmp/twitter_threads.json
+   python3 scripts/twitter_browser.py unread-dms --include-requests > /tmp/twitter_threads.json
    ```
    This handles the encrypted DM passcode automatically (loaded from .env TWITTER_DM_PASSCODE).
-   Returns JSON array with: author, handle, preview, time, thread_url, is_from_us, has_unread.
+   Returns JSON array with: author, handle, preview, time, thread_url, is_from_us, has_unread, is_request.
+   Rows with `is_request: true` came from the Message Requests tab: cold inbound DMs from people we don't follow who messaged us first. They flow through the exact same steps below (backfill, filter, read, ensure-dm, log-inbound, mark-inspected); the only difference is a relevance gate at reply time (step 3f). If the script's stderr shows "requests tab unreachable" or "navigation hijacked", proceed with the primary-only rows it returned; do not re-run the scan.
 
 1a. Backfill chat URLs for any existing X DM row still missing one. Cheap, idempotent, fills buttons for historical rows whose chat is still in the sidebar:
    ```bash
@@ -593,6 +594,13 @@ if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "twitter" ] || [ "$PLATFORM" = "x" ]; t
       python3 scripts/dm_conversation.py mark-inspected --dm-id DM_ID
       ```
       Skipping this on a "nothing new" thread is the bug that makes us re-open the same cold conversation every cycle. Always run it. The next filter-inbox will skip the thread for 24h unless a fresh inbound or outbound is logged in the meantime.
+   f. **Message requests only (`is_request: true` on the sidebar row): relevance gate before any reply.** The requests tab mixes real leads with spam, so decide per thread after reading it:
+      - RELEVANT (mentions our projects/products or their problem space, responding to our public posts, genuine question, plausible customer or partner): treat it as a normal conversation. It will surface in Phase D via the pending rail and gets a reply there. Sending the reply is what accepts the request; `send-dm` clicks the Accept button itself, and accepting does not notify them, so the reply is the first visible action.
+      - SPAM or IRRELEVANT (crypto/engagement-farm blasts, template "collab?" mass marketing, bots, adult content, pure solicitation with zero connection to us): do NOT reply and do NOT accept. Still complete steps c-d so the message is on record, THEN close the conversation so it never re-enters the queue:
+        ```bash
+        python3 scripts/dm_conversation.py set-status --dm-id DM_ID --status closed
+        ```
+        Run set-status closed AFTER log-inbound (log-inbound flips the row to needs_reply; closed must win). Never delete or block request threads from this pipeline.
 PHASE_C_EOF
 fi
 
