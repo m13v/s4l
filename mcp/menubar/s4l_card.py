@@ -464,12 +464,12 @@ def _compact_arm(variant):
 
 
 def _reply_heading_suffix(d):
-    """Concise 'project/lane · viral N · t v4' readout appended straight onto the
-    'Reply (editable):' heading (2026-07-07), so the two facts a reviewer
-    checks first don't require opening the details eye. Pulled from the same
+    """Concise 'project · viral N · t v4' readout appended straight onto the
+    'Reply (editable):' heading (2026-07-07), so the facts a reviewer checks
+    first don't require opening the details eye. Pulled from the same
     fields _details_lines used to render as 'Project:'/'Lane:'/'Virality
-    score:' rows; those three are omitted from the popover now to avoid
-    showing the same numbers twice. Empty string when neither is known."""
+    score:' rows; those are omitted from the popover now to avoid showing
+    the same numbers twice. Empty string when neither is known."""
     d = d or {}
     project = (d.get("project") or "").strip()
     lane = ((d.get("experiments") or {}).get("lane") or "").strip()
@@ -480,20 +480,11 @@ def _reply_heading_suffix(d):
         # approve_() blocks posting on these and the reviewer should know why
         # before clicking rather than after.
         bits.append("⚠ SANDBOX — not postable")
-    # Project and lane are independent concepts most of the time (project
-    # "fazm" drafted under lane "personal_brand"), but the operator's own
-    # PersonalBrand project IS the personal_brand lane, so project=="PersonalBrand"
-    # + lane=="personal_brand" is the SAME fact twice, not two facts — compare
-    # with punctuation/case stripped so "PersonalBrand" vs "personal_brand"
-    # collapses to one token instead of "PersonalBrand/personal_brand".
-    same = project and lane and re.sub(r"[^a-z0-9]", "", project.lower()) == re.sub(
-        r"[^a-z0-9]", "", lane.lower()
-    )
-    if same:
-        bits.append(project)
-    elif project and lane:
-        bits.append(f"{project}/{lane}")
-    elif project:
+    # Heading shows the project/lane name only, never a combined
+    # "project/lane" string (2026-07-31, user call: the "/promotion" suffix
+    # on cards was confusing). Lane is still stamped on the candidate and
+    # readable in the details popover; it's just not concatenated here.
+    if project:
         bits.append(project)
     elif lane:
         bits.append(lane)
