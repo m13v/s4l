@@ -23,6 +23,6 @@
 	<key>StandardOutPath</key>
 	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-linkedin-stdout.log</string>
 	<key>StartInterval</key>
-	<integer>900</integer>
+	<integer>3600</integer>
 </dict>
 </plist>
