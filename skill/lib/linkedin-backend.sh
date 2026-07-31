@@ -297,7 +297,6 @@ ensure_linkedin_browser_for_backend() {
     HC_PROFILE_DIR="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
     HC_DEFAULT_URL="$_BH_LINKEDIN_DEFAULT_URL" \
     HC_CDP_URL="${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" \
-    HC_LAUNCH_URL="about:blank" \
     HC_WINDOW_POS="${BH_LINKEDIN_WINDOW_POS:-3814,-1050}" \
     HC_WINDOW_SIZE="${BH_LINKEDIN_WINDOW_SIZE:-1024,1013}" \
     HC_EXTRA_FLAGS="--disable-renderer-backgrounding --disable-background-timer-throttling" \
