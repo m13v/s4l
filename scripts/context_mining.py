@@ -219,9 +219,8 @@ def _compact_session(path: Path) -> dict | None:
     }
 
 
-def gather_sessions(days: int, budget: int) -> tuple[list[dict], int]:
-    """Most-recent-first human sessions within the window, up to the char
-    budget. Returns (kept, dropped_count)."""
+def gather_sessions(days: int) -> list[dict]:
+    """ALL eligible human sessions within the window, most recent first."""
     cutoff = time.time() - days * 86400
     candidates = []
     for _source, p in _iter_transcript_files():
@@ -235,8 +234,6 @@ def gather_sessions(days: int, budget: int) -> tuple[list[dict], int]:
     candidates.sort(reverse=True)
 
     kept: list[dict] = []
-    dropped = 0
-    used = 0
     seen_ids: set[str] = set()
     for _mtime, p in candidates:
         if p.stem in seen_ids:
@@ -245,13 +242,26 @@ def gather_sessions(days: int, budget: int) -> tuple[list[dict], int]:
         if sess is None:
             continue
         seen_ids.add(p.stem)
-        cost = len(sess["body"])
-        if used + cost > budget:
-            dropped += 1
-            continue
-        used += cost
         kept.append(sess)
-    return kept, dropped
+    return kept
+
+
+def chunk_by_budget(sessions: list[dict], budget: int) -> list[list[dict]]:
+    """Split into batches whose combined body size fits the budget. A batch
+    always takes at least one session, so oversized sessions still ship."""
+    batches: list[list[dict]] = []
+    cur: list[dict] = []
+    used = 0
+    for s in sessions:
+        cost = len(s["body"])
+        if cur and used + cost > budget:
+            batches.append(cur)
+            cur, used = [], 0
+        cur.append(s)
+        used += cost
+    if cur:
+        batches.append(cur)
+    return batches
 
 
 # ------------------------------------------------------------------- corpus
@@ -310,16 +320,18 @@ SCHEMA = {
 }
 
 
-def build_prompt(sessions: list[dict]) -> str:
+def build_prompt(sessions: list[dict], pending_props: list[dict] | None = None) -> str:
     corpus_lines = read_corpus_lines()
     corpus_block = (
         "\n".join(f"[{i + 1}] {ln}" for i, ln in enumerate(corpus_lines))
         if corpus_lines
         else "(the corpus is currently empty)"
     )
-    considered = read_ledger()
+    considered = [
+        {"status": r.get("status"), "text": r.get("text", "")} for r in read_ledger()[-60:]
+    ] + [{"status": "pending", "text": p.get("text", "")} for p in (pending_props or [])]
     considered_block = (
-        "\n".join(f"- ({r.get('status')}) {r.get('text', '')[:200]}" for r in considered[-60:])
+        "\n".join(f"- ({r['status']}) {r['text'][:200]}" for r in considered)
         if considered
         else "(nothing has been considered yet)"
     )
