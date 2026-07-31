@@ -14,6 +14,9 @@ Usage:
     # Scan DM inbox for unread conversations
     python3 twitter_browser.py unread-dms
 
+    # Same scan, plus the Message Requests tab (rows tagged is_request=true)
+    python3 twitter_browser.py unread-dms --include-requests
+
     # Read messages from a DM conversation
     python3 twitter_browser.py read-conversation "https://x.com/i/chat/123-456"
 
@@ -1495,15 +1498,24 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 browser.close()
 
 
-def unread_dms():
+def unread_dms(include_requests=False):
     """Scan Twitter/X DM inbox for conversations.
 
     Navigates to /i/chat, handles the encryption passcode if needed,
     and extracts all visible conversations with their author, preview text,
     timestamp, and conversation URL.
 
+    include_requests=True additionally scans the Message Requests tab
+    (/i/chat/requests, inbound DMs from people we don't follow) with the
+    exact same scrape/scroll code and appends those rows to the result.
+    Every row carries "is_request" (true only for requests-tab rows) so the
+    pipeline can apply a relevance gate before replying. A requests-tab
+    failure degrades to primary-only results (stderr note) rather than
+    failing the whole scan.
+
     Returns: [{"author": "...", "handle": "...", "preview": "...", "time": "...",
-               "thread_url": "...", "is_from_us": bool, "has_unread": bool}, ...]
+               "thread_url": "...", "is_from_us": bool, "has_unread": bool,
+               "is_request": bool}, ...]
 
     `has_unread` is the signal callers should filter on. It is derived from the
     sidebar's visual unread state (aria-label "unread", bold font weight on the
@@ -1678,27 +1690,64 @@ def unread_dms():
                 return 0;
             }"""
 
-            seen = {}
-            stuck_iters = 0
-            max_iters = int(os.environ.get("TWITTER_UNREAD_SCROLL_MAX_ITERS", "60"))
-            max_no_growth = int(os.environ.get("TWITTER_UNREAD_SCROLL_NO_GROWTH", "5"))
-            for _ in range(max_iters):
-                batch = page.evaluate(scrape_js)
-                grew = False
-                for c in batch:
-                    if c["thread_url"] not in seen:
-                        seen[c["thread_url"]] = c
-                        grew = True
-                if not grew:
-                    stuck_iters += 1
-                else:
-                    stuck_iters = 0
-                if stuck_iters >= max_no_growth:
-                    break
-                page.evaluate(scroll_js)
-                page.wait_for_timeout(600)
+            def _scan_sidebar(is_request):
+                # Shared scrape+scroll loop for both the primary inbox and
+                # the Message Requests tab (same virtualized sidebar DOM).
+                seen = {}
+                stuck_iters = 0
+                max_iters = int(os.environ.get("TWITTER_UNREAD_SCROLL_MAX_ITERS", "60"))
+                max_no_growth = int(os.environ.get("TWITTER_UNREAD_SCROLL_NO_GROWTH", "5"))
+                for _ in range(max_iters):
+                    batch = page.evaluate(scrape_js)
+                    grew = False
+                    for c in batch:
+                        if c["thread_url"] not in seen:
+                            c["is_request"] = is_request
+                            seen[c["thread_url"]] = c
+                            grew = True
+                    if not grew:
+                        stuck_iters += 1
+                    else:
+                        stuck_iters = 0
+                    if stuck_iters >= max_no_growth:
+                        break
+                    page.evaluate(scroll_js)
+                    page.wait_for_timeout(600)
+                return list(seen.values())
 
-            unique = list(seen.values())
+            unique = _scan_sidebar(False)
+
+            # Message Requests pass: same DOM, same scrape/scroll code, just
+            # a different page. These are inbound DMs from people we don't
+            # follow; they never appear in the /i/chat sidebar (the
+            # "Message requests" row itself is dropped by the thread-URL
+            # regex above), so without this pass they are invisible to the
+            # whole DM pipeline.
+            if include_requests:
+                try:
+                    page.goto(
+                        "https://x.com/i/chat/requests",
+                        wait_until="domcontentloaded",
+                    )
+                    page.wait_for_timeout(5000)
+                    unreachable, reason = _is_x_unreachable(page)
+                    if unreachable:
+                        print(
+                            f"[unread_dms] requests tab unreachable ({reason}); "
+                            "returning primary-only results",
+                            file=sys.stderr,
+                        )
+                    else:
+                        primary_urls = {c["thread_url"] for c in unique}
+                        for c in _scan_sidebar(True):
+                            if c["thread_url"] not in primary_urls:
+                                unique.append(c)
+                except Exception as e:
+                    print(
+                        f"[unread_dms] requests scan failed ({e}); "
+                        "returning primary-only results",
+                        file=sys.stderr,
+                    )
 
             # If the inbox API was throttled hard AND we got nothing back,
             # treat this as rate-limited so the caller can back off instead
@@ -2068,6 +2117,22 @@ def send_dm(thread_url, message, dm_id=None, apply_campaigns=True):
                     "expected_conv_id": conv_id,
                     "landed_url": page.url,
                 }
+
+            # Message-request threads (from x.com/i/chat/requests) hide the
+            # compose box behind an Accept banner until the request is
+            # accepted. Accepting moves the thread to the primary inbox and
+            # does not notify the sender; the reply we're about to send is
+            # the visible action. No-op on normal threads (button absent).
+            try:
+                _accept = page.get_by_role(
+                    "button", name=re.compile(r"^Accept\b", re.I)
+                )
+                if _accept.count() > 0 and _accept.first.is_visible():
+                    _accept.first.click()
+                    page.wait_for_timeout(2000)
+                    print("[send_dm] accepted message request", file=sys.stderr)
+            except Exception:
+                pass
 
             # Find the message input box
             msg_box = None
@@ -2744,7 +2809,11 @@ def main():
         print(json.dumps(result, indent=2))
 
     elif cmd == "unread-dms":
-        result = unread_dms()
+        # --include-requests: also scan x.com/i/chat/requests (message
+        # requests from people we don't follow); those rows carry
+        # is_request=true.
+        _inc_req = "--include-requests" in sys.argv[2:]
+        result = unread_dms(include_requests=_inc_req)
         print(json.dumps(result, indent=2))
 
     elif cmd == "read-conversation":
