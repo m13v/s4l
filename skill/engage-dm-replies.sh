@@ -558,6 +558,7 @@ if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "twitter" ] || [ "$PLATFORM" = "x" ]; t
    This handles the encrypted DM passcode automatically (loaded from .env TWITTER_DM_PASSCODE).
    Returns JSON array with: author, handle, preview, time, thread_url, is_from_us, has_unread, is_request.
    Rows with `is_request: true` came from the Message Requests tab: cold inbound DMs from people we don't follow who messaged us first. They flow through the exact same steps below (backfill, filter, read, ensure-dm, log-inbound, mark-inspected); the only difference is a relevance gate at reply time (step 3f). If the script's stderr shows "requests tab unreachable" or "navigation hijacked", proceed with the primary-only rows it returned; do not re-run the scan.
+   **Request backlog cap: inspect at most the 10 NEWEST `is_request` threads per run** (they are already newest-first in the scan). A burst of accepts/replies across a weeks-old backlog in one cycle is a behavioral-fingerprint risk; the rest of the backlog drains 10 per cycle on subsequent runs. The cap applies only to `is_request` rows; normal threads are unaffected.
 
 1a. Backfill chat URLs for any existing X DM row still missing one. Cheap, idempotent, fills buttons for historical rows whose chat is still in the sidebar:
    ```bash
