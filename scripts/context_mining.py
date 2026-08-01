@@ -304,13 +304,20 @@ SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["action", "text", "why", "source_session", "source_date"],
+                "required": [
+                    "action",
+                    "title",
+                    "story",
+                    "conclusion",
+                    "source_session",
+                    "source_date",
+                ],
                 "properties": {
                     "action": {"type": "string", "enum": ["add", "revise"]},
                     "revises_line": {"type": ["integer", "null"]},
-                    "text": {"type": "string"},
-                    "why": {"type": "string"},
-                    "quote": {"type": "string"},
+                    "title": {"type": "string"},
+                    "story": {"type": "string"},
+                    "conclusion": {"type": "string"},
                     "source_session": {"type": "string"},
                     "source_date": {"type": "string"},
                 },
@@ -320,6 +327,15 @@ SCHEMA = {
 }
 
 
+def corpus_entry(p: dict) -> str:
+    """Render one approved proposal as a single corpus line (numbering is
+    line-based, so the entry must not contain newlines)."""
+    story = " ".join((p.get("story") or "").split())
+    concl = " ".join((p.get("conclusion") or "").split())
+    title = " ".join((p.get("title") or "").split())
+    return f"{title}: {story} Conclusion: {concl}"
+
+
 def build_prompt(sessions: list[dict], pending_props: list[dict] | None = None) -> str:
     corpus_lines = read_corpus_lines()
     corpus_block = (
@@ -327,11 +343,15 @@ def build_prompt(sessions: list[dict], pending_props: list[dict] | None = None) 
         if corpus_lines
         else "(the corpus is currently empty)"
     )
+    def _gist(r: dict) -> str:
+        # works for both the old one-line shape (text) and the story shape
+        return r.get("text") or f"{r.get('title', '')}: {r.get('conclusion', '')}"
+
     considered = [
-        {"status": r.get("status"), "text": r.get("text", "")} for r in read_ledger()[-60:]
-    ] + [{"status": "pending", "text": p.get("text", "")} for p in (pending_props or [])]
+        {"status": r.get("status"), "gist": _gist(r)} for r in read_ledger()[-60:]
+    ] + [{"status": "pending", "gist": _gist(p)} for p in (pending_props or [])]
     considered_block = (
-        "\n".join(f"- ({r['status']}) {r['text'][:200]}" for r in considered)
+        "\n".join(f"- ({r['status']}) {r['gist'][:200]}" for r in considered)
         if considered
         else "(nothing has been considered yet)"
     )
@@ -346,7 +366,7 @@ def build_prompt(sessions: list[dict], pending_props: list[dict] | None = None) 
 
 # Role
 
-You are the daily context miner for a personal "context corpus": a numbered list of durable, one-line memories distilled from the user's own Claude conversations. Each line is an insight worth keeping and potentially worth sharing with the world: a specific experience, a hard-won conclusion, a non-obvious observation, or a concrete data point.
+You are the daily context miner for a personal "context corpus": a numbered list of durable memories distilled from the user's own Claude conversations. Each entry is a short STORY plus a CONCLUSION: what actually happened (with its credible specifics) and the transferable lesson it taught. Entries are worth keeping and potentially worth sharing with the world: a specific experience, a hard-won conclusion, a non-obvious observation, or a concrete data point.
 
 The user is Matthew, a solo founder building S4L (a social-media autoposting agent), Fazm, Mediar, and related products, and doing everything else through Claude sessions: fundraising, debugging, ops, legal, marketing.
 
@@ -389,11 +409,12 @@ The user is Matthew, a solo founder building S4L (a social-media autoposting age
 # Your task
 
 Propose 0-3 corpus changes, and only what clears EVERY bar above; most days the
-right answer is 0 or 1. An empty proposals list is a valid, common answer. For each proposal:
-- action: "add" for a new line, or "revise" when a new learning supersedes an existing corpus line (set revises_line to that line's number).
-- text: the corpus line itself. One sentence, self-contained, max ~300 chars, written in the user's plainspoken voice. No hashtags, no em dashes.
-- why: one sentence on why this is worth keeping (what makes it non-obvious or shareable).
-- quote: a short supporting excerpt from the transcript (redact any secrets).
+right answer is 0 or 1. An empty proposals list is a valid, common answer. Each
+proposal is a small STORY with a CONCLUSION, not a bare aphorism:
+- action: "add" for a new entry, or "revise" when a new learning supersedes an existing corpus entry (set revises_line to that entry's number).
+- title: a short, specific handle for the insight (max ~70 chars, not clickbait).
+- story: 2-5 sentences telling what actually happened, in the user's plainspoken first-person voice. Keep the concrete specifics that make it credible and vivid (the numbers, the timeline, the failure mode, what was tried), but generalize or omit anything only an insider would care about. Anonymize people, redact secrets. No hashtags, no em dashes.
+- conclusion: 1-2 sentences stating the transferable lesson a stranger could apply to their own work. This is the part that must stand on its own.
 - source_session: the 8-char session id from the transcript header.
 - source_date: the session date (YYYY-MM-DD).
 
@@ -457,9 +478,8 @@ def _run_one_batch(sessions: list[dict], pending_props: list[dict], ns) -> list[
 
     stamped = []
     for p in obj.get("proposals") or []:
-        pid = "cm-" + hashlib.sha1(
-            (p.get("text", "") + p.get("source_session", "")).encode()
-        ).hexdigest()[:8]
+        key = (p.get("title") or p.get("text") or "") + p.get("source_session", "")
+        pid = "cm-" + hashlib.sha1(key.encode()).hexdigest()[:8]
         p["id"] = pid
         p["mined_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         stamped.append(p)
@@ -549,10 +569,13 @@ def cmd_review(_ns) -> int:
         else:
             head += "  ADD"
         print(head)
-        print(f"  text : {p.get('text', '')}")
-        print(f"  why  : {p.get('why', '')}")
-        if p.get("quote"):
-            print(f"  quote: {p['quote'][:220]}")
+        if p.get("title"):
+            print(f"  title: {p['title']}")
+            print(f"  story: {p.get('story', '')}")
+            print(f"  concl: {p.get('conclusion', '')}")
+        else:  # legacy one-line shape
+            print(f"  text : {p.get('text', '')}")
+            print(f"  why  : {p.get('why', '')}")
         print(f"  src  : {p.get('source_session', '?')} @ {p.get('source_date', '?')}")
     print("=" * 72)
     print(f"{len(props)} pending. approve/skip with: context_mining.py approve <id...>")
@@ -575,18 +598,21 @@ def _decide(ids: list[str], status: str) -> int:
             print(f"unknown id: {pid}")
             continue
         if status == "approved":
+            entry = corpus_entry(p) if p.get("title") else p.get("text", "")
             if p.get("action") == "revise" and p.get("revises_line"):
                 n = p["revises_line"]
                 if 0 < n <= len(corpus_lines):
-                    corpus_lines[n - 1] = p["text"]
+                    corpus_lines[n - 1] = entry
                 else:
-                    corpus_lines.append(p["text"])
+                    corpus_lines.append(entry)
             else:
-                corpus_lines.append(p["text"])
+                corpus_lines.append(entry)
         append_ledger(
             {
                 "id": pid,
                 "status": status,
+                "title": p.get("title", ""),
+                "conclusion": p.get("conclusion", ""),
                 "text": p.get("text", ""),
                 "source_session": p.get("source_session"),
                 "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
