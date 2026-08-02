@@ -1964,7 +1964,12 @@ class _ReviewController(NSObject):
         """NSTimer target (2026-07-15): re-renders the header's age/expiry
         label every second so its countdown visibly counts down without
         needing hover. Not a python_method -- NSTimer invokes this through
-        the ObjC runtime."""
+        the ObjC runtime. No-op when the rendered text is unchanged: the
+        label usually shows a coarse "3h"-style value that only changes
+        every few minutes, and unconditionally re-styling it dirtied one
+        layer per tile per second -- with a 130-tile canvas that was a
+        constant CoreAnimation commit churn keeping the app at ~15% CPU
+        while idle (2026-08-02 lag incident)."""
         if self._age_expiry_label is None:
             return
         try:
@@ -1975,6 +1980,9 @@ class _ReviewController(NSObject):
             )
             if not text:
                 return
+            if (text, urgent) == getattr(self, "_age_expiry_last", None):
+                return
+            self._age_expiry_last = (text, urgent)
             self._age_expiry_label.setStringValue_(text)
             self._age_expiry_label.setFont_(_font(11, urgent))
             self._age_expiry_label.setTextColor_(
