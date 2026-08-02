@@ -331,7 +331,9 @@ export function readPlan(batchId: string): Plan | null {
 }
 
 export function writePlan(batchId: string, plan: Plan): void {
-  fs.writeFileSync(planPath(batchId), JSON.stringify(plan, null, 2), "utf-8");
+  // Compact (no indent): the review store reached 65 MB with pretty-printing
+  // (2026-08-02 lag incident) and every reader pays the parse.
+  fs.writeFileSync(planPath(batchId), JSON.stringify(plan), "utf-8");
 }
 
 // Find the newest plan file when no batch id is supplied.
