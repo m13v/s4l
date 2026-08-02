@@ -715,7 +715,27 @@ class S4LMenuBar(rumps.App):
         self._tick_stats_at = 0.0
         self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
         self._reloc_timer.start()
+        # Store compaction: archive heavy fields off settled candidates so the
+        # review-queue file (and every 1s/5s poll that parses it) stays small.
+        # Boot pass runs off the main thread — the first pass after an
+        # un-compacted stretch can chew through tens of MB.
+        self._compacted_at = 0.0
+        self._compact_store_async()
         self._tick(None)
+
+    def _compact_store_async(self):
+        self._compacted_at = time.time()
+
+        def run():
+            try:
+                n = st.compact_store()
+                if n:
+                    sys.stderr.write(f"[s4l-menubar] store compaction archived {n} candidate(s)\n")
+                    sys.stderr.flush()
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True, name="s4l-compact-store").start()
 
     # ---- side effects -----------------------------------------------------
     def _open_claude(self, _=None):
@@ -3009,6 +3029,10 @@ class S4LMenuBar(rumps.App):
                     sys.stderr.flush()
             except Exception:
                 pass
+        # Hourly store compaction keeps the review-queue file small as posts
+        # settle (boot already ran one pass; see _compact_store_async).
+        if now_rc - self._compacted_at >= 3600:
+            self._compact_store_async()
 
     # ---- draft review pop-ups ---------------------------------------------
     def _posting_activity_label_locked(self):
