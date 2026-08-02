@@ -790,34 +790,63 @@ def candidate_state(c):
 # append-forever ledger keeps every byte while the hot file stays small.
 HEAVY_ARCHIVE_FIELDS = ("reddit_plan_meta", "reddit_decision", "thread_selftext")
 
+# Audit-only blobs inside reddit_plan_meta.style_assignment, stamped by
+# engagement_styles.pick_style_for_post "for audit" and copied onto EVERY
+# reddit candidate by merge_review_queue. distribution_snapshot alone was
+# ~107 KB per candidate (7.6 MB across one pending backlog). Nothing on the
+# card-render or posting path reads them (post_reddit.py --phase post uses
+# only .style/.mode; index.ts forwards the dict opaquely), so they are safe
+# to archive off candidates in ANY state, pending included.
+STYLE_AUDIT_FIELDS = ("distribution_snapshot", "reference_styles")
+
 ARCHIVE_STORE = "review-queue-archive.jsonl"
 
 
 def compact_store():
-    """Archive heavy fields off SETTLED (posted/terminal) candidates into
-    review-queue-archive.jsonl, then rewrite the store compactly. Runs under
-    the same store lock as every other python writer. The archive line lands
-    (flush+fsync) BEFORE the field is stripped, so no data is ever lost — a
-    crash in between only risks a duplicate archive line, never a missing one.
-    approved/post_failed candidates are left intact: a (re-)approval drain
-    still needs their reddit_decision/reddit_plan_meta. Returns the number of
-    candidates compacted (0 when there was nothing to do), None on failure."""
+    """Archive heavy payloads out of the hot store into review-queue-archive
+    .jsonl, then rewrite the store compactly. Two passes over the candidates:
+    HEAVY_ARCHIVE_FIELDS come off SETTLED (posted/terminal) candidates only —
+    approved/post_failed rows still need reddit_decision/reddit_plan_meta for
+    a (re-)approval drain — while STYLE_AUDIT_FIELDS come off every candidate.
+    Runs under the same store lock as every other python writer. The archive
+    lines land (flush+fsync) BEFORE any field is stripped, so no data is ever
+    lost — a crash in between only risks a duplicate archive line, never a
+    missing one. Returns the number of candidates compacted (0 when there was
+    nothing to do), None on failure."""
 
     ap = str(Path(state_dir()) / ARCHIVE_STORE)
 
     def mutate(data):
-        records = []
+        records = []  # (candidate, archived-fields dict, strip callback)
         for c in data.get("candidates") or []:
-            if candidate_state(c) not in ("posted", "terminal"):
-                continue
-            fields = {k: c[k] for k in HEAVY_ARCHIVE_FIELDS if c.get(k)}
-            if not fields:
-                continue
-            records.append((c, fields))
+            fields = {}
+            settled = candidate_state(c) in ("posted", "terminal")
+            if settled:
+                fields.update(
+                    {k: c[k] for k in HEAVY_ARCHIVE_FIELDS if c.get(k)}
+                )
+            sa = (c.get("reddit_plan_meta") or {}).get("style_assignment")
+            audit = (
+                {}
+                if (settled and "reddit_plan_meta" in fields) or not isinstance(sa, dict)
+                else {k: sa[k] for k in STYLE_AUDIT_FIELDS if sa.get(k)}
+            )
+            if audit:
+                fields["style_assignment_audit"] = audit
+
+            def strip(c=c, settled=settled, sa=sa, audit=audit):
+                if settled:
+                    for k in HEAVY_ARCHIVE_FIELDS:
+                        c.pop(k, None)
+                for k in audit:
+                    sa.pop(k, None)
+
+            if fields:
+                records.append((c, fields, strip))
         if not records:
             return 0
         with open(ap, "a") as f:
-            for c, fields in records:
+            for c, fields, _ in records:
                 f.write(
                     json.dumps(
                         {
@@ -833,9 +862,8 @@ def compact_store():
                 )
             f.flush()
             os.fsync(f.fileno())
-        for c, fields in records:
-            for k in fields:
-                c.pop(k, None)
+        for c, fields, strip in records:
+            strip()
             c["archived_fields"] = sorted(
                 set(c.get("archived_fields") or []) | set(fields)
             )
