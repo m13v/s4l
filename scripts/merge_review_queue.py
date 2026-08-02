@@ -101,7 +101,9 @@ def _atomic_write(path: str, obj) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
-        json.dump(obj, f, indent=2)
+        # Compact separators: the review store reached 65 MB with indent=2
+        # (2026-08-02 lag incident) and every reader pays the parse.
+        json.dump(obj, f, separators=(",", ":"))
     os.replace(tmp, path)
 
 
