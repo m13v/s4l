@@ -721,7 +721,9 @@ def _store_update(mutate):
                         data = {"candidates": []}
                     rv = mutate(data)
                     tmp = f"{sp}.tmp.{os.getpid()}"
-                    Path(tmp).write_text(json.dumps(data, indent=2))
+                    # Compact separators: this file reached 65 MB with indent=2
+                    # (2026-08-02 lag incident) and every reader pays the parse.
+                    Path(tmp).write_text(json.dumps(data, separators=(",", ":")))
                     os.replace(tmp, sp)
                     return rv
                 finally:
@@ -777,6 +779,69 @@ def candidate_state(c):
     if c.get("approved") is True:
         return "approved"
     return "awaiting_review"
+
+
+# Draft-time payloads that are only needed while a candidate can still POST
+# (awaiting_review: card rendering; approved/post_failed: the drain path
+# rebuilds a mini-plan from reddit_decision/reddit_plan_meta). Once a candidate
+# is posted or terminal these blobs are dead weight — and they dominated the
+# 65 MB store that caused the 2026-08-02 UI lag (single reddit candidates
+# carried ~180 KB). Compaction moves them to an append-only sidecar so the
+# append-forever ledger keeps every byte while the hot file stays small.
+HEAVY_ARCHIVE_FIELDS = ("reddit_plan_meta", "reddit_decision", "thread_selftext")
+
+ARCHIVE_STORE = "review-queue-archive.jsonl"
+
+
+def compact_store():
+    """Archive heavy fields off SETTLED (posted/terminal) candidates into
+    review-queue-archive.jsonl, then rewrite the store compactly. Runs under
+    the same store lock as every other python writer. The archive line lands
+    (flush+fsync) BEFORE the field is stripped, so no data is ever lost — a
+    crash in between only risks a duplicate archive line, never a missing one.
+    approved/post_failed candidates are left intact: a (re-)approval drain
+    still needs their reddit_decision/reddit_plan_meta. Returns the number of
+    candidates compacted (0 when there was nothing to do), None on failure."""
+
+    ap = str(Path(state_dir()) / ARCHIVE_STORE)
+
+    def mutate(data):
+        records = []
+        for c in data.get("candidates") or []:
+            if candidate_state(c) not in ("posted", "terminal"):
+                continue
+            fields = {k: c[k] for k in HEAVY_ARCHIVE_FIELDS if c.get(k)}
+            if not fields:
+                continue
+            records.append((c, fields))
+        if not records:
+            return 0
+        with open(ap, "a") as f:
+            for c, fields in records:
+                f.write(
+                    json.dumps(
+                        {
+                            "candidate_id": c.get("candidate_id"),
+                            "our_url": c.get("our_url"),
+                            "thread_url": c.get("thread_url"),
+                            "archived_at": time_iso(),
+                            "fields": fields,
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            f.flush()
+            os.fsync(f.fileno())
+        for c, fields in records:
+            for k in fields:
+                c.pop(k, None)
+            c["archived_fields"] = sorted(
+                set(c.get("archived_fields") or []) | set(fields)
+            )
+        return len(records)
+
+    return _store_update(mutate)
 
 
 def store_stamp_decision(batch, decision):
@@ -1001,13 +1066,22 @@ def store_reconcile_decisions(batch, decisions):
     return fixed
 
 
+# (path, mtime_ns, size) -> posted count. review_queue_posted_count() is on the
+# menubar's 1-second activity poll; without this cache that poll re-parsed the
+# whole store every tick, which saturated the AppKit main thread once the file
+# grew (2026-08-02: 65 MB, 98% CPU, multi-second card lag).
+_posted_count_cache = {"key": None, "count": None}
+
+
 def review_queue_posted_count():
     """Posts that have LANDED in the review-queue plan — the durable, cross-process
     truth. Independent of the menu bar's in-memory burst queue (which dies on a
     restart) and of WHICH process is posting (the menu bar worker, the autopilot,
     or a host agent draining via approve_drafts). Returns the posted count, or None
     when the plan can't be read. Drives the menu-bar posting indicator so progress
-    stays visible regardless of how the drain is driven."""
+    stays visible regardless of how the drain is driven. Cached on the plan
+    file's (mtime, size): the caller polls every second, the file changes only
+    when a writer lands."""
     plan_path = None
     req = read_review_request()
     if req:
@@ -1016,11 +1090,22 @@ def review_queue_posted_count():
         plan_path = store_path()
     if not Path(plan_path).exists():
         plan_path = "/tmp/twitter_cycle_plan_review-queue.json"
+    try:
+        stt = os.stat(plan_path)
+        cache_key = (os.path.realpath(plan_path), stt.st_mtime_ns, stt.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None and _posted_count_cache["key"] == cache_key:
+        return _posted_count_cache["count"]
     plan = read_plan(plan_path)
     cands = (plan or {}).get("candidates")
-    if not cands:
-        return None
-    return sum(1 for c in cands if candidate_state(c) == "posted")
+    count = None if not cands else sum(
+        1 for c in cands if candidate_state(c) == "posted"
+    )
+    if cache_key is not None:
+        _posted_count_cache["key"] = cache_key
+        _posted_count_cache["count"] = count
+    return count
 
 
 def review_drafts(plan, batch="review-queue"):
