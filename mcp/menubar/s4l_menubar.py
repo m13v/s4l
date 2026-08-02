@@ -27,6 +27,20 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
+
+# PyObjC emits an ObjCPointerWarning for every CGColor() handed to a CALayer
+# (s4l_card's tile styling). The message embeds the pointer address, so the
+# warnings module's once-per-location dedup never matches and a single card
+# render sprayed ~100 lines/sec into menubar.err.log (13k+ lines by the
+# 2026-08-02 lag incident). The pointers are handled correctly; silence the
+# category before any card module loads.
+try:
+    import objc
+
+    warnings.filterwarnings("ignore", category=objc.ObjCPointerWarning)
+except Exception:
+    pass
 
 # --- stderr timestamp wrapper -------------------------------------------------
 # menubar.err.log (this process's stderr, redirected by the launchd plist) has
