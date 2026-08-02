@@ -461,14 +461,13 @@ class _CanvasController(NSObject):
 
     @objc.python_method
     def _reflow_from(self, start_idx):
-        """Rebuild every slot's CONTENT from start_idx onward from the
-        current self._order -- slot POSITIONS never move, only which draft
-        occupies each one. Used after a decision removes one entry so
-        everything after it shifts into the vacated grid position ("snake"
-        reflow, 2026-07-16 user direction) instead of independently
-        refilling in place. In-progress edits on any rebuilt tile are lost
-        -- ranking order takes priority over preserving an edit on a card
-        the reviewer hadn't yet acted on."""
+        """Build every slot's CONTENT from start_idx onward from the current
+        self._order. Only two callers: the initial grid build (start 0) and
+        extend_drafts (start = old length, so only the NEW empty slots get
+        content). Decisions no longer come through here -- rebuilding ~130
+        full tile views per click was the dominant cost of an approval on a
+        big backlog (2026-08-02 lag incident, second act); _remove_and_reflow
+        now MOVES the surviving slot views instead."""
         for i in range(start_idx, len(self._slots)):
             slot = self._slots[i]
             for sv in list(slot["view"].subviews()):
@@ -476,8 +475,8 @@ class _CanvasController(NSObject):
             d = self._order[i]
             tile = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_focus_hostView_hostWindow_(
                 [d],
-                self._tile_decision_cb(i),
-                self._tile_complete_cb(i),
+                self._tile_decision_cb(slot),
+                self._tile_complete_cb(slot),
                 True,
                 slot["view"],
                 self._panel,
@@ -487,19 +486,23 @@ class _CanvasController(NSObject):
 
     @objc.python_method
     def _remove_and_reflow(self, n):
-        """Pop draft `n` out of self._order, drop one slot (the grid is one
-        shorter -- no spare capacity to backfill), and reflow every slot
-        from its old position onward so subsequent cards shift up into the
-        gap in rank order."""
+        """Pop draft `n` out of self._order, drop ITS slot (view and all),
+        and shift every later slot's VIEW up into the vacated grid position
+        ("snake" reflow, 2026-07-16 user direction). Positions move, content
+        doesn't: each surviving tile keeps its live view -- O(N) setFrame
+        calls instead of O(N) full tile rebuilds (2026-08-02 lag fix), and
+        an in-progress edit on a later card now survives earlier decisions
+        instead of being clobbered by the rebuild."""
         try:
             idx = next(i for i, d in enumerate(self._order) if d.get("n") == n)
         except StopIteration:
             return
         self._order.pop(idx)
-        if self._slots:
-            last = self._slots.pop()
-            last["view"].removeFromSuperview()
-        self._reflow_from(idx)
+        if idx < len(self._slots):
+            gone = self._slots.pop(idx)
+            gone["view"].removeFromSuperview()
+        for i in range(idx, len(self._slots)):
+            self._slots[i]["view"].setFrame_(self._slot_frame(i))
         self._resize_doc()
         self._refresh_header()
         # Last card decided -> nothing left to review, so close the canvas
@@ -535,7 +538,7 @@ class _CanvasController(NSObject):
             _log(f"canvas discard-all handler failed: {e}")
 
     @objc.python_method
-    def _tile_decision_cb(self, slot_idx):
+    def _tile_decision_cb(self, slot):
         def _cb(decision):
             self._decisions.append(decision)
             self._last_decision_at = time.time()
@@ -549,16 +552,16 @@ class _CanvasController(NSObject):
         return _cb
 
     @objc.python_method
-    def _tile_complete_cb(self, slot_idx):
+    def _tile_complete_cb(self, slot):
         def _cb(_tile_decisions):
             # The tile's own single-draft stack finished -- remove it from
             # the ranking and let everything after it shift up ("snake"
-            # reflow; see _remove_and_reflow). slot_idx is read lazily at
-            # call time (not captured as a fixed n) because a still-live
-            # tile ahead of it could have already shifted this slot's
-            # content since the closure was created.
-            slot = self._slots[slot_idx] if slot_idx < len(self._slots) else None
-            n = slot["n"] if slot else None
+            # reflow; see _remove_and_reflow). Closing over the SLOT DICT
+            # (not a positional index) keeps the lookup correct no matter
+            # how many earlier slots have been popped since this closure
+            # was created: a slot keeps its `n` for life now that reflow
+            # moves views instead of rebuilding content.
+            n = slot["n"]
             if n is not None:
                 self._remove_and_reflow(n)
 
