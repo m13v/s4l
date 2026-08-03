@@ -74,28 +74,20 @@ def _wait_if_needed():
 def _fetch_via_browser(url):
     """Fetch a Reddit URL through the reddit-harness logged-in Chrome.
 
-    Returns the raw response body (str) on HTTP 200, else None so the caller
-    falls back to urllib. This is the 2026-05-29 transport swap: Reddit began
-    403ing urllib/curl on *.json from residential IPs on 2026-05-28, but a
-    same-origin fetch() from inside the logged-in harness browser returns 200.
+    Browser-ONLY transport (2026-08-03, user decision: no urllib fallback).
+    Reddit's TLS-fingerprint wall (2026-05-28) 403s urllib/curl on *.json
+    unconditionally, so the old fallback could never succeed: it burned ~2s
+    per browser hiccup and then lost the query anyway. Transient failures
+    (Reddit 503s, harness contention) get ONE in-transport retry instead.
+    The REDDIT_FETCH_BACKEND=urllib debug knob is gone for the same reason:
+    forcing a transport that is guaranteed to 403 debugs nothing.
 
-    Gated by REDDIT_FETCH_BACKEND: default ("harness") uses the browser first;
-    set REDDIT_FETCH_BACKEND=urllib to force the legacy path (e.g. for debugging).
-    Also short-circuits to None when REDDIT_CDP_URL is unset AND no harness is
-    expected, so plain `urllib`-only environments are unaffected.
+    Returns the raw response body (str) on HTTP 200. Raises on final failure,
+    urllib.error.HTTPError for HTTP statuses and urllib.error.URLError for
+    transport-level failures, matching the exception shapes callers already
+    handle from the urllib era. 429 keeps the old inline-wait contract
+    (absorb a short wait, else RateLimitedError).
     """
-    # Browser-ONLY transport (2026-08-03, user decision: no urllib fallback).
-    # Reddit's TLS-fingerprint wall (2026-05-28) 403s urllib/curl on *.json
-    # unconditionally, so the old fallback could never succeed: it burned ~2s
-    # per browser hiccup and then lost the query anyway. Transient failures
-    # (Reddit 503s, harness contention) get ONE in-transport retry instead.
-    # The REDDIT_FETCH_BACKEND=urllib debug knob is gone for the same reason:
-    # forcing a transport that is guaranteed to 403 debugs nothing.
-    #
-    # Raises on final failure — urllib.error.HTTPError for HTTP statuses,
-    # urllib.error.URLError for transport-level failures — matching the
-    # exception shapes callers already handle from the urllib era. 429 keeps
-    # the old inline-wait contract (absorb a short wait, else RateLimitedError).
     from reddit_browser_fetch import browser_get_json
 
     last_status = 0
