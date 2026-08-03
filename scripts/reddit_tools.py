@@ -84,61 +84,59 @@ def _fetch_via_browser(url):
     Also short-circuits to None when REDDIT_CDP_URL is unset AND no harness is
     expected, so plain `urllib`-only environments are unaffected.
     """
-    if os.environ.get("REDDIT_FETCH_BACKEND", "harness").lower() == "urllib":
-        return None
-    try:
-        from reddit_browser_fetch import browser_get_json
-    except Exception as e:
-        sys.stderr.write(f"[reddit_tools] browser fetch unavailable ({e}); urllib fallback\n")
-        return None
-    try:
+    # Browser-ONLY transport (2026-08-03, user decision: no urllib fallback).
+    # Reddit's TLS-fingerprint wall (2026-05-28) 403s urllib/curl on *.json
+    # unconditionally, so the old fallback could never succeed: it burned ~2s
+    # per browser hiccup and then lost the query anyway. Transient failures
+    # (Reddit 503s, harness contention) get ONE in-transport retry instead.
+    # The REDDIT_FETCH_BACKEND=urllib debug knob is gone for the same reason:
+    # forcing a transport that is guaranteed to 403 debugs nothing.
+    #
+    # Raises on final failure — urllib.error.HTTPError for HTTP statuses,
+    # urllib.error.URLError for transport-level failures — matching the
+    # exception shapes callers already handle from the urllib era. 429 keeps
+    # the old inline-wait contract (absorb a short wait, else RateLimitedError).
+    from reddit_browser_fetch import browser_get_json
+
+    last_status = 0
+    for attempt in (1, 2):
         body, status = browser_get_json(url)
         if status == 200 and body:
             return body
-        sys.stderr.write(f"[reddit_tools] browser fetch status={status} for {url[:80]}; urllib fallback\n")
-    except Exception as e:
-        sys.stderr.write(f"[reddit_tools] browser fetch error ({e}); urllib fallback\n")
-    return None
+        last_status = status
+        if status == 429:
+            # Browser transport exposes no X-Ratelimit-Reset header; assume
+            # Reddit's standard 60s window.
+            _write_ratelimit(0, 60)
+            if 60 > MAX_INLINE_WAIT_SECONDS:
+                raise RateLimitedError(60)
+            if attempt == 1:
+                print("Rate limited. Waiting 62s...", file=sys.stderr)
+                time.sleep(62)
+            continue
+        sys.stderr.write(
+            f"[reddit_tools] browser fetch status={status} for {url[:80]} (attempt {attempt}/2)\n"
+        )
+        if attempt == 1:
+            time.sleep(2.5)
+    if last_status == 429:
+        raise RateLimitedError(60)
+    if last_status:
+        raise urllib.error.HTTPError(
+            url, last_status,
+            f"reddit browser fetch failed (status={last_status})", None, None,
+        )
+    raise urllib.error.URLError(f"reddit browser transport failed for {url[:80]}")
 
 
 def _do_request(url):
-    """Make a Reddit API request with rate limit handling.
+    """Make a Reddit API request via the harness browser (sole transport).
 
-    Primary transport is the reddit-harness browser (see _fetch_via_browser);
-    urllib is the silent fallback. On 429 (urllib path): raises RateLimitedError
-    immediately if the reset would require a long wait, else absorbs short waits.
+    429 handling (inline wait / RateLimitedError) lives inside
+    _fetch_via_browser; HTTP and transport failures raise there too.
     """
     _wait_if_needed()
-    # Browser-first (bypasses Reddit's urllib 403 wall). Falls through to urllib
-    # if the harness is down or returns a non-200.
-    _body = _fetch_via_browser(url)
-    if _body is not None:
-        try:
-            return json.loads(_body)
-        except Exception:
-            sys.stderr.write(f"[reddit_tools] browser body not JSON for {url[:80]}; urllib fallback\n")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        resp = urllib.request.urlopen(req, timeout=20)
-        remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
-        reset = float(resp.headers.get("X-Ratelimit-Reset", 0))
-        _write_ratelimit(remaining, reset)
-        return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            reset = float(e.headers.get("X-Ratelimit-Reset", 60))
-            _write_ratelimit(0, reset)
-            if reset > MAX_INLINE_WAIT_SECONDS:
-                raise RateLimitedError(reset)
-            print(f"Rate limited. Waiting {int(reset)+2}s...", file=sys.stderr)
-            time.sleep(int(reset) + 2)
-            # Retry once
-            resp = urllib.request.urlopen(req, timeout=20)
-            remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
-            reset2 = float(resp.headers.get("X-Ratelimit-Reset", 0))
-            _write_ratelimit(remaining, reset2)
-            return json.loads(resp.read())
-        raise
+    return json.loads(_fetch_via_browser(url))
 
 
 def batch_fetch_info(thing_ids, user_agent=USER_AGENT):
@@ -158,41 +156,9 @@ def batch_fetch_info(thing_ids, user_agent=USER_AGENT):
         ids_str = ",".join(chunk)
         url = f"https://old.reddit.com/api/info.json?id={ids_str}"
         _wait_if_needed()
-        # Browser-first transport (Reddit 403s urllib on *.json). urllib fallback.
-        _body = _fetch_via_browser(url)
-        if _body is not None:
-            try:
-                data = json.loads(_body)
-                for child in data.get("data", {}).get("children", []):
-                    cd = child.get("data", {})
-                    name = cd.get("name")
-                    if name:
-                        results[name] = cd
-                continue
-            except Exception:
-                sys.stderr.write("[reddit_tools] browser info.json not JSON; urllib fallback\n")
-        req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-        try:
-            resp = urllib.request.urlopen(req, timeout=30)
-            remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
-            reset = float(resp.headers.get("X-Ratelimit-Reset", 0))
-            _write_ratelimit(remaining, reset)
-            data = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                reset = float(e.headers.get("X-Ratelimit-Reset", 60))
-                _write_ratelimit(0, reset)
-                if reset > MAX_INLINE_WAIT_SECONDS:
-                    raise RateLimitedError(reset)
-                print(f"Rate limited. Waiting {int(reset)+2}s...", file=sys.stderr)
-                time.sleep(int(reset) + 2)
-                resp = urllib.request.urlopen(req, timeout=30)
-                remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
-                reset2 = float(resp.headers.get("X-Ratelimit-Reset", 0))
-                _write_ratelimit(remaining, reset2)
-                data = json.loads(resp.read())
-            else:
-                raise
+        # Browser-only transport (see _fetch_via_browser; raises on failure,
+        # including the RateLimitedError this loop's callers already handle).
+        data = json.loads(_fetch_via_browser(url))
 
         for child in data.get("data", {}).get("children", []):
             d = child.get("data", {})
@@ -620,15 +586,9 @@ def _html_postable_check(thread_url):
     try:
         url = thread_url.replace("www.reddit.com", "old.reddit.com").rstrip("/") + "/"
         _wait_if_needed()
-        # Browser-first transport (Reddit 403s urllib). urllib fallback below.
+        # Browser-only transport (see _fetch_via_browser). Raises on failure;
+        # the outer except maps that to None ("network error") as before.
         html = _fetch_via_browser(url)
-        if html is None:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            resp = urllib.request.urlopen(req, timeout=15)
-            remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
-            reset = float(resp.headers.get("X-Ratelimit-Reset", 0))
-            _write_ratelimit(remaining, reset)
-            html = resp.read().decode("utf-8", errors="ignore")
         # Scope the lock check to the post header only. r/Entrepreneur (and
         # similar subs) sticky an AutoMod comment that is itself locked,
         # rendering `<span class="locked-tagline">locked comment</span>`
