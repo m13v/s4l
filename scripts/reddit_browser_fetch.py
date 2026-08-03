@@ -165,7 +165,11 @@ def browser_get_json(url, cdp_url=None, timeout_ms=25000):
                 if page is None and ctx.pages:
                     page = ctx.pages[0]
                 if page is None:
-                    page = ctx.new_page()
+                    # Zero pages: create in the BACKGROUND (2026-08-03). A plain
+                    # new_page() is a foreground Target.createTarget, which
+                    # activates Chrome and steals macOS app focus.
+                    from browser_lifecycle import background_new_page
+                    page = background_new_page(browser, ctx)
                 # Load the matching host root so the subsequent fetch() is same-origin
                 # (no CORS between www/old) and carries the logged-in session.
                 try:
