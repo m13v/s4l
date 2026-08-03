@@ -441,7 +441,11 @@ def _get_browser_and_page_raw(playwright):
                         return cdp_browser, pg, True
                 if chosen.pages:
                     return cdp_browser, chosen.pages[0], True
-                page = chosen.new_page()
+                # Zero pages: create in the BACKGROUND (2026-08-03). A plain
+                # new_page() here is a foreground Target.createTarget, which
+                # activates Chrome and steals macOS app focus.
+                from browser_lifecycle import background_new_page
+                page = background_new_page(cdp_browser, chosen)
                 return cdp_browser, page, True
             # No usable context: do NOT close the CDP browser (would kill the
             # harness Chrome); just disconnect by falling through.
@@ -464,13 +468,15 @@ def _get_browser_and_page_raw(playwright):
                     for c in cookies
                 )
                 if has_session:
-                    # Reuse an existing tab (no focus-steal); only new_page if none.
+                    # Reuse an existing tab (no focus-steal); only create if none,
+                    # and then in the BACKGROUND (2026-08-03, see above).
                     for pg in ctx.pages:
                         if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
                             return cdp_browser, pg, True
                     if ctx.pages:
                         return cdp_browser, ctx.pages[0], True
-                    page = ctx.new_page()
+                    from browser_lifecycle import background_new_page
+                    page = background_new_page(cdp_browser, ctx)
                     return cdp_browser, page, True
             try:
                 cdp_browser.close()
