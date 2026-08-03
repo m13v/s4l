@@ -77,6 +77,36 @@ def park_tabs(cdp_base: str, host_markers, park_url: str, label: str) -> None:
         pass
 
 
+def background_new_page(browser, context, url: str = "about:blank", timeout_ms: int = 10_000):
+    """Create a Playwright page WITHOUT raising the Chrome window.
+
+    Playwright's context.new_page() maps to a FOREGROUND Target.createTarget,
+    which activates Chrome on macOS and steals app focus (the July 2026
+    focus-steal class; same call the bh helpers and the harness daemon were
+    already fixed to avoid). Playwright's public API has no background
+    option, so this creates the target via a browser-level CDP session with
+    background:true and returns the Page that `context` adopts for it.
+
+    ONE shared implementation for every attach path that previously called
+    context.new_page() on the harness (reddit_browser, twitter_browser,
+    reddit_browser_fetch). Falls back to context.new_page() if the CDP path
+    fails: a rare focus blip beats a dead pipeline.
+    """
+    try:
+        cdp = browser.new_browser_cdp_session()
+        try:
+            with context.expect_page(timeout=timeout_ms) as pg_info:
+                cdp.send("Target.createTarget", {"url": url, "background": True})
+            return pg_info.value
+        finally:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+    except Exception:
+        return context.new_page()
+
+
 def register_park_on_exit(cdp_base: str, host_markers, park_url: str, label: str) -> None:
     """Arm park_tabs to run at process exit, once per (endpoint, park_url).
     Call from a platform lib's get_browser_and_page so only processes that
