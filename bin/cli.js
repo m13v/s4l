@@ -456,6 +456,18 @@ function installBrowserHarness() {
         label: 'focus-suppression + tab-event observability',
         absentWarn: 'harness Chrome may steal OS focus on every tab switch',
       },
+      {
+        // Daemon attach_first_page: reuse an existing blank tab and create in
+        // the BACKGROUND when truly tabless. Without it, a blank-only browser
+        // traps the daemon in a stale-session loop where every re-attach mints
+        // a foreground about:blank = one macOS focus steal per iteration
+        // (2026-08-03, 30+/day on the reddit harness).
+        file: 'browser-harness-daemon-blank-tab-attach.patch',
+        sentinelFile: path.join('src', 'browser_harness', 'daemon.py'),
+        sentinelStr: 'no page tabs at all',
+        label: 'daemon blank-tab background attach',
+        absentWarn: 'harness daemon re-attach may pop the Chrome window (focus steal)',
+      },
     ];
     for (const p of vendoredPatches) {
       const patchPath = path.join(PKG_ROOT, 'scripts', 'patches', p.file);

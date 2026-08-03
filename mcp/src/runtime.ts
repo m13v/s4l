@@ -38,6 +38,84 @@ const BROWSER_HARNESS_REPO = "https://github.com/browser-use/browser-harness";
 const HARNESS_DIR = path.join(os.homedir(), "Developer", "browser-harness");
 const HARNESS_BIN = path.join(os.homedir(), ".local", "bin", "browser-harness");
 
+// Vendored fixes applied on top of the pin (we don't control upstream).
+// KEEP IN SYNC WITH bin/cli.js `vendoredPatches`. Each: patch file under
+// scripts/patches/ + a sentinel (file, substring) that means the fix is
+// already present (upstream merged it, or we applied it), so a non-applying
+// patch only warns when the fix is genuinely absent. Order matters: patches
+// are generated to apply sequentially onto the pristine pin (each also
+// applies standalone, verified 2026-08-03). NEVER fail install over these.
+const HARNESS_VENDORED_PATCHES = [
+  {
+    file: "browser-harness-loopback-cdp-proxy.patch",
+    sentinelFile: path.join("src", "browser_harness", "admin.py"),
+    sentinelStr: "cdp_urlopen",
+    label: "loopback-proxy",
+    absentWarn: "CDP probes may 403 behind a system proxy",
+  },
+  {
+    // Suppress OS-focus-stealing Target.activateTarget on offscreen automation
+    // harnesses; [bh_tab_event] observability. Was previously applied only by
+    // the npm installer (bin/cli.js) — a bare .mcpb provision skipped it, so
+    // mcpb-only boxes ran upstream helpers that steal focus on every tab
+    // switch (gap closed 2026-08-03).
+    file: "browser-harness-focus-and-observability.patch",
+    sentinelFile: path.join("src", "browser_harness", "helpers.py"),
+    sentinelStr: "_is_offscreen_harness",
+    label: "focus-suppression + tab-event observability",
+    absentWarn: "harness Chrome may steal OS focus on every tab switch",
+  },
+  {
+    // Daemon attach_first_page: reuse an existing blank tab and create in the
+    // BACKGROUND when truly tabless. Without it, a blank-only browser traps
+    // the daemon in a stale-session loop where every re-attach mints a
+    // foreground about:blank = one macOS focus steal per iteration.
+    file: "browser-harness-daemon-blank-tab-attach.patch",
+    sentinelFile: path.join("src", "browser_harness", "daemon.py"),
+    sentinelStr: "no page tabs at all",
+    label: "daemon blank-tab background attach",
+    absentWarn: "harness daemon re-attach may pop the Chrome window (focus steal)",
+  },
+];
+
+/** Apply every vendored patch to HARNESS_DIR (check-then-apply, sentinel-aware).
+ * Returns a human-readable summary; never throws. */
+async function applyHarnessVendoredPatches(): Promise<string> {
+  const results: string[] = [];
+  for (const p of HARNESS_VENDORED_PATCHES) {
+    const patchPath = path.join(MATERIALIZED_REPO, "scripts", "patches", p.file);
+    if (!fs.existsSync(patchPath)) {
+      results.push(`${p.label}: patch file missing`);
+      continue;
+    }
+    const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", patchPath], {
+      timeoutMs: 30000,
+    });
+    if (chk.code === 0) {
+      const app = await sh("git", ["-C", HARNESS_DIR, "apply", patchPath], { timeoutMs: 30000 });
+      results.push(`${p.label}: ${app.code === 0 ? "applied" : `apply failed (${app.code})`}`);
+      continue;
+    }
+    let present = false;
+    try {
+      present = fs
+        .readFileSync(path.join(HARNESS_DIR, p.sentinelFile), "utf-8")
+        .includes(p.sentinelStr);
+    } catch {
+      /* file moved — fall through to the warning */
+    }
+    if (present) {
+      results.push(`${p.label}: already present`);
+    } else {
+      console.error(
+        `[runtime] browser-harness ${p.label} patch no longer applies and the fix is absent upstream; ${p.absentWarn}`
+      );
+      results.push(`${p.label}: ABSENT (patch stale)`);
+    }
+  }
+  return results.join("; ");
+}
+
 // The harness drives a REAL Google Chrome over CDP (see twitter-backend.sh
 // _resolve_chrome_bin). Nothing installs Chrome, the runtime only ever
 // downloaded Playwright's Chromium (which the cycle does NOT use), so a .mcpb
@@ -798,42 +876,38 @@ export async function ensureHarnessPatched(): Promise<{ ok: boolean; detail: str
     // while another process is actively provisioning it (cloning/resetting/
     // installing) rather than racing on the same checkout.
     if (anotherProcessProvisioning()) return { ok: false, detail: "provisioning in progress elsewhere" };
-    // Version marker of the CURRENT vendored patch: a symbol that exists only
-    // in its newest revision (v2 added the daemon.py websocket-proxy
-    // neutralization after v1's cdp_urlopen alone proved insufficient — the
-    // WS dial still routed through the macOS system proxy and died with
-    // "proxy rejected connection: HTTP 503"). Bump this string whenever the
-    // patch gains a new hunk, or upgraded installs will silently keep the
-    // previous revision.
+    // Version markers of the CURRENT vendored patches. A patch revision's
+    // marker is a symbol that exists only in its newest revision (the proxy
+    // patch's v2 added the daemon.py websocket-proxy neutralization —
+    // s4l_no_proxy_ws — after v1's cdp_urlopen alone proved insufficient).
+    // A NEW fix gets a NEW patch file + sentinel (see HARNESS_VENDORED_PATCHES)
+    // rather than new hunks in an old patch, or upgraded installs whose old
+    // sentinel still matches would silently keep the previous revision.
     const daemonPy = path.join(HARNESS_DIR, "src", "browser_harness", "daemon.py");
     if (!fs.existsSync(daemonPy)) return { ok: false, detail: "harness not installed yet" };
-    if (fs.readFileSync(daemonPy, "utf-8").includes("s4l_no_proxy_ws")) {
+    const daemonSrc = fs.readFileSync(daemonPy, "utf-8");
+    const helpersPy = path.join(HARNESS_DIR, "src", "browser_harness", "helpers.py");
+    const helpersSrc = fs.existsSync(helpersPy) ? fs.readFileSync(helpersPy, "utf-8") : "";
+    if (
+      daemonSrc.includes("s4l_no_proxy_ws") &&
+      daemonSrc.includes("no page tabs at all") &&
+      helpersSrc.includes("_is_offscreen_harness")
+    ) {
       return { ok: true, detail: "already patched" };
     }
-    const harnessPatch = path.join(
-      MATERIALIZED_REPO,
-      "scripts",
-      "patches",
-      "browser-harness-loopback-cdp-proxy.patch"
-    );
-    if (!fs.existsSync(harnessPatch)) return { ok: false, detail: "patch file missing from package" };
-    // Discard any PRIOR vendored-patch revision (e.g. v1) so the cumulative
-    // patch applies onto pristine pinned sources. Only src/ is touched; the
-    // checkout is a managed artifact, never a place for local edits.
+    // Discard any PRIOR vendored-patch revision so the patch set applies onto
+    // pristine pinned sources, then re-apply ALL vendored patches (the old
+    // single-patch flow re-applied only the proxy fix here, silently wiping
+    // the focus + daemon patches whenever this boot-repair fired). Only src/
+    // is touched; the checkout is a managed artifact, never a place for
+    // local edits.
     await sh("git", ["-C", HARNESS_DIR, "checkout", "--", "src/browser_harness"], {
       timeoutMs: 30000,
     });
-    const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
-      timeoutMs: 30000,
-    });
-    if (chk.code !== 0) {
-      return { ok: false, detail: "patch does not apply (dirty or diverged checkout)" };
-    }
-    const app = await sh("git", ["-C", HARNESS_DIR, "apply", harnessPatch], { timeoutMs: 30000 });
-    if (app.code !== 0) return { ok: false, detail: `git apply failed (exit ${app.code})` };
+    const summary = await applyHarnessVendoredPatches();
     // Reload the daemon so the long-lived process re-imports the patched source.
     await sh(HARNESS_BIN, ["--reload"], { timeoutMs: 30000 });
-    return { ok: true, detail: "patched + daemon reloaded" };
+    return { ok: true, detail: `patched + daemon reloaded (${summary})` };
   } catch (e: any) {
     return { ok: false, detail: String(e?.message || e) };
   }
@@ -1087,42 +1161,12 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       timeoutMs: 120000,
     });
     await sh("git", ["-C", HARNESS_DIR, "reset", "--hard", "FETCH_HEAD"], { timeoutMs: 60000 });
-    // Vendored fix on top of the pin: loopback CDP requests must never route
-    // through a proxy. macOS system proxy settings leak into urllib's default
-    // opener, and a box-wide forwarder 403s every 127.0.0.1 probe, so Chrome
-    // reads as "wedged"/logged-out while it is actually fine (2026-07-13).
-    // Upstream doesn't carry the fix and we don't control that repo, so apply
-    // our patch at install time, on every machine. If it stops applying
-    // cleanly, upstream has either merged the fix (detected below; fine) or
-    // refactored the files (warn); never fail the install over it.
-    const harnessPatch = path.join(
-      MATERIALIZED_REPO,
-      "scripts",
-      "patches",
-      "browser-harness-loopback-cdp-proxy.patch"
-    );
-    if (fs.existsSync(harnessPatch)) {
-      const chk = await sh("git", ["-C", HARNESS_DIR, "apply", "--check", harnessPatch], {
-        timeoutMs: 30000,
-      });
-      if (chk.code === 0) {
-        await sh("git", ["-C", HARNESS_DIR, "apply", harnessPatch], { timeoutMs: 30000 });
-      } else {
-        let fixedUpstream = false;
-        try {
-          fixedUpstream = fs
-            .readFileSync(path.join(HARNESS_DIR, "src", "browser_harness", "admin.py"), "utf-8")
-            .includes("cdp_urlopen");
-        } catch {
-          /* file moved — fall through to the warning */
-        }
-        if (!fixedUpstream) {
-          console.error(
-            "[runtime] browser-harness loopback-proxy patch no longer applies and the fix is absent upstream; CDP probes may 403 behind a system proxy"
-          );
-        }
-      }
-    }
+    // Vendored fixes on top of the pin (loopback-proxy, focus-suppression,
+    // daemon blank-tab attach — see HARNESS_VENDORED_PATCHES). Applied at
+    // install time on every machine since we don't control upstream. This
+    // previously applied ONLY the proxy patch, so bare .mcpb boxes ran
+    // upstream helpers/daemon that steal OS focus (gap closed 2026-08-03).
+    await applyHarnessVendoredPatches();
     // Install the CLI via uv tool (lands at ~/.local/bin/browser-harness).
     // --force so a refreshed source / changed entry point is reinstalled.
     const inst = await sh(uv, ["tool", "install", "--force", "-e", HARNESS_DIR], {
