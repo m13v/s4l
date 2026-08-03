@@ -447,64 +447,37 @@ def fetch_reddit_json(url, user_agent, max_retries=2, timeout=15):
     (success AND error) into _reddit_rate_state so the caller can pace.
     On 429, honors Retry-After (capped to 120s) and retries.
     """
-    # 2026-07-14 transport fix: Reddit started 403-blocking plain urllib on
-    # *.json (2026-05-28), which silently killed this scan (every poll came
-    # back as an HTML block page -> 'empty'/'error', zero rows patched since).
-    # Route through the logged-in harness browser first, the same transport
-    # reddit_tools._do_request has used since 2026-05-29 (the replies pass in
-    # this file already goes through it via batch_fetch_info and kept working).
-    # urllib below stays as the fallback; REDDIT_FETCH_BACKEND=urllib forces it.
-    if os.environ.get("REDDIT_FETCH_BACKEND", "harness").lower() != "urllib":
-        try:
-            from reddit_browser_fetch import browser_get_json
-            body, code = browser_get_json(url)
-            if code == 200 and body:
-                try:
-                    return ("ok", json.loads(body))
-                except Exception:
-                    pass  # non-JSON body -> fall through to urllib
-            elif code == 404:
-                return ("not_found", None)
-        except Exception:
-            pass
-    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    # Browser-ONLY transport (2026-08-03, user decision: no urllib fallback).
+    # Reddit's TLS-fingerprint wall (2026-05-28) 403s urllib/curl on *.json
+    # unconditionally, so the old urllib fallback below could never succeed;
+    # it burned retries on guaranteed 403s and returned 'error' anyway.
+    # Transient browser failures (Reddit 503s, harness contention) get the
+    # same retry budget the urllib path had. The browser transport exposes
+    # no rate-limit headers, so 429 waits assume Reddit's standard 60s
+    # window; `user_agent`/`timeout` stay in the signature for callers but
+    # are unused (the harness browser supplies its own identity).
+    from reddit_browser_fetch import browser_get_json
+
     for attempt in range(max_retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                _update_reddit_rate_state(resp.headers)
-                body = resp.read()
-                if not body:
-                    return ("empty", None)
-                try:
-                    return ("ok", json.loads(body))
-                except Exception:
-                    return ("empty", None)
-        except urllib.error.HTTPError as e:
-            _update_reddit_rate_state(e.headers)
-            if e.code == 404:
-                return ("not_found", None)
-            if e.code == 429:
-                retry_after = None
-                if e.headers:
-                    ra = e.headers.get("Retry-After")
-                    if ra:
-                        try:
-                            retry_after = int(ra)
-                        except (TypeError, ValueError):
-                            retry_after = None
-                if retry_after is None:
-                    retry_after = int(_reddit_rate_state.get("reset_in") or 60)
-                retry_after = max(1, min(retry_after, 120))
-                if attempt < max_retries:
-                    time.sleep(retry_after)
-                    continue
-                return ("rate_limited", None)
-            return ("error", None)
+            body, code = browser_get_json(url)
         except Exception:
+            body, code = None, 0
+        if code == 200 and body:
+            try:
+                return ("ok", json.loads(body))
+            except Exception:
+                return ("empty", None)
+        if code == 404:
+            return ("not_found", None)
+        if code == 429:
             if attempt < max_retries:
-                time.sleep(5 * (attempt + 1))
+                time.sleep(60)
                 continue
-            return ("error", None)
+            return ("rate_limited", None)
+        if attempt < max_retries:
+            time.sleep(5 * (attempt + 1))
+            continue
     return ("error", None)
 
 

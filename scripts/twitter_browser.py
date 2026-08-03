@@ -515,7 +515,11 @@ def _get_browser_and_page_raw(playwright):
                 # Otherwise reuse the first page (caller will navigate it).
                 if context.pages:
                     return browser, context.pages[0], True
-                return browser, context.new_page(), True
+                # Zero pages: create in the BACKGROUND (2026-08-03). A plain
+                # new_page() is a foreground Target.createTarget, which
+                # activates Chrome and steals macOS app focus.
+                from browser_lifecycle import background_new_page
+                return browser, background_new_page(browser, context), True
             # No contexts present (unusual on a fresh harness Chrome) — create one.
             context = browser.new_context()
             return browser, context.new_page(), True
@@ -545,7 +549,9 @@ def _get_browser_and_page_raw(playwright):
                         return browser, pg, True
                 if context.pages:
                     return browser, context.pages[0], True
-                return browser, context.new_page(), True
+                # Zero pages: background create (2026-08-03, see above).
+                from browser_lifecycle import background_new_page
+                return browser, background_new_page(browser, context), True
         except Exception as e:
             _release_browser_lock()
             print(json.dumps({
