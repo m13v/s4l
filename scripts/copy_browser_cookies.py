@@ -364,7 +364,9 @@ def inject_via_cdp(cookies: Iterable[Cookie], cdp_url: str = "http://127.0.0.1:9
         log.info("Storage.setCookies unavailable (no tabs); opening stub tab and retrying")
         target_id = None
         try:
-            r = _send("Target.createTarget", {"url": "about:blank"})
+            # background: a foreground createTarget activates Chrome on macOS
+            # and steals app focus, even for a utility tab like this one.
+            r = _send("Target.createTarget", {"url": "about:blank", "background": True})
             target_id = r.get("result", {}).get("targetId")
             if not target_id:
                 log.warning("Couldn't create stub tab: %s", r)

@@ -114,7 +114,10 @@ def _reddit_page(pw):
         if page is None and ctx.pages:
             page = ctx.pages[0]
         if page is None:
-            page = ctx.new_page()
+            # Zero pages: create in the BACKGROUND (2026-08-04). A plain
+            # new_page() is a foreground Target.createTarget = focus steal.
+            from browser_lifecycle import background_new_page
+            page = background_new_page(browser, ctx)
         page.set_default_timeout(20000)
         return browser, page
     except Exception:

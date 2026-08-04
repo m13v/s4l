@@ -103,7 +103,25 @@ def background_new_page(browser, context, url: str = "about:blank", timeout_ms: 
                 cdp.detach()
             except Exception:
                 pass
-    except Exception:
+    except Exception as e:
+        # LOUD fallback: this is the one remaining way a harness tab can be
+        # created in the foreground (= macOS focus steal). Log to stderr AND
+        # the universal browser-activity.log, because several lanes' stderr is
+        # captured into MCP results and never reaches disk (2026-08-04: an
+        # unattributed focus-pop hit exactly this observability hole).
+        msg = (f"[background_new_page] CDP background create failed "
+               f"({type(e).__name__}: {str(e)[:120]}); falling back to "
+               f"FOREGROUND new_page (focus steal likely)")
+        print(msg, file=sys.stderr)
+        try:
+            _p = os.path.expanduser("~/.claude/browser-profiles/browser-activity.log")
+            with open(_p, "a") as _f:
+                import time as _t
+                _f.write(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] pycdp "
+                         f"script=browser_lifecycle.py action=fg_fallback "
+                         f"pid={os.getpid()} detail={type(e).__name__}\n")
+        except Exception:
+            pass
         return context.new_page()
 
 
