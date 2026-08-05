@@ -51,8 +51,10 @@ NOTIFICATION_EMAIL = os.environ.get("NOTIFICATION_EMAIL", "i@m13v.com")
 
 PAIR_WINDOW_SECONDS = 20 * 60
 
+# URL is the anchor; the message text is best-effort (it may be a shell
+# variable like "$REPLY", a --file arg, or absent from the command line).
 SEND_RE = re.compile(
-    r'(?:twitter_browser|reddit_browser|linkedin\w*)\.py\s+send-dm\s+"([^"]+)"\s+"(.{0,300}?)(?:"|$)',
+    r'(?:twitter_browser|reddit_browser|linkedin\w*)\.py\s+send-dm\s+"([^"]+)"(?:\s+"(.{0,300}?)(?:"|$))?',
     re.S,
 )
 # `=== DM #5612 with HireFireTeam [x] ===\nStatus: ...\nChat URL: https://...`
@@ -116,7 +118,7 @@ def scan_sessions(days):
                             "thread": sm.group(1),
                             "key": _thread_key(sm.group(1)),
                             "sess": os.path.basename(path),
-                            "text": sm.group(2).replace("\\n", " ")[:200],
+                            "text": (sm.group(2) or "(text not inline in command)").replace("\\n", " ")[:200],
                         })
     return sends, thread_to_dm
 
