@@ -13087,7 +13087,12 @@ async function loadExperiments() {
       const replies = v.avg_replies != null ? Number(v.avg_replies).toFixed(2) : '\u2014';
       // avg_clicks is populated only for the tail-link experiment; the
       // cycle_variant rows don't compute it and show "—".
-      const clicks = v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014';
+      // When n_linked is present (draft-prompt, ai-disclosure), avg_clicks is
+      // clicks per LINKED post; show the denominator so the basis is visible.
+      const clicks = (v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014') +
+        (v.n_linked != null && v.n_linked > 0
+          ? ' <span class="exp-share-n" title="posts carrying a short link (clicks/post denominator)">(' + fmtIntK(v.n_linked) + ')</span>'
+          : '');
       // avg_chars/sd_chars/n_styles come from the draft-prompt experiment
       // (form-variance readout); other experiments leave them null.
       const chars = v.avg_chars != null
