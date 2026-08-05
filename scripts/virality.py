@@ -86,7 +86,18 @@ def calculate_reddit_virality_score(thread):
 # S4L_REDDIT_VIRALITY_*) beat these; explicit args beat env.
 _BAR_DEFAULTS = {
     "twitter": {"pctile": 0.99, "min_sample": 200, "hours": 24},
-    "reddit": {"pctile": 0.99, "min_sample": 200, "hours": 24},
+    # Reddit calibration (2026-08-05): discovery volume per install is ~100x
+    # smaller than X (~60 scored/day vs ~9k), so X's 200-in-24h min-sample
+    # left the bar disarmed on all but spike days (observed: armed only
+    # Jul 30-31, ungated 139-post day Aug 2). A 72h window (fine for threads
+    # that stay actionable ~7 days) with min_sample 50 keeps the bar armed at
+    # normal volume while still failing open on genuinely fresh installs.
+    # These platform defaults are the SINGLE source of truth for gate
+    # calibration; the S4L_<PLATFORM>_VIRALITY_* env overrides are debug-only
+    # and must not be set in plists or shipped configs. (The percentile is
+    # governed server-side by installations.posting_mode regardless of the
+    # pctile requested here.)
+    "reddit": {"pctile": 0.99, "min_sample": 50, "hours": 72},
 }
 
 
