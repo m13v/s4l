@@ -97,6 +97,12 @@ def background_new_page(browser, context, url: str = "about:blank", timeout_ms: 
         try:
             with context.expect_page(timeout=timeout_ms) as pg_info:
                 cdp.send("Target.createTarget", {"url": url, "background": True})
+            # Log SUCCESS too (2026-08-05): the residual focus-steal hunt hit
+            # same-second orphan blank creates that no log claimed. Success
+            # was silent by design, which made "our background create fired
+            # and coincided" indistinguishable from "an unknown foreground
+            # creator". One line per create closes that ambiguity.
+            _activity_log("bg_new_page", f"url={url[:60]}")
             return pg_info.value
         finally:
             try:
@@ -113,16 +119,24 @@ def background_new_page(browser, context, url: str = "about:blank", timeout_ms: 
                f"({type(e).__name__}: {str(e)[:120]}); falling back to "
                f"FOREGROUND new_page (focus steal likely)")
         print(msg, file=sys.stderr)
-        try:
-            _p = os.path.expanduser("~/.claude/browser-profiles/browser-activity.log")
-            with open(_p, "a") as _f:
-                import time as _t
-                _f.write(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] pycdp "
-                         f"script=browser_lifecycle.py action=fg_fallback "
-                         f"pid={os.getpid()} detail={type(e).__name__}\n")
-        except Exception:
-            pass
+        _activity_log("fg_fallback", f"detail={type(e).__name__}")
         return context.new_page()
+
+
+def _activity_log(action: str, detail: str = "") -> None:
+    """One line into the universal browser-activity.log (same file the
+    Python-CDP attach logging uses). Best-effort; never raises."""
+    try:
+        import time as _t
+
+        _p = os.path.expanduser("~/.claude/browser-profiles/browser-activity.log")
+        with open(_p, "a") as _f:
+            _f.write(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] pycdp "
+                     f"script=browser_lifecycle.py action={action} "
+                     f"pid={os.getpid()} argv0={os.path.basename(sys.argv[0] or '?')} "
+                     f"{detail}\n")
+    except Exception:
+        pass
 
 
 def register_park_on_exit(cdp_base: str, host_markers, park_url: str, label: str) -> None:
