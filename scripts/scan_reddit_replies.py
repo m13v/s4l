@@ -100,12 +100,20 @@ class SessionInvalidError(Exception):
 
 def fetch_own_replies(reddit_account, cookie_header, user_agent,
                        pages=OWN_COMMENTS_PAGES, lookback_days=OWN_COMMENTS_LOOKBACK_DAYS):
-    """Build {parent_comment_id: {reply_id, reply_url, reply_content, replied_at}}
-    by paging /user/<account>/comments.json. Used to detect comments the account
-    already replied to outside the pipeline (e.g., manual browser replies).
-    Stops when a page's oldest comment is older than lookback_days, or after
-    `pages` pages, whichever comes first."""
+    """Build two maps by paging /user/<account>/comments.json:
+
+    1. {parent_comment_id: {reply_id, reply_url, reply_content, replied_at}}
+       Used to detect comments the account already replied to outside the
+       pipeline (e.g., manual browser replies).
+    2. {our_comment_id: parent_comment_id} for every comment of ours whose
+       parent is a comment (t1_). Used by the comment-chain matcher: an inbox
+       reply's parent_id is OUR comment, and OUR comment's parent is the
+       their_comment_id recorded on the replies row we posted from.
+
+    Returns (map1, map2). Stops when a page's oldest comment is older than
+    lookback_days, or after `pages` pages, whichever comes first."""
     out = {}
+    own_parents = {}
     after = None
     cutoff = time.time() - lookback_days * 86400
     url_base = f"https://old.reddit.com/user/{reddit_account}/comments/.json?limit={PAGE_LIMIT}"
@@ -117,11 +125,11 @@ def fetch_own_replies(reddit_account, cookie_header, user_agent,
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 if "application/json" not in resp.headers.get("Content-Type", ""):
-                    return out  # non-fatal; just skip the map
+                    return out, own_parents  # non-fatal; just skip the map
                 data = json.loads(resp.read()).get("data", {})
         except Exception as e:
             print(f"  own-replies fetch failed on page {page+1}: {e}")
-            return out
+            return out, own_parents
         children = data.get("children", []) or []
         oldest_on_page = 0
         for c in children:
@@ -133,6 +141,9 @@ def fetch_own_replies(reddit_account, cookie_header, user_agent,
             if not parent.startswith("t1_"):
                 continue  # only comment-parents; post-parents handled via inbox matching
             parent_id = parent.removeprefix("t1_")
+            our_id = d.get("id")
+            if our_id and our_id not in own_parents:
+                own_parents[our_id] = parent_id
             if parent_id in out:
                 continue
             reply_id = d.get("id")
@@ -149,12 +160,12 @@ def fetch_own_replies(reddit_account, cookie_header, user_agent,
         if oldest_on_page and oldest_on_page < cutoff:
             break  # we've reached lookback horizon
         time.sleep(PAGE_PAUSE_SECS)
-    return out
+    return out, own_parents
 
 
 class InboxScanner:
     def __init__(self, reddit_account, user_agent, cookie_header, excluded_authors=None,
-                 own_replies_map=None):
+                 own_replies_map=None, own_comment_parents=None):
         # No DB handle anymore — every read/write hits the API. The `db` field
         # is kept for back-compat with `_insert_reply(self.db, ...)` callers
         # (they pass it through unchanged); the helper itself ignores the value.
@@ -166,6 +177,7 @@ class InboxScanner:
         self.excluded = {a.lower() for a in (excluded_authors or set())}
         self.excluded.update({"automoderator", "[deleted]", self.reddit_account_lower})
         self.own_replies_map = own_replies_map or {}
+        self.own_comment_parents = own_comment_parents or {}
         # Cache thread_id -> post_id lookups across a single scan so we don't
         # hit /api/v1/posts once per inbox entry (the same thread often
         # appears multiple times in a single page).
@@ -210,22 +222,28 @@ class InboxScanner:
 
     def _parent_reply_for_item(self, d):
         """Match a comment_reply inbox item to OUR earlier comment on someone
-        else's thread via replies.our_reply_id. The posts-table match above
-        only covers threads WE submitted; most engagement is comments on other
-        people's threads, and their replies to us are only findable through
-        the parent_id (t1_<our_comment_id>) -> replies.our_reply_id linkage.
-        Returns the parent replies row (dict with id/post_id/depth) or None."""
+        else's thread. The posts-table match above only covers threads WE
+        submitted; most engagement is comments on other people's threads.
+        The DB does not store our comments' reddit ids (our_reply_id is
+        NULL on virtually all reddit rows), so the linkage goes through the
+        grandparent: the inbox item's parent_id is OUR comment; our own
+        comments listing (own_comment_parents) gives that comment's parent,
+        which is exactly the their_comment_id recorded on the replies row we
+        posted from. Returns that row (dict with id/post_id/depth) or None."""
         parent = d.get("parent_id") or ""
         if not parent.startswith("t1_"):
             return None
-        parent_id = parent.removeprefix("t1_")
-        if parent_id in self._parent_reply_cache:
-            return self._parent_reply_cache[parent_id]
+        our_id = parent.removeprefix("t1_")
+        grandparent_id = self.own_comment_parents.get(our_id)
+        if not grandparent_id:
+            return None
+        if grandparent_id in self._parent_reply_cache:
+            return self._parent_reply_cache[grandparent_id]
         row = None
         try:
             resp = api_get(
                 "/api/v1/replies",
-                query={"platform": "reddit", "our_reply_status_id": parent_id,
+                query={"platform": "reddit", "their_comment_id": grandparent_id,
                        "limit": 1},
             )
             rows = ((resp or {}).get("data") or {}).get("replies") or []
@@ -233,7 +251,7 @@ class InboxScanner:
                 row = rows[0]
         except Exception:
             row = None
-        self._parent_reply_cache[parent_id] = row
+        self._parent_reply_cache[grandparent_id] = row
         return row
 
     def _insert(self, post_id, comment_id, author, content, comment_url, status, skip_reason=None,
@@ -396,11 +414,13 @@ def main():
 
     user_agent = f"social-autoposter/1.0 (u/{reddit_account} inbox-scan)"
     excluded_authors = {a for a in config.get("exclusions", {}).get("authors", [])}
-    own_replies_map = fetch_own_replies(reddit_account, cookie_header, user_agent)
-    print(f"Own-replies map: {len(own_replies_map)} parent comment_ids we've already replied to")
+    own_replies_map, own_comment_parents = fetch_own_replies(reddit_account, cookie_header, user_agent)
+    print(f"Own-replies map: {len(own_replies_map)} parent comment_ids we've already replied to; "
+          f"{len(own_comment_parents)} own comments mapped for chain matching")
     scanner = InboxScanner(reddit_account, user_agent, cookie_header,
                            excluded_authors=excluded_authors,
-                           own_replies_map=own_replies_map)
+                           own_replies_map=own_replies_map,
+                           own_comment_parents=own_comment_parents)
     try:
         scanner.scan()
     except SessionInvalidError as e:
