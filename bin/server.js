@@ -18508,9 +18508,15 @@ function renderTopLinks(payload) {
 function dmClassBadge(dm) {
   const status = String(dm.conversation_status || '').toLowerCase();
   const interest = String(dm.interest_level || '').toLowerCase();
+  // A snoozed needs_human thread was explicitly skipped by the human
+  // ("Skip until they reply" button, or a "skip" email reply). Drop the HUMAN
+  // pill and let the interest label (hot/warm/...) stand; needs_human stays on
+  // the row only as the auto-reply guard until they send a new inbound.
+  const snoozeTs = dm.snoozed_until ? parseServerUtcTs(dm.snoozed_until) : null;
+  const dmSnoozed = !!(snoozeTs && snoozeTs.getTime() > Date.now());
   let cls = 'dm-class-none';
   let label = 'unclassified';
-  if (status === 'needs_human') { cls = 'dm-class-human'; label = 'HUMAN'; }
+  if (status === 'needs_human' && !dmSnoozed) { cls = 'dm-class-human'; label = 'HUMAN'; }
   else if (status === 'converted') { cls = 'dm-class-converted'; label = 'converted'; }
   else if (status === 'closed')    { cls = 'dm-class-closed';    label = 'closed'; }
   else if (interest === 'hot')                { cls = 'dm-class-hot';      label = 'hot'; }
@@ -18525,7 +18531,9 @@ function dmClassBadge(dm) {
   if (status && status !== 'needs_human' && status !== 'converted' && status !== 'closed' && status !== 'active') {
     subBits.push(status);
   }
-  if (status === 'needs_human' && dm.human_reason) {
+  if (status === 'needs_human' && dmSnoozed) {
+    subBits.push('skipped');
+  } else if (status === 'needs_human' && dm.human_reason) {
     subBits.push(String(dm.human_reason).slice(0, 40));
   }
   const sub = subBits.length ? '<div class="dm-class-sub">' + escapeHtml(subBits.join(' \u00b7 ')) + '</div>' : '';
