@@ -6838,6 +6838,12 @@ async function handleApi(req, res) {
         // candidate-funnel axis: n_candidates == n_posted. Click attribution
         // joins post_links + post_link_clicks (is_bot=false). 30-day window,
         // mirroring the tail-link block exactly.
+        // avg_clicks divides by LINKED posts only (COUNT(pl.post_id)), not all
+        // posts: the arm is per-CYCLE, so lanes that never mint links
+        // (personal_brand etc.) land unevenly across arms and an all-posts
+        // denominator measures lane mix, not drafting quality (this flipped
+        // the sign on 2026-08-05: 333 vs 220 linkless posts made control look
+        // ahead). n_linked is shipped alongside so the denominator is visible.
         try {
           const dpRows = await pq(`
             SELECT p.draft_prompt_variant AS variant,
@@ -6845,7 +6851,8 @@ async function handleApi(req, res) {
                    AVG(p.views) AS avg_views,
                    AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
                    AVG(p.comments_count) AS avg_replies,
-                   COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+                   COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(pl.post_id),0) AS avg_clicks,
+                   COUNT(pl.post_id) AS n_linked,
                    AVG(LENGTH(p.our_content)) AS avg_chars,
                    STDDEV_POP(LENGTH(p.our_content)) AS sd_chars,
                    COUNT(DISTINCT p.engagement_style) AS n_styles,
@@ -6884,6 +6891,7 @@ async function handleApi(req, res) {
               avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
               avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
               avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              n_linked: row.n_linked != null ? Number(row.n_linked) : 0,
               // Form-variance readout: the v3 hypothesis is that styles shape
               // output, so per-arm length spread and style diversity are the
               // leading indicators before engagement accumulates.
@@ -6948,6 +6956,9 @@ async function handleApi(req, res) {
         // Those posts are NOT subjects of the experiment but still appear
         // in the untagged bucket. Volume is small enough (<5% of arm) that
         // averages move by <1%, but keep this in mind when reading.
+        // avg_clicks divides by LINKED posts only (COUNT(pl.post_id)), same
+        // rationale as the draft-prompt block: linkless lanes can never click
+        // and would only dilute the ratio.
         try {
           const adRows = await pq(`
             SELECT
@@ -6956,7 +6967,8 @@ async function handleApi(req, res) {
               AVG(p.views) AS avg_views,
               AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
               AVG(p.comments_count) AS avg_replies,
-              COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+              COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(pl.post_id),0) AS avg_clicks,
+              COUNT(pl.post_id) AS n_linked,
               MIN(p.posted_at) AS started_at
             FROM posts p
             LEFT JOIN (
@@ -6991,6 +7003,7 @@ async function handleApi(req, res) {
               avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
               avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
               avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              n_linked: row.n_linked != null ? Number(row.n_linked) : 0,
               started_at: row.started_at || null,
             };
           });
