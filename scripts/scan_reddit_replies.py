@@ -7,9 +7,12 @@ reddit-agent profile cookies (refreshed by bootstrap_reddit_cookies.py),
 inserts new rows into `replies`, and immediately fires engage_reddit.py
 with --limit so the loop runs end-to-end every 5 min.
 
-Inbox cannot tell us depth/parent_reply_id (it shows comment-replies and
-post-replies identically). We insert depth=1 / parent_reply_id=NULL; the
-engage step reads the live thread URL anyway.
+Thread matching is two-stage: first against `posts` (threads we submitted),
+then via the item's parent_id (t1_<our_comment_id>) against
+replies.our_reply_id (replies to our comments on other people's threads).
+The second stage inserts a followup row (parent_reply_id + depth); without
+it every comment-chain reply is dropped as unmatched_thread, which orphaned
+all comment-chain conversations between 2026-04-17 and 2026-08-05.
 
 Items older than BACKFILL_HOURS that aren't already in the DB are marked
 status='skipped' / skip_reason='backfill_old' so they show in the
@@ -50,7 +53,7 @@ ENGAGE_SCRIPT = os.path.expanduser("~/social-autoposter/scripts/engage_reddit.py
 INBOX_URL = "https://old.reddit.com/message/inbox/.json"
 PAGE_LIMIT = 100
 MAX_PAGES = 10  # caps pagination at ~1000 items; inbox retention is shorter than that anyway
-BACKFILL_HOURS = 48
+BACKFILL_HOURS = int(os.environ.get("S4L_REDDIT_BACKFILL_HOURS", "48"))
 JITTER_MAX_SECS = 60
 PAGE_PAUSE_SECS = 1.5
 OWN_COMMENTS_PAGES = 20  # hard cap on pagination depth (max 2000 items)
@@ -167,6 +170,9 @@ class InboxScanner:
         # hit /api/v1/posts once per inbox entry (the same thread often
         # appears multiple times in a single page).
         self._post_id_cache = {}
+        # Cache our_reply_id -> parent replies row for comment-chain matching.
+        self._parent_reply_cache = {}
+        self.parent_matched = 0
         self.discovered = 0
         self.skipped_old = 0
         self.skipped_other = 0
@@ -202,7 +208,36 @@ class InboxScanner:
         self._post_id_cache[thread_id] = post_id
         return post_id
 
-    def _insert(self, post_id, comment_id, author, content, comment_url, status, skip_reason=None):
+    def _parent_reply_for_item(self, d):
+        """Match a comment_reply inbox item to OUR earlier comment on someone
+        else's thread via replies.our_reply_id. The posts-table match above
+        only covers threads WE submitted; most engagement is comments on other
+        people's threads, and their replies to us are only findable through
+        the parent_id (t1_<our_comment_id>) -> replies.our_reply_id linkage.
+        Returns the parent replies row (dict with id/post_id/depth) or None."""
+        parent = d.get("parent_id") or ""
+        if not parent.startswith("t1_"):
+            return None
+        parent_id = parent.removeprefix("t1_")
+        if parent_id in self._parent_reply_cache:
+            return self._parent_reply_cache[parent_id]
+        row = None
+        try:
+            resp = api_get(
+                "/api/v1/replies",
+                query={"platform": "reddit", "our_reply_status_id": parent_id,
+                       "limit": 1},
+            )
+            rows = ((resp or {}).get("data") or {}).get("replies") or []
+            if rows:
+                row = rows[0]
+        except Exception:
+            row = None
+        self._parent_reply_cache[parent_id] = row
+        return row
+
+    def _insert(self, post_id, comment_id, author, content, comment_url, status, skip_reason=None,
+                parent_reply_id=None, depth=1):
         override = self.own_replies_map.get(comment_id)
         if override:
             from datetime import datetime, timezone
@@ -210,7 +245,7 @@ class InboxScanner:
             replied_at = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
             result = _insert_reply(
                 self.db, post_id, "reddit", comment_id, author, content, comment_url,
-                parent_reply_id=None, depth=1, status="replied", skip_reason=None,
+                parent_reply_id=parent_reply_id, depth=depth, status="replied", skip_reason=None,
                 our_reply_id=override.get("our_reply_id"),
                 our_reply_content=override.get("our_reply_content"),
                 our_reply_url=override.get("our_reply_url"),
@@ -221,7 +256,7 @@ class InboxScanner:
             return
         result = _insert_reply(
             self.db, post_id, "reddit", comment_id, author, content, comment_url,
-            parent_reply_id=None, depth=1, status=status, skip_reason=skip_reason,
+            parent_reply_id=parent_reply_id, depth=depth, status=status, skip_reason=skip_reason,
         )
         if result == "pending":
             self.discovered += 1
@@ -251,16 +286,25 @@ class InboxScanner:
                     continue
                 context = d.get("context") or ""
                 post_id = self._post_id_for_context(context)
+                parent_reply_id = None
+                depth = 1
                 if not post_id:
-                    self.unmatched += 1
-                    continue
+                    parent = self._parent_reply_for_item(d)
+                    if not parent:
+                        self.unmatched += 1
+                        continue
+                    self.parent_matched += 1
+                    post_id = parent.get("post_id")  # nullable; next-pending LEFT JOINs posts
+                    parent_reply_id = parent.get("id")
+                    depth = (parent.get("depth") or 1) + 1
                 comment_url = "https://old.reddit.com" + context.split("?")[0]
                 content = d.get("body") or ""
                 created = float(d.get("created_utc") or 0)
                 if created and created < backfill_cutoff:
                     pre = self.discovered + self.skipped_old
                     self._insert(post_id, comment_id, author, content, comment_url,
-                                 status="skipped", skip_reason="backfill_old")
+                                 status="skipped", skip_reason="backfill_old",
+                                 parent_reply_id=parent_reply_id, depth=depth)
                     if (self.discovered + self.skipped_old) == pre:
                         consecutive_known += 1
                     else:
@@ -268,7 +312,8 @@ class InboxScanner:
                 else:
                     pre = self.discovered
                     self._insert(post_id, comment_id, author, content, comment_url,
-                                 status="pending")
+                                 status="pending",
+                                 parent_reply_id=parent_reply_id, depth=depth)
                     if self.discovered == pre:
                         consecutive_known += 1
                     else:
@@ -293,7 +338,8 @@ class InboxScanner:
             f"Inbox scan complete: seen={self.total_seen} "
             f"new_pending={self.discovered} backfill_skipped={self.skipped_old} "
             f"already_replied={self.already_replied} "
-            f"excluded_author={self.skipped_other} unmatched_thread={self.unmatched}"
+            f"excluded_author={self.skipped_other} unmatched_thread={self.unmatched} "
+            f"parent_matched={self.parent_matched}"
         )
         return {
             "discovered": self.discovered,
@@ -301,6 +347,7 @@ class InboxScanner:
             "already_replied": self.already_replied,
             "excluded": self.skipped_other,
             "unmatched": self.unmatched,
+            "parent_matched": self.parent_matched,
             "total_seen": self.total_seen,
         }
 
