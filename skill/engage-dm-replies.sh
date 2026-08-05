@@ -171,6 +171,19 @@ PENDING_PLAT_ARG=""
 [ -n "$PLATFORM" ] && PENDING_PLAT_ARG="--platform $PLATFORM"
 PENDING_CONVOS=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" pending $PENDING_PLAT_ARG --limit 30 2>/dev/null || echo "null")
 
+# Phase D scope guard (2026-08-05). The prompt used to tell the model to re-query
+# the queue itself with `dm_conversation.py pending`, which has NO platform
+# filter. A platform-scoped run (reddit fires at :13/:43) would pick up another
+# platform's needs_reply rows in the 1-3 min window before the owning lane
+# (twitter fires at :14) logged its outbound, and both would send: the recipient
+# got two near-duplicate replies and the loser's log-outbound was DEDUP BLOCKED,
+# so the duplicate never appeared in dm_messages (38 duplicate pairs May-Aug
+# 2026, first reported by HireFireTeam on 2026-07-09). Phase D now re-queries
+# through the server-side-scoped helper, and this note pins the boundary inside
+# the prompt itself.
+PHASE_D_SCOPE_NOTE=""
+[ -n "$PLATFORM" ] && PHASE_D_SCOPE_NOTE="HARD PLATFORM BOUNDARY: this run handles platform '$PLATFORM' ONLY. The pending query above is already scoped to it. If a row or query result for any other platform surfaces anyway, SKIP it silently and make no DB change to it: another lane owns that row, and replying from this run sends the recipient a duplicate message."
+
 if [ "$PENDING_CONVOS" = "null" ] || [ -z "$PENDING_CONVOS" ]; then
     log "No conversations needing replies. Checking platforms for new inbound messages..."
 else
@@ -454,10 +467,12 @@ counting (event_id dedup will block it but don't even try).
 2. Find Reddit conversations needing a reply (includes both newly-ingested
    chat rooms and any legacy PMs logged via step 1):
    ```bash
-   cd ~/social-autoposter && python3 scripts/dm_conversation.py pending
+   cd ~/social-autoposter && python3 scripts/dm_engage_helper.py pending --platform reddit --limit 30
    ```
-   Scope to Reddit when needed via their_author + platform columns. This is
-   the authoritative list; don't reconstruct it from sidebar scrapes.
+   This list is server-side scoped to Reddit; rows for other platforms never
+   belong to this phase (do NOT use the cross-platform `dm_conversation.py
+   pending` here). This is the authoritative list; don't reconstruct it from
+   sidebar scrapes.
 
 3. For each Reddit PM/comment-reply surfaced by step 1 that isn't already in
    dms, create a row and log the inbound (chat rooms already have rows from
@@ -660,10 +675,12 @@ $PHASE_C_BLOCK
 
 ## PHASE D: Reply to all conversations with pending inbound messages
 
-After scanning, query for all conversations needing replies:
+After scanning, query for conversations needing replies (server-side scoped to this run's platform):
 \`\`\`bash
-cd ~/social-autoposter && python3 scripts/dm_conversation.py pending
+cd ~/social-autoposter && python3 scripts/dm_engage_helper.py pending $PENDING_PLAT_ARG --limit 30
 \`\`\`
+Do NOT use \`dm_conversation.py pending\` or hit /api/v1/dms/pending directly: both are cross-platform and will show you rows that belong to other lanes.
+$PHASE_D_SCOPE_NOTE
 
 Known conversations from the database that already need replies:
 $PENDING_CONVOS
