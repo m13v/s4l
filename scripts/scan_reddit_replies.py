@@ -56,8 +56,9 @@ MAX_PAGES = 10  # caps pagination at ~1000 items; inbox retention is shorter tha
 BACKFILL_HOURS = int(os.environ.get("S4L_REDDIT_BACKFILL_HOURS", "48"))
 JITTER_MAX_SECS = 60
 PAGE_PAUSE_SECS = 1.5
-OWN_COMMENTS_PAGES = 20  # hard cap on pagination depth (max 2000 items)
-OWN_COMMENTS_LOOKBACK_DAYS = 30  # stop once we pass this many days back
+OWN_COMMENTS_PAGES = 20  # hard cap on pagination depth (reddit caps listings at ~1000 items)
+OWN_COMMENTS_LOOKBACK_DAYS = 90  # stop once we pass this many days back; replies to
+# comments older than the (30-day) old value were dropped as unmatched_thread
 
 THREAD_ID_RE = re.compile(r"/comments/([a-z0-9]+)/")
 
@@ -217,6 +218,20 @@ class InboxScanner:
                     break
         except Exception:
             post_id = None
+        if post_id is None:
+            # Exact fallback for posts older than the 500-row window (replies
+            # keep arriving on months-old submissions).
+            try:
+                resp = api_get(
+                    "/api/v1/posts",
+                    query={"platform": "reddit", "limit": 1,
+                           "thread_url_contains": f"/comments/{thread_id}/"},
+                )
+                posts = ((resp or {}).get("data") or {}).get("posts") or []
+                if posts:
+                    post_id = int(posts[0].get("id"))
+            except Exception:
+                post_id = None
         self._post_id_cache[thread_id] = post_id
         return post_id
 
@@ -299,7 +314,9 @@ class InboxScanner:
                 if not comment_id:
                     continue
                 author = d.get("author") or "[deleted]"
-                if author.lower() in self.excluded:
+                if author.lower() in self.excluded or author.lower().endswith("-modteam"):
+                    # *-ModTeam items are removal notices, not conversations;
+                    # the strike pipeline tracks removals separately.
                     self.skipped_other += 1
                     continue
                 context = d.get("context") or ""
