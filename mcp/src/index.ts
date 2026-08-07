@@ -4105,6 +4105,36 @@ tool(
     inputSchema: {},
   },
   async () => {
+    // Codex/ChatGPT host: there is no scheduled-task worker at all. Drafting
+    // runs INLINE in the launchd cycle through the ChatGPT-app-bundled
+    // `codex exec` (headless, subscription-authenticated), so the entire
+    // Claude-Desktop worker apparatus below (allow-rules, SKILL.md, folder
+    // trust, create_scheduled_task) is skipped. Stamping the provider is the
+    // whole setup.
+    if (s4lHost() === "codex") {
+      clearMenubarStop();
+      void ensureMenubar();
+      writeDraftProvider("codex-exec", "queue_setup(codex)");
+      return jsonContent({
+        tasks: [],
+        provider: "codex-exec",
+        expectations: [
+          "What happens next (relay these lines to the user, in their words):",
+          "- About every 5 minutes a background draft cycle scans X for posts that match your search topics and drafts replies in your voice, using this app's engine directly. No scheduled task and no open app window is required.",
+          "- Drafts show up as review cards. The first one usually lands within a few minutes when there is matching supply on X; quiet topics mean fewer or no cards until something relevant is posted.",
+          "- Nothing is posted automatically. You approve each draft yourself (from the dashboard or the menu bar); posting autopilot stays OFF until you explicitly turn it on. Today it only drafts.",
+          "- You can edit your voice, topics, or the drafts themselves at any time, and check status on the dashboard.",
+        ],
+        next_step:
+          "Nothing to schedule on this host: drafting is wired to run inline via the ChatGPT app's " +
+          "engine, driven by the background cycle this server installs. Do NOT create any scheduled " +
+          "task or automation. Relay the `expectations` lines to the user; setup of the draft " +
+          "autopilot is complete.",
+      });
+    }
+    // Claude host: take (or retake) ownership for the Desktop queue worker.
+    // Last setup wins — this is the single-driver guard's other half.
+    writeDraftProvider("claude-desktop-queue", "queue_setup(claude)");
     ensureQueueWorkerToolsAllowed();
     // Re-arming the autopilot is an explicit "start S4L" action: lift a prior
     // tray Quit so the review cards have a surface again. Best-effort and
