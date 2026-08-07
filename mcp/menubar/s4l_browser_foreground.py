@@ -157,12 +157,16 @@ class _Worker(threading.Thread):
         # focus back to the app the user was in. Screenshots/clicks are
         # unaffected (CDP is offscreen-raster + synthetic input; the occlusion
         # flags keep hidden tabs painting).
-        # DEFAULT OFF (user decision 2026-07-30): only the telemetry above runs
-        # unless S4L_HARNESS_HIDE=1 opts in. S4L_NO_HARNESS_HIDE force-disables
-        # even when the opt-in is set.
+        # DEFAULT ON (user decision 2026-08-07, reverses the 2026-07-30 default-off
+        # call): the guard hides an offscreen harness that steals the foreground
+        # unless explicitly opted out. Two knobs, by design:
+        #   S4L_NO_HARNESS_HIDE  -> HARD override, force off, checked FIRST so it
+        #       always wins (this is the one-time interactive-login escape hatch).
+        #   S4L_HARNESS_HIDE=0   -> SOFT opt-out for a machine that wants it off.
+        # Unset or any non-"0" value => hide is active (the new default).
         if os.environ.get("S4L_NO_HARNESS_HIDE"):
             return
-        if os.environ.get("S4L_HARNESS_HIDE") != "1":
+        if os.environ.get("S4L_HARNESS_HIDE", "1") == "0":
             return
         pos = details.get("window_position") or ""
         try:
