@@ -756,11 +756,18 @@ def _run_codex_exec(ns, qtype: str, prompt: str, schema_text: str | None) -> int
             "--skip-git-repo-check",
             "-o", out_path,
         ]
+        # Deliberately NOT --output-schema: OpenAI's strict structured-output
+        # mode rejects our lenient claude-style schemas (400 invalid_json_schema
+        # unless additionalProperties:false + all-required everywhere). The
+        # schema rides the prompt as guidance instead, mirroring the worker
+        # rail, and _validate_against_schema stays the lenient gate.
         if schema_text:
-            sfd, schema_path = tempfile.mkstemp(prefix="s4l_codex_schema_", suffix=".json")
-            with os.fdopen(sfd, "w") as f:
-                f.write(schema_text)
-            cmd += ["--output-schema", schema_path]
+            prompt = (
+                f"{prompt}\n\n"
+                "FINAL ANSWER FORMAT: reply with ONLY a JSON value matching this "
+                "JSON Schema. No prose, no markdown fences, nothing else:\n"
+                f"{schema_text}"
+            )
         model = os.environ.get("S4L_CODEX_MODEL", "").strip()
         if model:
             cmd += ["-m", model]
