@@ -50,6 +50,11 @@ import s4l_env  # noqa: E402  (lives next to this file in scripts/)
 
 s4l_env.mirror()
 
+# Draft-provider selection (2026-08-06): <state_dir>/draft-provider.json decides
+# which engine answers queue-eligible tags. Stamped once at setup, read here at
+# the seam; no env-var fallback layering. See scripts/draft_provider.py.
+import draft_provider  # noqa: E402  (lives next to this file in scripts/)
+
 # Best-effort menu-bar activity narration. Importable because this script's own
 # directory (scripts/) is on sys.path[0] when run as `python3 .../claude_job.py`.
 # A failure to import (or to write) must NEVER affect the queue's real work.
@@ -1203,8 +1208,18 @@ def cmd_result(ns) -> int:
 
 def cmd_eligible(ns: argparse.Namespace) -> int:
     """Routing probe for run_claude.sh: exit 0 when the tag is queue-mapped,
-    1 otherwise. TAG_TO_TYPE is the single routing truth — no env var."""
-    return 0 if ns.tag in TAG_TO_TYPE else 1
+    1 otherwise. TAG_TO_TYPE is the single routing truth — no env var.
+
+    Provider layer (2026-08-06): when the box's draft provider is `claude-p`,
+    every tag reports NOT eligible, so run_claude.sh's existing fall-through
+    runs the real `claude -p` directly. That IS the claude-p implementation:
+    zero new execution paths, the locked wrapper stays untouched.
+    """
+    if ns.tag not in TAG_TO_TYPE:
+        return 1
+    if draft_provider.get() == "claude-p":
+        return 1
+    return 0
 
 
 def main() -> int:
