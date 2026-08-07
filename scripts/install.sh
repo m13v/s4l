@@ -107,6 +107,41 @@ os.replace(tmp, p)
 PY
 log "draft provider: $PROVIDER"
 
+# 5. Persistent server (codex-flavor boxes only). Claude Desktop keeps the MCP
+# server process alive while the app runs, so the menu bar always has a live
+# loopback to POST approvals to. The ChatGPT app spawns servers per chat and
+# kills them after, which would strand menu-bar approvals between sessions.
+# A KeepAlive LaunchAgent holds one server up; stdin is held open by tail
+# because the stdio MCP transport exits on stdin EOF.
+if [ "$PROVIDER" = "codex-exec" ]; then
+  PLIST="$HOME/Library/LaunchAgents/com.m13v.s4l-server.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" "$STATE_DIR/logs"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.m13v.s4l-server</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>tail -f /dev/null | exec "$NODE" "$SERVER"</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>S4L_HOST</key><string>codex</string>
+    <key>S4L_STATE_DIR</key><string>$STATE_DIR</string>
+    <key>PATH</key><string>$SAFE_PATH</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$STATE_DIR/logs/s4l-server.log</string>
+  <key>StandardErrorPath</key><string>$STATE_DIR/logs/s4l-server.err.log</string>
+</dict></plist>
+EOF
+  launchctl bootout "gui/$(id -u)/com.m13v.s4l-server" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
+    && log "persistent server LaunchAgent loaded (com.m13v.s4l-server)" \
+    || log "WARN: could not load com.m13v.s4l-server; menu-bar approvals need the ChatGPT app open"
+fi
+
 log "done."
 echo
 echo "Next steps:"
