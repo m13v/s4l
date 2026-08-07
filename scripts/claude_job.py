@@ -1,8 +1,27 @@
 #!/usr/bin/env python3
 """
-claude_job.py — queue-backed substitute for `claude -p` for the pipeline's
-pure text->JSON turns, on every machine (operator Macs and customer .mcpb
-boxes alike).
+claude_job.py — THE DRAFT-ENGINE SEAM: every pure text->JSON drafting turn in
+the pipeline lands here, and <state_dir>/draft-provider.json decides which
+engine answers it (see scripts/draft_provider.py; design + verified facts in
+docs/codex-port-design.md):
+
+  claude-desktop-queue  (default) enqueue to a file queue drained by the
+                        Claude Desktop s4l-worker scheduled task — the
+                        original design, and the only option when Claude
+                        Desktop is the box's sole authenticated engine.
+  claude-p              answer inline via the real `claude -p` (_run_claude_p;
+                        schema INLINED — the CLI parses --json-schema as JSON,
+                        a file path breaks it).
+  codex-exec            answer inline via the ChatGPT-app-bundled `codex exec`
+                        (_run_codex_exec; gpt-5.6-sol default, schema rides
+                        the prompt — OpenAI strict schema mode rejects our
+                        lenient schemas).
+
+All three return byte-identical claude `--output-format json` envelopes and
+the same 0/1/79 exit semantics, so callers can't tell them apart. The queue
+machinery below (next/result, worker notes, heartbeats) only runs for the
+default provider; the inline providers skip it entirely, which also means no
+warm-session leaks and no app-open requirement on those paths.
 
 The deterministic pipeline never calls `claude` directly; every invocation goes
 through scripts/run_claude.sh. For script tags mapped in TAG_TO_TYPE below,
