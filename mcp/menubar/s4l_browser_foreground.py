@@ -177,7 +177,17 @@ class _Worker(threading.Thread):
             hid = refocused = False
             ra = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             if ra is not None:
-                hid = bool(ra.hide())  # order the harness window out
+                # hide() can race the in-flight activation and return False
+                # (observed 2026-08-06: hid=False while refocus succeeded, so
+                # the window stayed visible behind the refocused app — the
+                # "I still saw it" reports). Retry briefly and trust
+                # isHidden() as the verdict, not hide()'s return value.
+                for _ in range(4):
+                    ra.hide()
+                    time.sleep(0.15)
+                    if ra.isHidden():
+                        break
+                hid = bool(ra.isHidden())
             # hide() alone does NOT reliably return focus here: all three
             # harnesses share the "Google Chrome Beta" bundle, so hiding one
             # process can leave the app-level active state on a sibling. Force
