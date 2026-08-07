@@ -174,9 +174,10 @@ class _Worker(threading.Thread):
         try:
             from AppKit import NSRunningApplication
 
+            hid = refocused = False
             ra = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
             if ra is not None:
-                ra.hide()  # order the harness window out
+                hid = bool(ra.hide())  # order the harness window out
             # hide() alone does NOT reliably return focus here: all three
             # harnesses share the "Google Chrome Beta" bundle, so hiding one
             # process can leave the app-level active state on a sibling. Force
@@ -187,9 +188,23 @@ class _Worker(threading.Thread):
                 )
                 # NSApplicationActivateIgnoringOtherApps = 1 << 1
                 if prev is not None and not prev.isTerminated():
-                    prev.activateWithOptions_(1 << 1)
-        except Exception:
-            pass
+                    refocused = bool(prev.activateWithOptions_(1 << 1))
+            # Action log (2026-08-06): "did the guard actually hide it" was
+            # unanswerable for every popup report — the guard acted silently.
+            # One line per suppression, same relay as the telemetry.
+            s4l_log_relay.emit(
+                f"[browser-foreground] guard hide pid={pid} hid={hid} "
+                f"refocused={refocused} prev={self._prev_app or '?'}",
+                context="browser-foreground",
+            )
+        except Exception as e:
+            try:
+                s4l_log_relay.emit(
+                    f"[browser-foreground] guard hide FAILED pid={pid} err={type(e).__name__}: {e}",
+                    context="browser-foreground",
+                )
+            except Exception:
+                pass
 
     def run(self):
         while True:
