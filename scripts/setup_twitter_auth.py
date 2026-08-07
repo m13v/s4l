@@ -1209,6 +1209,9 @@ def cmd_connect(args) -> dict:
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
+    # A Deny/Cancel on THIS run's prompt, regardless of what other sources
+    # failed with (the single-type roll-up above misses mixed-error runs).
+    denied_now = any(a.get("error_type") == "keychain_acl_denied" for a in attempts)
     # Open a focused login window when the user asked for manual login, when the
     # keychain prompt was denied (import can't proceed), OR when there was nothing
     # to import in the first place — in that last case manual login is the ONLY
@@ -1216,7 +1219,7 @@ def cmd_connect(args) -> dict:
     open_login = (
         manual_login
         or not will_import
-        or rolled_up_error_type == "keychain_acl_denied"
+        or denied_now
     )
 
     shown = False
@@ -1256,23 +1259,36 @@ def cmd_connect(args) -> dict:
 
     # Build the needs_login note from the rolled-up cause + whether a window opened.
     extra = {}
-    if rolled_up_error_type == "keychain_acl_denied":
-        # The user clicked Deny/Cancel on the keychain prompt. Auto-import would
-        # have worked; they just refused keychain access. Tell them the real fix
-        # (re-run and click Allow), and since we DID open a login window for this
-        # case, point at it as the keychain-free fallback.
+    if denied_now:
+        # The user clicked Deny/Cancel on the ONE allowed keychain prompt. That
+        # answer is final (latched above): do NOT tell the caller to re-run the
+        # import — that advice made setup agents loop and re-prompt. Manual
+        # login is the path now, and a login window is already open for it.
         note = (
-            "It looks like you clicked Deny (or Cancel) on the macOS Keychain prompt. "
-            "To import your X session automatically, the autoposter needs to read Chrome's "
-            "\"Safe Storage\" key from your Keychain. Re-run connect_x and click Allow (or "
-            "Always Allow) on that prompt and the import will finish on its own. "
-            "If you'd rather not grant keychain access, there's already a Chrome window open "
-            "at the X login page"
+            "You declined the macOS Keychain prompt, so automatic import is off — "
+            "we only ask once and won't show that prompt again. "
+            "A Chrome window is open at the X login page"
             + ("" if shown else " (look for a 'Google Chrome' window)")
-            + " — just log in there by hand and ask me to re-check. "
+            + " — log in there by hand (username, password, 2FA if asked) and "
+            "ask me to re-check. Do NOT re-run the cookie import. "
             "(Auto-import tried: " + ", ".join(sources) + ".)"
         )
-        extra["remediation"] = "rerun_connect_x_and_click_allow"
+        extra["remediation"] = "use_manual_login"
+        extra["keychain_prompt"] = "declined_latched"
+    elif keychain_declined:
+        # A PREVIOUS run already recorded the Deny/Cancel; this call skipped the
+        # import path entirely (no prompt was shown) and went straight to the
+        # manual-login window.
+        note = (
+            "You previously declined the macOS Keychain prompt, so I skipped the "
+            "automatic import (we only ask once). A Chrome window is open at the "
+            "X login page"
+            + ("" if shown else " (look for a 'Google Chrome' window)")
+            + " — log in there by hand and ask me to re-check. Do NOT re-run "
+            "the cookie import; it will not prompt again."
+        )
+        extra["remediation"] = "use_manual_login"
+        extra["keychain_prompt"] = "declined_latched"
     elif open_login:
         # Manual login: either the caller asked for it (--manual-login) or there
         # was no existing X session anywhere to import, so this is the only path.
@@ -1349,6 +1365,11 @@ def main() -> int:
                         "A human finding the on-screen/VNC window plus password + 2FA "
                         "routinely exceeds 90s, so the wait is generous. Prevents the "
                         "detection race that misreports the handle as missing.")
+    c.add_argument("--retry-keychain-import", action="store_true",
+                   help="Clear the keychain-declined latch so the import path may "
+                        "show the macOS keychain prompt ONE more time. The prompt "
+                        "is once-only by policy; pass this only when the user "
+                        "explicitly asks to retry the automatic import.")
     args = ap.parse_args()
 
     if args.cmd == "detect-sources":
