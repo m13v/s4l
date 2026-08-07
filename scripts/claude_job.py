@@ -768,9 +768,13 @@ def _run_codex_exec(ns, qtype: str, prompt: str, schema_text: str | None) -> int
                 "JSON Schema. No prose, no markdown fences, nothing else:\n"
                 f"{schema_text}"
             )
-        model = os.environ.get("S4L_CODEX_MODEL", "").strip()
-        if model:
-            cmd += ["-m", model]
+        # Model default: gpt-5.6-sol (best 5.6 tier; user call 2026-08-06), env
+        # override via S4L_CODEX_MODEL. Sol availability is plan-gated and the
+        # app's models_cache.json under-reports it, so truth is probe-by-use:
+        # on the specific "model not supported" 400 we retry ONCE with no -m
+        # (the account's config default, e.g. gpt-5.6-terra) and log the
+        # downgrade loudly. Any other failure stays loud with no retry.
+        model = os.environ.get("S4L_CODEX_MODEL", "").strip() or "gpt-5.6-sol"
         # The user's global config may pin xhigh reasoning (fine for coding,
         # slow and token-hungry for a drafting turn). Default these turns to
         # medium; S4L_CODEX_REASONING overrides.
@@ -778,20 +782,34 @@ def _run_codex_exec(ns, qtype: str, prompt: str, schema_text: str | None) -> int
         cmd += ["-c", f'model_reasoning_effort="{effort}"']
 
         budget = max(60, ns.timeout - 60)
-        _plog(f"codex-exec start {qtype} job {job_id} batch={batch} bin={codex} effort={effort} timeout={budget}s")
+        _plog(f"codex-exec start {qtype} job {job_id} batch={batch} bin={codex} model={model} effort={effort} timeout={budget}s")
         started = time.time()
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=budget,
-            )
-        except subprocess.TimeoutExpired:
-            _act_clear()
-            _plog(f"codex-exec timed out after {budget}s on job {job_id} ({qtype})")
-            return 79  # mirror the queue path's "blocked, skip cleanly"
+        proc = None
+        for attempt_model in (model, None):
+            attempt_cmd = cmd + (["-m", attempt_model] if attempt_model else [])
+            try:
+                proc = subprocess.run(
+                    attempt_cmd,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(60, budget - int(time.time() - started)),
+                )
+            except subprocess.TimeoutExpired:
+                _act_clear()
+                _plog(f"codex-exec timed out after {budget}s on job {job_id} ({qtype})")
+                return 79  # mirror the queue path's "blocked, skip cleanly"
+            err_blob = f"{proc.stderr or ''}{proc.stdout or ''}"
+            if (
+                attempt_model
+                and "not supported when using Codex" in err_blob
+            ):
+                _plog(
+                    f"codex-exec model {attempt_model} unavailable on this account; "
+                    f"retrying job {job_id} with the config default model"
+                )
+                continue
+            break
 
         # Token usage rides stderr as "tokens used\nN"; best-effort log only.
         m = re.search(r"tokens used\s*\n?\s*([\d,]+)", proc.stderr or "")
