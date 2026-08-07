@@ -1749,7 +1749,7 @@ class S4LMenuBar(rumps.App):
             self._spin_i = 0
             self._spinner = rumps.Timer(self._spin, 0.12)
             self._spinner.start()
-        self._notify("S4L", "Updating… Claude will restart in a moment.")
+        self._notify("S4L", f"Updating… {self._update_host_word()} will restart in a moment.")
         threading.Thread(target=self._mcpb_update_work, daemon=True).start()
         self._tick(None)
 
@@ -1782,6 +1782,45 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
         return dirs
+
+    # ---- install-flavor detection (2026-08-06, Codex/ChatGPT port) ---------
+    # A box can carry either or both server installs: the Claude Desktop
+    # extension dir (.mcpb double-click / npm lanes) and the host-neutral
+    # bundle at <state>/app (curl-lane install for the ChatGPT/Codex app).
+    # The updater refreshes every install that exists and restarts only the
+    # host apps that correspond to them.
+    def _has_claude_ext(self):
+        return os.path.isdir(self._ext_dir())
+
+    @staticmethod
+    def _app_bundle_dir():
+        return os.path.join(st.state_dir(), "app")
+
+    def _has_app_bundle(self):
+        return os.path.isfile(os.path.join(self._app_bundle_dir(), "dist", "index.js"))
+
+    def _update_host_word(self):
+        """Which host app the update flow will restart, for user-facing copy."""
+        return "Claude Desktop" if self._has_claude_ext() else "ChatGPT"
+
+    @staticmethod
+    def _chatgpt_running():
+        try:
+            return subprocess.run(["pgrep", "-x", "ChatGPT"],
+                                  capture_output=True, timeout=10).returncode == 0
+        except Exception:
+            return False
+
+    def _restart_chatgpt_if_running(self):
+        """Bounce the ChatGPT app so its next MCP spawn runs the refreshed
+        bundle. Only when it was already running: if it's closed there is
+        nothing stale to replace (codex exec and the next app launch pick up
+        the new files on their own)."""
+        if not self._chatgpt_running():
+            return
+        subprocess.run(["killall", "ChatGPT"], capture_output=True)
+        time.sleep(3)
+        subprocess.run(["open", "-a", "ChatGPT"], capture_output=True, timeout=20)
 
     @staticmethod
     def _claude_running():
@@ -1862,13 +1901,26 @@ class S4LMenuBar(rumps.App):
                 self._sig = None
                 self._notify("S4L update failed", "Couldn't download the update — check your connection.")
                 return
-            r = subprocess.run(["unzip", "-oq", mcpb, "-d", self._ext_dir()],
-                               capture_output=True, timeout=180)
-            if r.returncode != 0:
-                self._updating_mcpb = False
-                self._sig = None
-                self._notify("S4L update failed", "Couldn't unpack the update.")
-                return
+            # Refresh every install flavor present on this box (Claude
+            # extension dir, ChatGPT/Codex app bundle, or both). Unzipping
+            # into a flavor that isn't installed would fabricate a stray
+            # install, so target only what exists; a box with neither keeps
+            # the legacy behavior (ext dir) as the recovery path.
+            has_ext = self._has_claude_ext()
+            has_app = self._has_app_bundle()
+            targets = [d for d, ok in ((self._ext_dir(), has_ext),
+                                       (self._app_bundle_dir(), has_app)) if ok]
+            if not targets:
+                targets = [self._ext_dir()]
+                has_ext = True
+            for tdir in targets:
+                r = subprocess.run(["unzip", "-oq", mcpb, "-d", tdir],
+                                   capture_output=True, timeout=180)
+                if r.returncode != 0:
+                    self._updating_mcpb = False
+                    self._sig = None
+                    self._notify("S4L update failed", "Couldn't unpack the update.")
+                    return
             # Record what we just installed so the tick loop can verify the
             # EFFECTIVE version actually advanced after the restart. The old
             # flow claimed success unconditionally, which lied on boxes whose
@@ -1876,7 +1928,7 @@ class S4LMenuBar(rumps.App):
             # extension dir updated but the running install stayed old.
             target = ""
             try:
-                with open(os.path.join(self._ext_dir(), "manifest.json")) as f:
+                with open(os.path.join(targets[0], "manifest.json")) as f:
                     target = str((json.load(f) or {}).get("version") or "")
             except Exception:
                 target = ""
@@ -1886,36 +1938,42 @@ class S4LMenuBar(rumps.App):
                         json.dump({"target": target, "started_at": time.time()}, f)
                 except Exception:
                     pass
-            # Restart Claude so the refreshed server loads (we're decoupled from it).
-            self._quit_claude_and_wait()
-            # Claude is fully down now — relocate the autopilot scheduled tasks'
-            # cwd so their once-a-minute runs stop flooding the user's interactive
-            # `claude --resume` history. MUST happen while Claude is down (it caches
-            # the registry in memory and clobbers live edits). See queueWorkerCwd()
-            # in mcp/src/index.ts and the same routine in scripts/s4l_box_update.sh.
-            # _fresh (not the in-process call): this is a mid-update self-heal,
-            # so it must run the code that was JUST downloaded, not whatever
-            # this already-running (about to be replaced) process imported at
-            # ITS OWN startup — see _rewrite_scheduled_task_cwd_fresh's docstring.
-            self._rewrite_scheduled_task_cwd_fresh()
+            # Restart whichever host apps correspond to the refreshed installs
+            # (we're decoupled from both).
+            if has_ext:
+                self._quit_claude_and_wait()
+                # Claude is fully down now — relocate the autopilot scheduled tasks'
+                # cwd so their once-a-minute runs stop flooding the user's interactive
+                # `claude --resume` history. MUST happen while Claude is down (it caches
+                # the registry in memory and clobbers live edits). See queueWorkerCwd()
+                # in mcp/src/index.ts and the same routine in scripts/s4l_box_update.sh.
+                # _fresh (not the in-process call): this is a mid-update self-heal,
+                # so it must run the code that was JUST downloaded, not whatever
+                # this already-running (about to be replaced) process imported at
+                # ITS OWN startup — see _rewrite_scheduled_task_cwd_fresh's docstring.
+                self._rewrite_scheduled_task_cwd_fresh()
             if target:
                 # The graceful quit can eat minutes; restart the verify clock
-                # now that Claude is actually down so UPDATE_VERIFY_GRACE_SEC
+                # now that the host is actually down so UPDATE_VERIFY_GRACE_SEC
                 # measures server boot, not app teardown.
                 try:
                     with open(self._update_verify_path(), "w") as f:
                         json.dump({"target": target, "started_at": time.time()}, f)
                 except Exception:
                     pass
-            self._relaunch_claude(user_data_dirs)
+            if has_ext:
+                self._relaunch_claude(user_data_dirs)
+            if has_app:
+                self._restart_chatgpt_if_running()
             self._update_available = False
             self._sig = None
+            host_word = "Claude" if has_ext else "ChatGPT"
             if target:
                 # Honest phrasing: the verdict (success OR the real blocker)
                 # comes from _check_update_verdict once the new server settles.
-                self._notify("S4L update", f"v{target} installed; Claude is restarting. I'll confirm once it's live.")
+                self._notify("S4L update", f"v{target} installed; {host_word} is restarting. I'll confirm once it's live.")
             else:
-                self._notify("S4L updated", "Claude restarted on the latest version.")
+                self._notify("S4L updated", f"{host_word} restarted on the latest version.")
         except Exception as e:
             self._updating_mcpb = False
             self._sig = None
@@ -4267,7 +4325,7 @@ class S4LMenuBar(rumps.App):
             items.append(self._label(f"⬆ Update available · v{self._latest_version}"))
             items.append(
                 rumps.MenuItem(
-                    "Update now & restart Claude Desktop",
+                    f"Update now & restart {self._update_host_word()}",
                     callback=self._do_mcpb_update,
                 )
             )
