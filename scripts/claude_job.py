@@ -707,6 +707,149 @@ def _plog(msg: str) -> None:
         pass
 
 
+def _emit_envelope(obj) -> None:
+    """Print the claude `--output-format json` shaped envelope the pipeline's
+    raw_decode + structured_output/result parsers expect, byte-compatible with
+    both the queue path and a real claude run."""
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "structured_output": obj,
+        "result": json.dumps(obj) if not isinstance(obj, str) else obj,
+    }
+    sys.stdout.write(json.dumps(envelope))
+    sys.stdout.flush()
+
+
+def _run_codex_exec(ns, qtype: str, prompt: str, schema_text: str | None) -> int:
+    """codex-exec provider: answer the turn inline via the ChatGPT-app-bundled
+    `codex exec` (headless, subscription-authenticated). No queue, no worker,
+    no app-open requirement. Same envelope, same 0/1/79 exit semantics as the
+    queue path, so run_claude.sh callers can't tell the difference.
+
+    No fallback to the queue on failure, by design: a broken codex login must
+    fail loudly (rc=1) so the stall/deadman rails surface it, not silently
+    strand jobs in a queue no worker drains.
+    """
+    import tempfile
+
+    codex = draft_provider.codex_bin()
+    if not codex:
+        _plog(f"codex-exec provider active but no codex binary found; failing {qtype}")
+        return 1
+
+    batch = (os.environ.get("BATCH_ID") or os.environ.get("SA_CYCLE_ID") or "-").strip() or "-"
+    job_id = uuid.uuid4().hex
+    _arm_deathwatch(job_id, qtype, batch)
+    _act_write(qtype)
+
+    schema_path = None
+    out_path = None
+    try:
+        out_fd, out_path = tempfile.mkstemp(prefix="s4l_codex_out_", suffix=".txt")
+        os.close(out_fd)
+        cmd = [
+            codex, "exec", "-",
+            "-C", state_dir(),
+            "-s", "read-only",
+            "--skip-git-repo-check",
+            "-o", out_path,
+        ]
+        if schema_text:
+            sfd, schema_path = tempfile.mkstemp(prefix="s4l_codex_schema_", suffix=".json")
+            with os.fdopen(sfd, "w") as f:
+                f.write(schema_text)
+            cmd += ["--output-schema", schema_path]
+        model = os.environ.get("S4L_CODEX_MODEL", "").strip()
+        if model:
+            cmd += ["-m", model]
+        # The user's global config may pin xhigh reasoning (fine for coding,
+        # slow and token-hungry for a drafting turn). Default these turns to
+        # medium; S4L_CODEX_REASONING overrides.
+        effort = os.environ.get("S4L_CODEX_REASONING", "medium").strip() or "medium"
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+
+        budget = max(60, ns.timeout - 60)
+        _plog(f"codex-exec start {qtype} job {job_id} batch={batch} bin={codex} effort={effort} timeout={budget}s")
+        started = time.time()
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=budget,
+            )
+        except subprocess.TimeoutExpired:
+            _act_clear()
+            _plog(f"codex-exec timed out after {budget}s on job {job_id} ({qtype})")
+            return 79  # mirror the queue path's "blocked, skip cleanly"
+
+        # Token usage rides stderr as "tokens used\nN"; best-effort log only.
+        m = re.search(r"tokens used\s*\n?\s*([\d,]+)", proc.stderr or "")
+        tokens = m.group(1) if m else "?"
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+            _act_clear()
+            _plog(f"codex-exec rc={proc.returncode} on job {job_id} ({qtype}); tail: {tail}")
+            return 1
+
+        try:
+            with open(out_path) as f:
+                text = f.read().strip()
+        except Exception as e:
+            _act_clear()
+            _plog(f"codex-exec produced no last-message file for job {job_id}: {e}")
+            return 1
+        if not text:
+            _act_clear()
+            _plog(f"codex-exec empty answer on job {job_id} ({qtype})")
+            return 1
+
+        # Parse the answer the same leniently the worker rail does: JSON when
+        # it parses (objects for schema'd jobs, bare strings for link-tail),
+        # fenced JSON unwrapped, otherwise the raw text as a plain string.
+        obj = None
+        parsed = False
+        for candidate in (text, re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()):
+            try:
+                obj = json.loads(candidate)
+                parsed = True
+                break
+            except Exception:
+                continue
+        if not parsed:
+            obj = text
+
+        err = _validate_against_schema(obj, schema_text)
+        if err:
+            _act_clear()
+            _plog(f"codex-exec result rejected for job {job_id} ({qtype}): {err}")
+            return 1
+
+        _emit_envelope(obj)
+        _mark_drain_success()
+        _stamp_heartbeat("codex-exec", qtype)
+        try:
+            _ncand = len(obj.get("candidates")) if isinstance(obj, dict) and isinstance(obj.get("candidates"), list) else "?"
+        except Exception:
+            _ncand = "?"
+        _plog(
+            f"codex-exec done job {job_id} batch={batch} ({qtype}) in {int(time.time() - started)}s "
+            f"tokens={tokens}; {_ncand} candidates -> producer assembles the plan"
+        )
+        return 0
+    finally:
+        for p in (schema_path, out_path):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        _disarm_deathwatch(job_id)
+
+
 def cmd_provider(ns) -> int:
     _apply_state_dir_override(ns)
     qtype = TAG_TO_TYPE.get(ns.tag)
@@ -753,9 +896,15 @@ def cmd_provider(ns) -> int:
     # S4L paused: refuse to enqueue at all. Workers won't claim while paused, so
     # an enqueued job would just sit in pending/ while this producer burns its
     # whole wait window "drafting" and then dies to its external timeout.
+    # Applies to every provider: paused means no drafting, period.
     if _is_paused():
         _plog(f"S4L paused; refusing to enqueue {qtype} job")
         return 1
+
+    # Provider branch (2026-08-06). codex-exec answers inline; claude-p never
+    # reaches here (eligible already said no); anything else is the queue.
+    if draft_provider.get() == "codex-exec":
+        return _run_codex_exec(ns, qtype, prompt, schema_text)
 
     job_id = uuid.uuid4().hex
     created = time.time()
