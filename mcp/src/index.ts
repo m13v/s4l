@@ -4111,15 +4111,29 @@ function writeDraftProvider(provider: "claude-desktop-queue" | "claude-p" | "cod
 tool(
   "queue_setup",
   {
-    title: "Get autopilot scheduled-task specs",
+    // Title/description are host-aware (2026-08-06): an agent reads the tool
+    // description FIRST, so it must tell the truth for the host it's on.
+    // Historic name kept for fleet compatibility; conceptually this tool is
+    // "arm the drafting engine" — Claude hosts get queue-worker task specs,
+    // Codex/ChatGPT hosts get the provider stamped with nothing to schedule.
+    title:
+      s4lHost() === "codex"
+        ? "Arm the draft autopilot"
+        : "Get autopilot scheduled-task specs",
     description:
-      "Returns the scheduled task that runs the hands-free draft autopilot on this machine " +
-      "(s4l-worker, the universal queue worker). For EACH returned task, call the host tool " +
-      "create_scheduled_task with its taskId, cronExpression, prompt, and notifyOnCompletion " +
-      "VERBATIM (do not edit the prompt — it contains exact local paths; notifyOnCompletion MUST be " +
-      "false or the per-minute worker spams a notification every run). The task drains the local job queue that the " +
-      "real pipeline feeds (all job types); the pipeline itself is kicked by launchd jobs this server " +
-      "installs. Use this as the final onboarding step instead of the old per-type worker tasks.",
+      s4lHost() === "codex"
+        ? "Arms the hands-free draft autopilot on this machine. On this host there is NOTHING to " +
+          "schedule: drafting runs inline through this app's engine, so ONE call completes autopilot " +
+          "setup (it records the draft engine choice and returns no tasks). Do NOT create any " +
+          "scheduled task or automation. The pipeline itself is kicked by launchd jobs this server " +
+          "installs. Use this as the final onboarding step."
+        : "Returns the scheduled task that runs the hands-free draft autopilot on this machine " +
+          "(s4l-worker, the universal queue worker). For EACH returned task, call the host tool " +
+          "create_scheduled_task with its taskId, cronExpression, prompt, and notifyOnCompletion " +
+          "VERBATIM (do not edit the prompt — it contains exact local paths; notifyOnCompletion MUST be " +
+          "false or the per-minute worker spams a notification every run). The task drains the local job queue that the " +
+          "real pipeline feeds (all job types); the pipeline itself is kicked by launchd jobs this server " +
+          "installs. Use this as the final onboarding step instead of the old per-type worker tasks.",
     inputSchema: {},
   },
   async () => {
