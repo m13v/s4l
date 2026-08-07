@@ -4065,6 +4065,31 @@ function runtimeSnapshot() {
 // host tool create_scheduled_task. Calling it also eagerly pre-approves the
 // worker tools, so the tasks never stall on a permission prompt. Read-only +
 // idempotent.
+// ---- host + draft-provider plumbing (2026-08-06) ---------------------------
+// Which app is hosting this MCP server. Stamped at registration time via the
+// S4L_HOST env on the host's server entry (the codex `mcp add` sets
+// S4L_HOST=codex; Claude registrations set nothing). Deliberately an env var
+// we control, not MCP clientInfo sniffing: deterministic across host versions.
+function s4lHost(): "codex" | "claude" {
+  return (process.env.S4L_HOST || "").trim().toLowerCase() === "codex" ? "codex" : "claude";
+}
+
+// Stamp <state_dir>/draft-provider.json, the single source of truth read at the
+// run_claude.sh seam (scripts/draft_provider.py / claude_job.py) for which
+// engine answers the pipeline's pure text->JSON drafting turns. Last setup
+// wins: re-running queue_setup on either host takes ownership cleanly, which
+// is the single-driver guarantee (never two engines answering one queue).
+function writeDraftProvider(provider: "claude-desktop-queue" | "claude-p" | "codex-exec", setBy: string): void {
+  const p = path.join(s4lStateDir(), "draft-provider.json");
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(
+    p,
+    JSON.stringify({ provider, set_at: new Date().toISOString(), set_by: setBy }, null, 2),
+    "utf-8"
+  );
+  console.error(`[draft-provider] ${provider} (${setBy})`);
+}
+
 tool(
   "queue_setup",
   {
