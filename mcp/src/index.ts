@@ -5674,6 +5674,21 @@ function startLocalPanel(): Promise<string> {
       const port = typeof addr === "object" && addr ? addr.port : 0;
       localPanel = { url: `http://127.0.0.1:${port}/`, server: srv };
       writePanelUrl(localPanel.url);
+      // Periodic reclaim (2026-08-06, Codex port): on ChatGPT/Codex hosts the
+      // app spawns a server per chat session and can kill it without the clean
+      // relinquish (SIGKILL leaves panel-endpoint.json pointing at a dead pid).
+      // Long-lived instances (the launchd keepalive server, a Desktop-hosted
+      // one) re-run writePanelUrl on a slow tick: it cedes to any LIVE
+      // registrant and only takes over dead/absent entries, so the shared file
+      // self-heals within minutes instead of stranding menu-bar approvals.
+      const reclaim = setInterval(() => {
+        try {
+          if (localPanel) writePanelUrl(localPanel.url);
+        } catch {
+          /* best-effort */
+        }
+      }, 120_000);
+      reclaim.unref?.();
       resolve(localPanel.url);
     });
   });
