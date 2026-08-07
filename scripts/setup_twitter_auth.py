@@ -734,6 +734,49 @@ def _keychain_safe_storage_ok(browser_label: str = "Chrome") -> tuple[bool, str]
     return False, (err_tail[-1] if err_tail else f"exit {r.returncode}")
 
 
+# --- Keychain prompt-once latch (2026-08-06) --------------------------------
+# Product decision: the user is asked for keychain access AT MOST ONCE, by the
+# import attempt itself (copy_browser_cookies' `security` call blocks on the
+# macOS dialog with no timeout, so the one prompt waits for a human answer).
+# Any Deny/Cancel is recorded here, and every later connect_x skips the import
+# path entirely and goes straight to manual login. Without this latch the setup
+# agent saw "keychain locked, re-run connect_x", retried the import, and
+# re-fired the password prompt at a user who had already said no (install
+# a208aa6b, 2026-08-06: three prompts in five minutes). Lives OUTSIDE the
+# per-platform profile dir so the reddit importer can honor the same decision.
+_KEYCHAIN_DECLINED_LATCH = (
+    Path.home() / ".claude" / "browser-profiles" / "keychain-import-declined.json"
+)
+
+
+def _keychain_declined() -> dict | None:
+    """The recorded Deny/Cancel from a previous import attempt, or None."""
+    try:
+        return json.loads(_KEYCHAIN_DECLINED_LATCH.read_text())
+    except Exception:
+        return None
+
+
+def _keychain_mark_declined(source: str, detail: str | None) -> None:
+    try:
+        _KEYCHAIN_DECLINED_LATCH.parent.mkdir(parents=True, exist_ok=True)
+        _KEYCHAIN_DECLINED_LATCH.write_text(json.dumps({
+            "declined_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "source": source,
+            "detail": (detail or "")[:500],
+        }))
+    except Exception as e:
+        print(f"setup_twitter_auth: could not write keychain latch ({e})",
+              file=sys.stderr)
+
+
+def _keychain_clear_declined() -> None:
+    try:
+        _KEYCHAIN_DECLINED_LATCH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _classify_import_error(detail: str | None) -> str:
     """Map a copy_browser_cookies.py error string to a structured type so the
     upper layers (connect_x, the user) can show a precise remediation instead
@@ -750,9 +793,13 @@ def _classify_import_error(detail: str | None) -> str:
     #   - unlock/confirm prompt, click Cancel/Deny -> errSecUserCanceled (-128)
     # Both mean "the user actively refused", and both have the same fix (re-run
     # and click Allow), so collapse them into one type.
+    # "exit 128" is `security`'s bare exit code for errSecUserCanceled when
+    # stderr is empty (observed install a208aa6b 2026-08-06); without this
+    # match a user's Cancel was misread as a locked keychain and retried.
     if (("access denied" in d) or ("errsecauth" in d) or ("-25293" in d)
             or ("user canceled" in d) or ("user cancelled" in d)
-            or ("errsecusercanceled" in d) or ("-128" in d)):
+            or ("errsecusercanceled" in d) or ("-128" in d)
+            or ("exit 128" in d)):
         return "keychain_acl_denied"
     if ("not be found in the keychain" in d) or ("errsecitemnotfound" in d):
         return "keychain_entry_missing"
@@ -1055,33 +1102,37 @@ def cmd_connect(args) -> dict:
     # there is a real session to copy. Otherwise fall through to manual login.
     will_import = has_importable and not manual_login
 
-    # 1c. Headless + Keychain pre-flight (#3 + #4, added 2026-06-02) — relevant
-    #     ONLY to the import path. copy_browser_cookies.py must read the per-browser
-    #     Safe Storage entry from the OS keychain; SSH/launchd-invoked processes get
-    #     errSecAuthFailed silently (no prompt). The manual-login path skips this.
-    if will_import and _is_headless():
-        # Probe Chrome (the autoposter default); if that's denied, the rest are too.
-        kc_ok, kc_detail = _keychain_safe_storage_ok("Chrome")
-        if not kc_ok:
-            return {
-                "ok": True,
-                "connected": False,
-                "state": "keychain_locked",
-                "error_type": "keychain_locked",
-                "headless": True,
-                "keychain_detail": kc_detail,
-                "note": (
-                    "Cookie import requires reading Chrome's Safe Storage from the macOS "
-                    "Keychain, but this process can't access it (probably running over SSH "
-                    "or another headless context). No GUI prompt is shown for this — macOS "
-                    "denies access silently. To fix, run this once in the same session:\n"
-                    "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
-                    "Then re-run connect_x. Or connect X with manual login instead — that "
-                    "signs in directly in the autoposter's own browser and needs no keychain."
-                ),
-                "remediation_cmd": "security unlock-keychain ~/Library/Keychains/login.keychain-db",
-                "cdp": CDP,
-            }
+    # 1c. Keychain prompt-once gate (2026-08-06; replaces the 2026-06-02
+    #     headless probe). The old probe pre-read "Chrome Safe Storage" with a
+    #     10s timeout, which (a) fired a SEPARATE SecurityAgent prompt before
+    #     the import's own one, (b) auto-dismissed that dialog from under the
+    #     user when the timeout killed `security`, and (c) was gated on
+    #     _is_headless(), which is True for EVERY MCP-spawned run (stdin is
+    #     never a tty), so all desktop installs got told "you're probably on
+    #     SSH; run security unlock-keychain and re-run connect_x" — advice the
+    #     setup agent obediently looped on, re-prompting a user who had already
+    #     clicked Cancel.
+    #     Now the import attempt itself is the single keychain prompt: its
+    #     `security` call blocks on the dialog with no timeout, its Deny/Cancel
+    #     comes back as a classifiable error, and the latch below makes the
+    #     answer permanent. A truly headless (SSH/launchd) run fails that same
+    #     call fast with "User interaction is not allowed" -> keychain_locked,
+    #     which is NOT latched (no prompt was ever shown).
+    if will_import:
+        if getattr(args, "retry_keychain_import", False):
+            _keychain_clear_declined()
+        declined = _keychain_declined()
+        if declined:
+            # The one allowed prompt was already answered with Deny/Cancel.
+            # Skip the import path for good and fall through to manual login
+            # in THIS call (will_import False forces open_login below), so
+            # setup keeps moving instead of asking again.
+            will_import = False
+            keychain_declined = declined
+        else:
+            keychain_declined = None
+    else:
+        keychain_declined = None
 
     # 2. Import from the user's everyday browser (skipped entirely when we're on
     #    the manual-login path — `will_import` False makes this loop a no-op).
@@ -1098,6 +1149,13 @@ def cmd_connect(args) -> dict:
             "detail": detail,
             "error_type": error_type,
         })
+        if error_type == "keychain_acl_denied":
+            # The user answered the ONE allowed keychain prompt with
+            # Deny/Cancel. Record it forever and stop the sweep — trying the
+            # next source browser would fire another prompt, and once means
+            # once. Every later connect_x skips the import path entirely.
+            _keychain_mark_declined(src, detail)
+            break
         if not res.get("ok"):
             continue
         # 3. Re-validate after this source.
