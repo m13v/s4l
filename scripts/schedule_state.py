@@ -221,6 +221,22 @@ def compute(glob_pattern: str | None = None) -> str:
     the module docstring for why. Pass an explicit glob_pattern to scan a
     literal pattern instead (e.g. a test fixture dir); this bypasses account
     scoping entirely, matching the old unconditional behavior."""
+    # Provider layer (2026-08-06): when the box's draft provider is claude-p or
+    # codex-exec (scripts/draft_provider.py), drafting runs inline in the
+    # launchd cycle itself; NO Claude Desktop worker task is required, so the
+    # registry scan below is irrelevant and its 'missing' verdict would be a
+    # false alarm on every surface (menubar warning, dashboard "Set up draft
+    # schedule", Sentry). Health for those providers is watched by the queue
+    # drain-latency rails, which the inline path already stamps.
+    if glob_pattern is None:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import draft_provider  # noqa: E402
+
+            if draft_provider.get() != "claude-desktop-queue":
+                return "ok"
+        except Exception:
+            pass
     patterns = [glob_pattern] if glob_pattern is not None else _active_registry_glob_patterns()
     newest_epoch, newest_enabled = None, False
     # Track the freshest just-created, enabled, never-yet-fired task so a schedule
