@@ -461,19 +461,22 @@ def _bump_drain_timeout() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Opt-in worker self-reap (2026-06-27)                                         #
+# Worker self-reap (2026-06-27; DEFAULT ON since 2026-07-04 / v1.6.202)        #
 # --------------------------------------------------------------------------- #
 # A scheduled-task worker turn finishes its one queue iteration but Claude
 # Desktop keeps the agent-mode `claude` process warm (`--input-format
 # stream-json`), so finished workers pile up and leak RAM. The launchd reaper
-# (reap_stale_claude_sessions.py) is the GUARANTEE that bounds this. This opt-in
+# (reap_stale_claude_sessions.py) is the GUARANTEE that bounds this. This
 # path is a faster, source-side trim: once THIS worker is provably done (no work
 # to do, or its result is already on disk), terminate OUR OWN session so it never
-# becomes part of the standing pool. Strictly off unless S4L_WORKER_SELF_REAP is
-# set, so it ships dormant and cannot destabilize the default behaviour.
+# becomes part of the standing pool. It shipped opt-in (dormant unless
+# S4L_WORKER_SELF_REAP was set), which meant it ran nowhere; when Desktop
+# 1.18286.0 changed the cmdline shape the signature-fragile reaper missed too
+# and boxes leaked (Karol, 53 piled workers). Since 2026-07-04 it is ON by
+# default; opt OUT with S4L_WORKER_SELF_REAP=0 (see _self_reap_enabled).
 #
 # Safety properties:
-#   * No-op unless the env flag is set.
+#   * Respects the env kill switch (S4L_WORKER_SELF_REAP=0 disables it).
 #   * Only ever targets a process in OUR OWN ancestry that matches the reaper's
 #     worker signature (claude-code agent-mode session). The producer side
 #     (run-twitter-cycle.sh -> python) has no such ancestor, so a misplaced call
