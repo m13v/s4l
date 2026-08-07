@@ -130,3 +130,55 @@ explicitly out of scope for v1.
   surface it.
 - Never reintroduce a provider env var read at post time; provider choice lives in state,
   stamped once (same principle as the experiments-stamp-at-source rule).
+
+## Implementation notes (2026-08-06, all tested live)
+
+Shipped, with three simplifications over the design above:
+
+1. NO separate worker bridge / launchd lane. The provider layer lives entirely at the
+   existing seam: `scripts/draft_provider.py` (new; <state_dir>/draft-provider.json,
+   values claude-desktop-queue | claude-p | codex-exec) + `scripts/claude_job.py`:
+   - `eligible` returns 1 for every tag when provider=claude-p, so the LOCKED
+     run_claude.sh (uchg; discovered during implementation) falls through to its own
+     real `claude -p`. claude-p needed zero new execution code.
+   - `provider` routes to `_run_codex_exec()` when provider=codex-exec: inline
+     `codex exec - -C <state> -s read-only --skip-git-repo-check -o <tmp>` with the
+     prompt on stdin, schema APPENDED TO THE PROMPT (OpenAI strict structured-output
+     rejects our lenient schemas with 400 invalid_json_schema; do NOT use
+     --output-schema), lenient parse (fences unwrapped, bare-string fallback for
+     link-tail), `_validate_against_schema`, same claude-json envelope, exit 0/1/79,
+     deathwatch + activity + provider.log + drain-success/heartbeat stamps. Defaults:
+     config model (gpt-5.6-terra), effort medium via S4L_CODEX_REASONING,
+     S4L_CODEX_MODEL/S4L_CODEX_BIN overrides. No queue fallback on failure, by design.
+2. Host detection is an env var WE stamp at registration (`S4L_HOST=codex` on the
+   codex `mcp add` entry), not clientInfo sniffing. `mcp/src/index.ts` gained
+   s4lHost() + writeDraftProvider(); queue_setup on a codex host stamps codex-exec and
+   returns tasks:[] with codex-specific expectations (no scheduled task, no automation);
+   on a claude host it stamps claude-desktop-queue (last-setup-wins = single-driver).
+3. NO --setup entry in dist/index.js and NO release-asset step (release-mcpb.sh is
+   locked anyway): `scripts/install.sh` (new) is self-contained shell served raw from
+   the public repo; s4l.ai/install redirects to it (social-autoposter-website
+   next.config.ts). It curls the .mcpb from the fixed release URL, extracts to
+   <state_dir>/app, registers via `codex mcp add` / `claude mcp add -s user` (both,
+   when both exist), and stamps the provider by invoking-host detection
+   (CODEX_THREAD_ID vs CLAUDECODE/CLAUDE_CODE_*; S4L_INSTALL_HOST overrides).
+
+Health surfaces: `scripts/schedule_state.py` compute() short-circuits to 'ok' when the
+provider is not claude-desktop-queue (no Desktop worker required), which fixes the
+menubar warning, dashboard "Set up draft schedule", and Sentry in one place.
+
+Operator Mac state after implementation: `codex mcp add s4l` registered (S4L_HOST=codex,
+repo dist); production draft-provider.json deliberately ABSENT (default
+claude-desktop-queue, Claude keeps drafting). Running queue_setup from a ChatGPT chat
+would flip it to codex-exec; that is the intended switch, gated on the draft-quality
+eval below.
+
+Still open:
+- Draft-quality eval (Phase 0c): replay real candidates through gpt-5.6-terra via the
+  prompt sandbox vs Claude drafts, BEFORE flipping any real box to codex-exec.
+- MCP Apps panel rendering in the ChatGPT app GUI: manual check (open the app, ask for
+  the S4L panel). Fallback (menubar + loopback) already works.
+- drafting_status / dashboard cosmetic copy still says "worker" on codex-exec boxes.
+- codex headless MCP tool calls needed --dangerously-bypass-approvals-and-sandbox in
+  testing; interactive app sessions have their own approval UX. Revisit per-tool
+  approval_mode config if headless tool use matters later.
