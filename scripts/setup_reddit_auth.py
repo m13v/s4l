@@ -89,6 +89,9 @@ try:
         _classify_import_error,
         _is_headless,
         _keychain_safe_storage_ok,
+        _keychain_declined,
+        _keychain_mark_declined,
+        _keychain_clear_declined,
     )
 except Exception:  # pragma: no cover - defensive
     def _classify_import_error(detail):  # type: ignore[misc]
@@ -99,6 +102,15 @@ except Exception:  # pragma: no cover - defensive
 
     def _keychain_safe_storage_ok(browser_label="Chrome"):  # type: ignore[misc]
         return True, "probe unavailable"
+
+    def _keychain_declined():  # type: ignore[misc]
+        return None
+
+    def _keychain_mark_declined(source, detail):  # type: ignore[misc]
+        pass
+
+    def _keychain_clear_declined():  # type: ignore[misc]
+        pass
 
 # Vendored cookie copier - stdlib-only browser/profile detection plus the
 # actual keychain-decrypt + CDP-inject copy. Same module connect_x uses,
@@ -752,31 +764,19 @@ def cmd_connect(args) -> dict:
     manual_login = bool(getattr(args, "manual_login", False))
     will_import = has_importable and not manual_login
 
-    # 1c. Headless keychain preflight, import path only (manual login reads no
-    # keychain and must never be blocked by this).
-    if will_import and _is_headless():
-        kc_ok, kc_detail = _keychain_safe_storage_ok("Chrome")
-        if not kc_ok:
-            return {
-                "ok": True,
-                "connected": False,
-                "state": "keychain_locked",
-                "error_type": "keychain_locked",
-                "headless": True,
-                "keychain_detail": kc_detail,
-                "note": (
-                    "Cookie import requires reading the browser's Safe Storage from "
-                    "the macOS Keychain, but this process can't access it (probably "
-                    "running over SSH or another headless context). Run this once in "
-                    "the same session:\n"
-                    "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
-                    "Then re-run connect_reddit. Or connect Reddit with manual login "
-                    "instead; that signs in directly in the autoposter's own browser "
-                    "and needs no keychain."
-                ),
-                "remediation_cmd": "security unlock-keychain ~/Library/Keychains/login.keychain-db",
-                "cdp": CDP,
-            }
+    # 1c. Keychain prompt-once gate (2026-08-06; replaces the headless probe —
+    # see setup_twitter_auth.py for the full rationale). The user is asked for
+    # keychain access at most ONCE across ALL platforms: the import attempt
+    # itself is the single prompt, and a Deny/Cancel recorded by either the X
+    # or the reddit importer permanently routes both to manual login.
+    if will_import:
+        if getattr(args, "retry_keychain_import", False):
+            _keychain_clear_declined()
+        keychain_declined = _keychain_declined()
+        if keychain_declined:
+            will_import = False
+    else:
+        keychain_declined = None
 
     # 2. Import from the user's everyday browser.
     attempts = []
@@ -791,6 +791,12 @@ def cmd_connect(args) -> dict:
             "detail": detail,
             "error_type": error_type,
         })
+        if error_type == "keychain_acl_denied":
+            # The user answered the ONE allowed keychain prompt with
+            # Deny/Cancel. Record it (shared latch with connect_x) and stop
+            # the sweep — the next source would fire another prompt.
+            _keychain_mark_declined(src, detail)
+            break
         if not res.get("ok"):
             continue
         fields = _validate_session()
@@ -816,10 +822,13 @@ def cmd_connect(args) -> dict:
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
+    # A Deny/Cancel on THIS run's prompt, regardless of what other sources
+    # failed with (the single-type roll-up above misses mixed-error runs).
+    denied_now = any(a.get("error_type") == "keychain_acl_denied" for a in attempts)
     open_login = (
         manual_login
         or not will_import
-        or rolled_up_error_type == "keychain_acl_denied"
+        or denied_now
     )
 
     shown = False
@@ -834,19 +843,31 @@ def cmd_connect(args) -> dict:
                     note="You logged in manually; the autoposter detected the live "
                          "reddit session in its own browser profile.")
 
-    if rolled_up_error_type == "keychain_acl_denied":
+    if denied_now:
+        # Prompt-once policy: the Deny/Cancel is latched; never suggest
+        # re-running the import — that advice made setup agents loop and
+        # re-prompt. Manual login is the path now.
         note = (
-            "It looks like you clicked Deny (or Cancel) on the macOS Keychain prompt. "
-            "To import your Reddit session automatically, the autoposter needs to read "
-            "your browser's \"Safe Storage\" key from your Keychain. Re-run "
-            "connect_reddit and click Allow (or Always Allow) and the import will "
-            "finish on its own. If you'd rather not grant keychain access, there's "
-            "already a Chrome window open at the Reddit login page"
+            "You declined the macOS Keychain prompt, so automatic import is off — "
+            "we only ask once and won't show that prompt again. "
+            "A Chrome window is open at the Reddit login page"
             + ("" if shown else " (look for a 'Google Chrome' window)")
-            + "; just log in there by hand and ask me to re-check. "
-            "(Auto-import tried: " + ", ".join(sources) + ".)"
+            + "; log in there by hand and ask me to re-check. Do NOT re-run "
+            "the cookie import. (Auto-import tried: " + ", ".join(sources) + ".)"
         )
-        extra = {"remediation": "rerun_connect_reddit_and_click_allow"}
+        extra = {"remediation": "use_manual_login", "keychain_prompt": "declined_latched"}
+    elif keychain_declined:
+        # An earlier run (X or reddit) already recorded the Deny/Cancel; this
+        # call skipped the import entirely and opened the manual-login window.
+        note = (
+            "You previously declined the macOS Keychain prompt, so I skipped the "
+            "automatic import (we only ask once). A Chrome window is open at the "
+            "Reddit login page"
+            + ("" if shown else " (look for a 'Google Chrome' window)")
+            + "; log in there by hand and ask me to re-check. Do NOT re-run "
+            "the cookie import; it will not prompt again."
+        )
+        extra = {"remediation": "use_manual_login", "keychain_prompt": "declined_latched"}
     elif open_login:
         _why = (
             "" if will_import
@@ -907,6 +928,11 @@ def main() -> int:
     c.add_argument("--login-wait", type=float, default=300.0,
                    help="Seconds to wait for a MANUAL login to complete before "
                         "returning needs_login (default 300; 0 disables the wait).")
+    c.add_argument("--retry-keychain-import", action="store_true",
+                   help="Clear the shared keychain-declined latch so the import path "
+                        "may show the macOS keychain prompt ONE more time. The prompt "
+                        "is once-only by policy; pass this only when the user "
+                        "explicitly asks to retry the automatic import.")
     args = ap.parse_args()
 
     if args.cmd == "detect-sources":
