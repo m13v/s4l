@@ -875,6 +875,50 @@ def _run_codex_exec(ns, qtype: str, prompt: str, schema_text: str | None) -> int
         _disarm_deathwatch(job_id)
 
 
+def _run_claude_p(ns, qtype: str, prompt: str, schema_text: str | None) -> int:
+    """claude-p provider: answer the turn inline via the real `claude -p`
+    (Claude Code CLI, subscription-authenticated). No queue, no worker, no
+    Desktop-app requirement. stdout passes through untouched: it IS the
+    claude json envelope the callers parse. Key transform vs the caller's
+    original argv: the schema goes INLINE (the CLI parses the --json-schema
+    value as JSON; a file path 400s), and the prompt rides stdin so huge
+    drafting prompts never hit ARG_MAX."""
+    batch = (os.environ.get("BATCH_ID") or os.environ.get("SA_CYCLE_ID") or "-").strip() or "-"
+    job_id = uuid.uuid4().hex
+    _arm_deathwatch(job_id, qtype, batch)
+    _act_write(qtype)
+    cmd = ["claude", "-p", "--output-format", "json"]
+    if schema_text:
+        cmd += ["--json-schema", schema_text]
+    budget = max(60, ns.timeout - 60)
+    _plog(f"claude-p start {qtype} job {job_id} batch={batch} timeout={budget}s")
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=budget)
+    except subprocess.TimeoutExpired:
+        _act_clear()
+        _plog(f"claude-p timed out after {budget}s on job {job_id} ({qtype})")
+        _disarm_deathwatch(job_id)
+        return 79
+    except FileNotFoundError:
+        _act_clear()
+        _plog(f"claude-p provider active but no `claude` CLI on PATH; failing {qtype}")
+        _disarm_deathwatch(job_id)
+        return 1
+    sys.stdout.write(proc.stdout or "")
+    sys.stdout.flush()
+    if proc.returncode == 0 and '"subtype":"success"' in (proc.stdout or ""):
+        _mark_drain_success()
+        _stamp_heartbeat("claude-p", qtype)
+        _plog(f"claude-p done job {job_id} batch={batch} ({qtype}) in {int(time.time() - started)}s")
+    else:
+        _act_clear()
+        tail = (proc.stderr or "").strip()[-300:]
+        _plog(f"claude-p rc={proc.returncode} on job {job_id} ({qtype}); stderr tail: {tail}")
+    _disarm_deathwatch(job_id)
+    return proc.returncode
+
+
 def cmd_provider(ns) -> int:
     _apply_state_dir_override(ns)
     qtype = TAG_TO_TYPE.get(ns.tag)
@@ -926,10 +970,13 @@ def cmd_provider(ns) -> int:
         _plog(f"S4L paused; refusing to enqueue {qtype} job")
         return 1
 
-    # Provider branch (2026-08-06). codex-exec answers inline; claude-p never
-    # reaches here (eligible already said no); anything else is the queue.
-    if draft_provider.get() == "codex-exec":
+    # Provider branch (2026-08-06). codex-exec and claude-p answer inline;
+    # anything else is the queue (the Claude Desktop worker default).
+    _prov = draft_provider.get()
+    if _prov == "codex-exec":
         return _run_codex_exec(ns, qtype, prompt, schema_text)
+    if _prov == "claude-p":
+        return _run_claude_p(ns, qtype, prompt, schema_text)
 
     job_id = uuid.uuid4().hex
     created = time.time()
@@ -1384,16 +1431,14 @@ def cmd_eligible(ns: argparse.Namespace) -> int:
     """Routing probe for run_claude.sh: exit 0 when the tag is queue-mapped,
     1 otherwise. TAG_TO_TYPE is the single routing truth — no env var.
 
-    Provider layer (2026-08-06): when the box's draft provider is `claude-p`,
-    every tag reports NOT eligible, so run_claude.sh's existing fall-through
-    runs the real `claude -p` directly. That IS the claude-p implementation:
-    zero new execution paths, the locked wrapper stays untouched.
+    Provider selection happens INSIDE cmd_provider (codex-exec and claude-p
+    both run inline there); eligible stays a pure tag probe. A fall-through
+    design for claude-p was tried and reverted same-day 2026-08-06: pipeline
+    callers pass --json-schema as a FILE PATH, and the real `claude` CLI
+    parses that value as inline JSON, so the fall-through broke on every
+    schema'd tag. The inline runner rewrites the schema to inline form.
     """
-    if ns.tag not in TAG_TO_TYPE:
-        return 1
-    if draft_provider.get() == "claude-p":
-        return 1
-    return 0
+    return 0 if ns.tag in TAG_TO_TYPE else 1
 
 
 def main() -> int:
