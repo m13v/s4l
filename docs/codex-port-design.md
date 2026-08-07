@@ -1,6 +1,8 @@
 # Codex / ChatGPT App Port: One Server, Three Providers, One Installer
 
-Status: DESIGN (2026-08-06). Verified facts below were tested live on the operator Mac.
+Status: IMPLEMENTED 2026-08-06 (same day as design; see "Implementation notes" at
+bottom for what shipped and the deltas from this design). Verified facts below
+were tested live on the operator Mac.
 Owner context: S4L currently ships to Claude Desktop via .mcpb and to Claude Code via npm.
 Goal: the same product working for ChatGPT/Codex users, without forking the pipeline.
 
