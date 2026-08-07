@@ -138,9 +138,13 @@ Shipped, with three simplifications over the design above:
 1. NO separate worker bridge / launchd lane. The provider layer lives entirely at the
    existing seam: `scripts/draft_provider.py` (new; <state_dir>/draft-provider.json,
    values claude-desktop-queue | claude-p | codex-exec) + `scripts/claude_job.py`:
-   - `eligible` returns 1 for every tag when provider=claude-p, so the LOCKED
-     run_claude.sh (uchg; discovered during implementation) falls through to its own
-     real `claude -p`. claude-p needed zero new execution code.
+   - claude-p is an INLINE runner (`_run_claude_p`), not a fall-through. The
+     fall-through design (eligible returns 1) was tried and reverted same-day:
+     pipeline callers pass --json-schema as a FILE PATH and the real `claude`
+     CLI parses that value as inline JSON, so every schema'd tag broke. The
+     runner inlines the schema text, feeds the prompt on stdin, and passes
+     claude's own json envelope + exit code straight through. run_claude.sh
+     (uchg-locked) stays untouched either way.
    - `provider` routes to `_run_codex_exec()` when provider=codex-exec: inline
      `codex exec - -C <state> -s read-only --skip-git-repo-check -o <tmp>` with the
      prompt on stdin, schema APPENDED TO THE PROMPT (OpenAI strict structured-output
