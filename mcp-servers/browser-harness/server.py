@@ -28,12 +28,14 @@ headed, e.g. when Xvfb is available).
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -58,51 +60,16 @@ PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / PROFILE_NAME
 PID_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.chrome.pid"
 LOG_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.chrome.log"
 MCP_LOG_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.mcp.log"
-
-
-def _playwright_chromium_bins() -> list[str]:
-    """Chromium binaries the runtime's `playwright install chromium` step drops
-    into the shared ms-playwright cache, newest revision first.
-
-    A .mcpb user with no system Chrome (e.g. only Arc installed) still gets a
-    working browser here because the runtime download lands in this cache. The
-    rev number (chromium-1208/1217/1223/...) changes per Playwright pin, and the
-    bundle is named "Google Chrome for Testing" on recent revs / "Chromium" on
-    older ones, so we glob rather than hardcode. macOS uses chrome-mac[-arm64];
-    Linux uses chrome-linux.
-    """
-    cache = Path.home() / "Library" / "Caches" / "ms-playwright"  # macOS
-    linux_cache = Path.home() / ".cache" / "ms-playwright"  # Linux
-    patterns = [
-        # macOS, newer revs (arm64 + x64): "Google Chrome for Testing"
-        "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        # macOS, older revs: "Chromium"
-        "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
-        # Linux
-        "chromium-*/chrome-linux/chrome",
-    ]
-    found: list[str] = []
-    for root in (cache, linux_cache):
-        if not root.exists():
-            continue
-        for pat in patterns:
-            for hit in root.glob(pat):
-                if hit.exists():
-                    found.append(str(hit))
-
-    def _rev(p: str) -> int:
-        # Sort by the chromium-<rev> number so the newest install wins.
-        for part in Path(p).parts:
-            if part.startswith("chromium-") and part[len("chromium-"):].isdigit():
-                return int(part[len("chromium-"):])
-        return 0
-
-    return sorted(set(found), key=_rev, reverse=True)
+# [bh_tab_event] attribution lines from the harness CLI's stderr. bh_run
+# returns stderr to the calling agent and nothing else persists it, so the
+# reddit/linkedin lanes had ZERO tab-event observability while twitter's
+# cycle logs captured theirs (2026-07-31). One file per profile; correlate
+# against [browser-foreground] in menubar.err.log.
+TAB_EVENT_LOG = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.tab-events.log"
 
 
 def _detect_chrome_bin() -> str:
-    """Find the Chrome binary on disk. Env override wins. Returns "" if nothing
-    real is found (callers can then trigger an install fallback)."""
+    """Find the Chrome binary on disk. Env override wins."""
     env = os.environ.get("BH_CHROME_BIN")
     if env and Path(env).exists():
         return env
@@ -122,56 +89,14 @@ def _detect_chrome_bin() -> str:
         if Path(p).exists():
             return p
 
-    # The runtime's own bundled Chromium (ms-playwright cache). This is what
-    # makes setup work on a machine with no system Chrome installed.
-    for p in _playwright_chromium_bins():
-        return p
-
     # Fall back to PATH lookup.
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         found = shutil.which(name)
         if found:
             return found
 
-    return ""
-
-
-def _chrome_exists(p: str) -> bool:
-    return bool(p) and (Path(p).exists() or shutil.which(p) is not None)
-
-
-def _venv_python() -> str | None:
-    """The runtime venv interpreter (has playwright). Mirrors runtime.ts:
-    <S4L_STATE_DIR|~/.social-autoposter-mcp>/runtime/.venv/bin/python3."""
-    state_dir = Path(os.environ.get("S4L_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
-    if sys.platform == "win32":
-        cand = state_dir / "runtime" / ".venv" / "Scripts" / "python.exe"
-    else:
-        cand = state_dir / "runtime" / ".venv" / "bin" / "python3"
-    return str(cand) if cand.exists() else None
-
-
-def _install_chromium() -> dict:
-    """Last-ditch fallback when no Chromium is found anywhere: run
-    `playwright install chromium` so a fresh machine self-heals instead of
-    dead-ending at no_chrome_binary. Uses the runtime venv if present, otherwise
-    the interpreter running this server. The download lands in the shared
-    ms-playwright cache that _detect_chrome_bin() globs."""
-    py = _venv_python() or sys.executable
-    _log(f"no chromium found; attempting `playwright install chromium` via {py}")
-    try:
-        r = subprocess.run(
-            [py, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-            text=True,
-            timeout=int(os.environ.get("BH_CHROME_INSTALL_TIMEOUT_SEC", "600")),
-        )
-    except Exception as e:  # noqa: BLE001
-        _log(f"chromium install failed to launch: {e}")
-        return {"ok": False, "python": py, "error": str(e)}
-    ok = r.returncode == 0
-    _log(f"chromium install exit={r.returncode}")
-    return {"ok": ok, "python": py, "exit": r.returncode, "out": (r.stdout + r.stderr)[-600:]}
+    # Last-resort default (matches the pre-2026-05-20 hardcoded value).
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
 def _detect_browser_harness_bin() -> str:
@@ -207,6 +132,90 @@ _HAS_DISPLAY = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY
 _DEFAULT_HEADLESS = "1" if (_IS_LINUX and not _HAS_DISPLAY) else "0"
 HEADLESS = os.environ.get("BH_HEADLESS", _DEFAULT_HEADLESS) == "1"
 RUNNING_AS_ROOT = (hasattr(os, "geteuid") and os.geteuid() == 0)
+
+
+# --- Browser-session mutex (2026-07-16) ---------------------------------------
+# Every Claude-driven tool call here (bh_run/bh_navigate/bh_screenshot, all
+# funneling through _run_harness) used to be completely invisible to the
+# Python-side locks (browser_mutex.BrowserMutex, used internally by
+# twitter_browser.py/reddit_browser.py/linkedin_browser.py on every CDP
+# connect). A live bh_run script and a concurrent Python fetch/post could both
+# touch the same shared tab with zero coordination -- the exact mechanism
+# behind the "second blank tab, then it crashes" symptom traced tonight.
+#
+# BH_LOCK_FILE (set per-platform by the *-harness-mcp.json config, matching
+# the exact lock_file each platform's own BrowserMutex uses) and
+# BH_LOCK_MODULE_DIR (pointing at the materialized package's scripts/ dir, so
+# this reuses the ONE proven implementation instead of a fourth divergent
+# copy) are both optional: if either is unset or the import fails, _MUTEX
+# stays None and this file behaves exactly as it did before -- fail-open,
+# never a new way for the server to break.
+#
+# Scope is deliberately PER TOOL CALL, not per-session: several pipelines
+# (dm-outreach-reddit.sh, link-edit-reddit.sh) hold their own lease only
+# during actual CDP work and release between posts on purpose, so a batch
+# doesn't monopolize the browser for the ~30 min a full session can take.
+# Holding this lock for the whole server lifetime would regress that. Per-call
+# still closes the race that actually mattered: a live tool call stomping on
+# (or being stomped by) a concurrent Python read/write of the same tab.
+_MUTEX = None
+_LOCK_FILE = os.environ.get("BH_LOCK_FILE", "").strip()
+if _LOCK_FILE:
+    try:
+        _module_dir = os.environ.get("BH_LOCK_MODULE_DIR", "").strip()
+        if _module_dir and _module_dir not in sys.path:
+            sys.path.insert(0, _module_dir)
+        from browser_mutex import BrowserMutex  # type: ignore
+
+        _MUTEX = BrowserMutex(
+            lock_file=os.path.expanduser(_LOCK_FILE),
+            label=f"{PROFILE_NAME} harness (MCP)",
+        )
+    except Exception as _e:  # pragma: no cover - best-effort, never fatal
+        _MUTEX = None
+        # _log() isn't defined yet at this point in the file (module-level
+        # code runs top-to-bottom, before the Logging section below), so
+        # write directly to stderr instead of depending on definition order.
+        print(f"[browser-harness] lease disabled: import/construct failed ({_e!r})", file=sys.stderr)
+
+
+def _lock_acquire_for_call() -> bool:
+    """True if the tab is ours (or no lock is configured). BrowserMutex.acquire()
+    sys.exit(1)s on contention timeout -- correct for the CLI entrypoints it was
+    designed for, wrong here: it would kill the whole MCP server (and the
+    Claude session using it) over one busy tool call. Caught and converted to
+    a normal 'busy, try again' result instead."""
+    if _MUTEX is None:
+        return True
+    try:
+        _MUTEX.acquire()
+        return True
+    except SystemExit:
+        return False
+
+
+def _lock_release_after_call() -> None:
+    if _MUTEX is not None:
+        try:
+            _MUTEX.release()
+        except Exception:
+            pass
+
+
+def _lock_heartbeat_loop(stop_event: threading.Event) -> None:
+    """Background thread: refresh the lease every 20s while a call is in
+    flight, mirroring the old mcp_lock_proxy.py's proven heartbeat cadence
+    (30s) with a little headroom. Long-running bh_run scripts (up to
+    EXEC_TIMEOUT_SEC=300s by default) would otherwise risk the lease's own
+    300s/180s expiry firing mid-call and letting a peer reclaim it under us."""
+    while not stop_event.wait(20):
+        try:
+            _MUTEX.refresh()
+        except Exception:
+            pass
+
+
+atexit.register(_lock_release_after_call)
 
 
 # --- Logging ---
@@ -332,53 +341,22 @@ def _build_chrome_cmd() -> list[str]:
         cmd.append(f"--window-position={win_pos}")
         cmd.append(f"--window-size={win_size}")
 
-    # Open a REAL http(s) page (NOT about:blank) so the harness daemon's
-    # attach_first_page() finds an existing real tab and reuses it. Upstream
-    # browser-harness creates a throwaway about:blank on every re-attach where
-    # is_real_page() is false (which about:blank is); launching blank feeds that
-    # loop, piling up orphan tabs that cleanup_harness_tabs then has to sweep.
-    # Landing URL is derived from the profile's platform; BH_LAUNCH_URL overrides.
-    cmd.append(_launch_url())
+    # Open a real tab so CDP has something to attach to immediately.
+    cmd.append("about:blank")
     return cmd
-
-
-def _launch_url() -> str:
-    """Initial tab URL for the managed Chrome. MUST be a real http(s) page, not
-    about:blank, so the browser-harness daemon reuses it instead of spawning
-    throwaway blank tabs (see _build_chrome_cmd). Derived from PROFILE_NAME;
-    BH_LAUNCH_URL overrides for non-standard profiles."""
-    override = os.environ.get("BH_LAUNCH_URL", "").strip()
-    if override:
-        return override
-    name = PROFILE_NAME.lower()
-    if "linkedin" in name:
-        return "https://www.linkedin.com/feed/"
-    if "reddit" in name:
-        return "https://www.reddit.com/"
-    return "https://x.com"
 
 
 def ensure_chrome() -> dict:
     """Make sure our managed Chrome is running on PORT. Idempotent."""
-    global CHROME_BIN
     if _cdp_alive():
         return {"status": "already_running", "pid": _read_pid(), "cdp": CDP_URL}
 
-    if not _chrome_exists(CHROME_BIN):
-        # Re-detect (the runtime may have finished its chromium download since
-        # this server booted), then auto-install as a last resort so a fresh
-        # machine self-heals instead of dead-ending here.
-        CHROME_BIN = _detect_chrome_bin()
-        if not _chrome_exists(CHROME_BIN):
-            install = _install_chromium()
-            CHROME_BIN = _detect_chrome_bin()
-            if not _chrome_exists(CHROME_BIN):
-                return {
-                    "status": "no_chrome_binary",
-                    "looked_for": CHROME_BIN or "(none found)",
-                    "install_attempt": install,
-                    "hint": "Auto-install of chromium failed. Set BH_CHROME_BIN to a Chrome/Chromium path, or run `playwright install chromium`.",
-                }
+    if not Path(CHROME_BIN).exists() and not shutil.which(CHROME_BIN):
+        return {
+            "status": "no_chrome_binary",
+            "looked_for": CHROME_BIN,
+            "hint": "Set BH_CHROME_BIN to your Chrome/Chromium path, or install google-chrome / chromium.",
+        }
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -401,6 +379,42 @@ def ensure_chrome() -> dict:
         except OSError:
             pass
         time.sleep(0.5)
+
+    # SINGLETON GATE (2026-08-07): never spawn while ANY live process owns
+    # this profile — including Chromes started by the shell-side launcher,
+    # whose pids are not in our PID_FILE. Chrome's singleton handoff makes
+    # the EXISTING instance front itself (focus steal, plus a reopened blank
+    # window when it is tabless); the "Opening in existing browser session."
+    # lines in LOG_FILE are that event's fingerprint. A CDP probe that
+    # false-negatives under load must wait, not double-launch. Genuine
+    # recovery still works: _ensure_cdp_ready's stop_chrome() reaps the
+    # owner (via _port_owner_pids) before its retry, which makes this gate
+    # pass. Trailing space in the pattern keeps browser-harness from
+    # matching browser-harness-linkedin.
+    try:
+        _owners = subprocess.run(
+            ["pgrep", "-f", "--", f"--user-data-dir={PROFILE_DIR} "],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+    except Exception:
+        _owners = []
+    if _owners:
+        _log(
+            f"skip launch: pid {_owners[0]} already owns {PROFILE_DIR}; "
+            "waiting for CDP instead of double-launching (singleton handoff "
+            "would front the existing window)"
+        )
+        _gate_deadline = time.time() + 15
+        while time.time() < _gate_deadline:
+            if _cdp_alive():
+                return {"status": "already_running", "pid": int(_owners[0]), "cdp": CDP_URL}
+            time.sleep(0.5)
+        return {
+            "status": "owner_alive_cdp_dead",
+            "pid": int(_owners[0]),
+            "cdp": CDP_URL,
+            "log": str(LOG_FILE),
+        }
 
     cmd = _build_chrome_cmd()
 
@@ -633,38 +647,72 @@ def _run_harness(script: str, timeout: int = EXEC_TIMEOUT_SEC) -> dict:
     if cdp_err is not None:
         return cdp_err
 
-    env = os.environ.copy()
-    env["BU_CDP_URL"] = CDP_URL
-    # Make sure ~/.local/bin is on PATH (uv tools live there).
-    env["PATH"] = f"{Path.home()}/.local/bin:" + env.get("PATH", "")
-
-    # Upstream browser-harness dropped the `-c <script>` flag and now reads the
-    # script from stdin only (heredoc style). Pass via stdin so we work against
-    # current upstream; the old `-c` form returns the usage banner and exits 1,
-    # which used to surface as "CDP not connected" on every fresh install.
-    try:
-        proc = subprocess.run(
-            [BROWSER_HARNESS_BIN],
-            input=script,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as e:
+    # Hold the shared browser-session lease for exactly this call (see the
+    # mutex setup above) so a concurrent Python fetch/post can't stomp the
+    # tab this script is about to drive, and vice versa. Held only around the
+    # actual subprocess, not the CLI-existence/CDP-readiness checks above.
+    if not _lock_acquire_for_call():
         return {
             "ok": False,
-            "error": f"browser-harness timed out after {timeout}s",
-            "stdout": (e.stdout or "") if isinstance(e.stdout, str) else "",
-            "stderr": (e.stderr or "") if isinstance(e.stderr, str) else "",
+            "error": (
+                "browser busy: another process is actively using this harness's "
+                "tab right now (lease contended). Safe to retry shortly."
+            ),
         }
+    _stop_heartbeat = threading.Event()
+    _hb_thread = None
+    if _MUTEX is not None:
+        _hb_thread = threading.Thread(
+            target=_lock_heartbeat_loop, args=(_stop_heartbeat,), daemon=True
+        )
+        _hb_thread.start()
 
-    return {
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-    }
+    try:
+        env = os.environ.copy()
+        env["BU_CDP_URL"] = CDP_URL
+        # Make sure ~/.local/bin is on PATH (uv tools live there).
+        env["PATH"] = f"{Path.home()}/.local/bin:" + env.get("PATH", "")
+
+        # Upstream browser-harness dropped the `-c <script>` flag and now reads the
+        # script from stdin only (heredoc style). Pass via stdin so we work against
+        # current upstream; the old `-c` form returns the usage banner and exits 1,
+        # which used to surface as "CDP not connected" on every fresh install.
+        try:
+            proc = subprocess.run(
+                [BROWSER_HARNESS_BIN],
+                input=script,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            return {
+                "ok": False,
+                "error": f"browser-harness timed out after {timeout}s",
+                "stdout": (e.stdout or "") if isinstance(e.stdout, str) else "",
+                "stderr": (e.stderr or "") if isinstance(e.stderr, str) else "",
+            }
+
+        try:
+            events = [l for l in (proc.stderr or "").splitlines() if "[bh_tab_event]" in l]
+            if events:
+                with open(TAB_EVENT_LOG, "a") as f:
+                    f.write("\n".join(events) + "\n")
+        except OSError:
+            pass
+
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+    finally:
+        _stop_heartbeat.set()
+        if _hb_thread is not None:
+            _hb_thread.join(timeout=2)
+        _lock_release_after_call()
 
 
 # --- MCP server ---
