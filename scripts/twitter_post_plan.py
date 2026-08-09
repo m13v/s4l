@@ -119,6 +119,29 @@ LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 
+
+def _resolve_product_name(project: str) -> str:
+    """Plain-text product name for the 'name' arm of the twitter-tail-cta
+    fallback below (mirrors twitter_gen_links._resolve_product_name /
+    link_tail.resolve_product_name): config.json entry's product_name, then
+    its name, then a title-cased form of the project slug."""
+    try:
+        with open(os.path.join(REPO_DIR, "config.json")) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    name_lc = (project or "").lower()
+    for p in cfg.get("projects", []):
+        if (p.get("name") or "").lower() == name_lc:
+            pn = (p.get("product_name") or "").strip()
+            if pn:
+                return pn
+            nm = (p.get("name") or "").strip()
+            if nm:
+                return nm
+            break
+    return (project or "").replace("_", " ").replace("-", " ").strip().title()
+
 # Interpreter every child subprocess (twitter_browser.py reply, log_post.py,
 # campaign_bump.py, link_tail.py) must run under. The reply path is the only
 # Playwright importer in the pipeline, so a bare "python3" here silently
@@ -632,28 +655,60 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
               f"(already finalized at draft time, tail_link_variant={tail_link_variant})",
               flush=True)
     else:
-        # AB TEST — tail link on/off:
-        # TWITTER_TAIL_LINK_RATE (float 0..1, default 0.5) controls the fraction
-        # of posts that receive a tail link. Setting it to 1.0 restores old
-        # behavior (always add link). Setting it to 0.0 disables links entirely.
-        # tail_link_variant is logged to posts.tail_link_variant so the dashboard
-        # can compare engagement across arms.
-        _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
-        _add_tail_link = link_url and (random.random() < _tail_link_rate)
-        if link_url:
-            tail_link_variant = "link" if _add_tail_link else "no_link"
+        # FALLBACK ONLY (candidate reached post time unstamped). Mirrors
+        # twitter_gen_links.apply_tail_link. AB TEST — twitter-tail-cta
+        # (link vs plain product name), launched 2026-08-08. The prior
+        # link-vs-no_link A/B concluded that day (no_link won engagement but the
+        # link arm bought clicks); both arms now append the AI-written bridge,
+        # differing only in whether it ends with the tracked URL ('link') or the
+        # plain product name ('name', no URL).
+        # TWITTER_TAIL_LINK_RATE (float 0..1, default 1.0) still gates whether
+        # ANY tail is added (0.0 disables tails; personal_brand exports 0);
+        # TWITTER_TAIL_CTA_LINK_SHARE (float 0..1, default 0.5) splits link vs
+        # name once a tail is added. tail_link_variant is logged to
+        # posts.tail_link_variant so the dashboard can compare arms.
+        try:
+            _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "1.0"))
+        except ValueError:
+            _tail_link_rate = 1.0
+        _add_tail = link_url and (random.random() < _tail_link_rate)
         link_tail_outcome = "skipped_no_link"
-        if _add_tail_link:
-            rc, out, err = run_subprocess(
-                [PYTHON, LINK_TAIL,
-                 "--reply-text", reply_text,
-                 "--link-url", link_url,
-                 "--thread-text", thread_text or "",
-                 "--project", project,
-                 "--platform", "twitter",
-                 "--timeout", "120"],
-                timeout_sec=180,
-            )
+        if not _add_tail:
+            if link_url:
+                # Tail disabled: post the reply as-is (no bridge, no URL).
+                tail_link_variant = "no_link"
+                link_tail_outcome = "ab_no_link"
+                print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+                      f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
+        else:
+            try:
+                _cta_link_share = float(os.environ.get("TWITTER_TAIL_CTA_LINK_SHARE", "0.5"))
+            except ValueError:
+                _cta_link_share = 0.5
+            _use_link = random.random() < _cta_link_share
+            tail_link_variant = "link" if _use_link else "name"
+            if _use_link:
+                _tail_cmd = [PYTHON, LINK_TAIL,
+                             "--reply-text", reply_text,
+                             "--link-url", link_url,
+                             "--thread-text", thread_text or "",
+                             "--project", project,
+                             "--platform", "twitter",
+                             "--cta-mode", "url",
+                             "--timeout", "120"]
+                _mech = f"{reply_text} {link_url}".strip()
+            else:
+                _product_name = _resolve_product_name(project)
+                _tail_cmd = [PYTHON, LINK_TAIL,
+                             "--reply-text", reply_text,
+                             "--product-name", _product_name,
+                             "--thread-text", thread_text or "",
+                             "--project", project,
+                             "--platform", "twitter",
+                             "--cta-mode", "name",
+                             "--timeout", "120"]
+                _mech = f"{reply_text} {_product_name}".strip()
+            rc, out, err = run_subprocess(_tail_cmd, timeout_sec=180)
             tail_obj = parse_last_json_object(out) or {}
             if tail_obj.get("text"):
                 full_text = tail_obj["text"]
@@ -664,17 +719,11 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
             else:
                 # link_tail.py is supposed to ALWAYS return JSON; if we got
                 # nothing, hard-fall-back to the mechanical concat to preserve
-                # prior behavior (post still ships, link still on the wire).
-                full_text = f"{reply_text} {link_url}".strip()
+                # prior behavior (post still ships, tail still on the wire).
+                full_text = _mech
                 link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
-            print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
-                  f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
-        elif link_url and not _add_tail_link:
-            # No-link arm of the AB test: post the reply text as-is (no CTA bridge,
-            # no URL). Log the outcome so the dashboard can tally the arm.
-            link_tail_outcome = "ab_no_link"
-            print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
-                  f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
+            print(f"[post] candidate {cid} link_tail[{tail_link_variant}]: "
+                  f"{link_tail_outcome} (elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
 
     # URL-wrap the text BEFORE handing it to twitter_browser. The browser
     # script appends the campaign suffix internally; suffixes are plain
