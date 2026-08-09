@@ -28,6 +28,24 @@
 launch_harness_chrome() {
     local _bl_chrome_bin="$1"; shift
     local _bl_prof_dir="$1"; shift
+    # SINGLETON GATE (2026-08-07): if a live Chrome already owns this profile,
+    # NEVER exec another launch. A duplicate launch does not create a second
+    # instance — Chrome's singleton handoff makes the EXISTING instance FRONT
+    # ITSELF (and reopen a blank window when it has none): the reproduced root
+    # cause of the residual focus steals / "browser restarted on a blank page"
+    # reports. The handoff's "Opening in existing browser session." goes to
+    # stderr that `open` discards, so it never appeared in any log. Probes can
+    # false-negative under load; process liveness is the authority. Callers
+    # that genuinely need a relaunch kill the owner first
+    # (_hc_reap_profile_owners), which makes this gate pass. Trailing space in
+    # the pattern keeps browser-harness from matching browser-harness-linkedin
+    # (same convention as the reaper).
+    local _bl_owner
+    _bl_owner=$(pgrep -f -- "--user-data-dir=$_bl_prof_dir " 2>/dev/null | head -1)
+    if [ -n "$_bl_owner" ]; then
+        echo "[browser-launch] SKIP: pid $_bl_owner already owns $_bl_prof_dir; a duplicate launch would singleton-handoff and front the existing window" >&2
+        return 0
+    fi
     "${S4L_PYTHON:-python3}" -c 'import json, os, sys
 p = os.path.join(sys.argv[1], "Default", "Preferences")
 try:
