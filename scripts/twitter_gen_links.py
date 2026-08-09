@@ -143,21 +143,64 @@ def parse_last_json_object(text):
 
 
 def _tail_link_rate() -> float:
+    # "Add a tail at all?" gate. Default 1.0 since 2026-08-08: the old
+    # link-vs-no_link A/B concluded that day (no_link won engagement but the
+    # link arm bought clicks), and its successor — twitter-tail-cta (link vs
+    # plain product name) — assumes EVERY promo post gets a tail, differing
+    # only in HOW it ends. So promo posts now always get a tail; the
+    # personal_brand lane still forces no tail via its own
+    # TWITTER_TAIL_LINK_RATE=0 export, and setting the var to 0.0 anywhere
+    # still disables tails entirely.
+    #
     # DRAFT_ONLY=1 candidates always go through a human-approval review card
     # (run-draft-and-publish.sh exports DRAFT_ONLY before invoking the cycle
     # that calls this script). Force rate=1.0 there so a hand-approved draft
-    # never drops the link the user already saw baked into the card text —
+    # never drops the tail the user already saw baked into the card text —
     # ported from the old post-time override in mcp/src/index.ts
     # (`TWITTER_TAIL_LINK_RATE: "1.0"` on the approve_drafts path), which no
     # longer fires now that the decision happens here, before the card is
-    # ever shown. The autonomous DRAFT_ONLY=0 lane keeps running the real A/B
-    # experiment at the configured rate.
+    # ever shown.
     if os.environ.get("DRAFT_ONLY") == "1":
         return 1.0
     try:
-        return float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
+        return float(os.environ.get("TWITTER_TAIL_LINK_RATE", "1.0"))
+    except ValueError:
+        return 1.0
+
+
+def _cta_link_share() -> float:
+    """P(link arm | a tail is added) for the twitter-tail-cta experiment
+    (link vs plain product name), launched 2026-08-08. The complementary share
+    goes to the 'name' arm. Read live from TWITTER_TAIL_CTA_LINK_SHARE so the
+    split can be swept without a code change; defaults to 0.5."""
+    try:
+        v = float(os.environ.get("TWITTER_TAIL_CTA_LINK_SHARE", "0.5"))
     except ValueError:
         return 0.5
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
+def _resolve_product_name(project_name: str) -> str:
+    """Plain-text product name for the 'name' arm of twitter-tail-cta.
+    config.json entry's product_name, then its name, then a title-cased form
+    of the project slug (so we always have SOMETHING to plant). Mirrors
+    link_tail.resolve_product_name."""
+    try:
+        projects = load_projects()
+    except Exception:
+        projects = {}
+    entry = projects.get(project_name) or {}
+    pn = (entry.get("product_name") or "").strip()
+    if pn:
+        return pn
+    nm = (entry.get("name") or "").strip()
+    if nm:
+        return nm
+    return (project_name or "").replace("_", " ").replace("-", " ").strip().title()
 
 
 def apply_tail_link(candidate: dict, link_url: str) -> None:
@@ -181,39 +224,72 @@ def apply_tail_link(candidate: dict, link_url: str) -> None:
     twitter_post_plan.py can detect this candidate is already finalized and
     skip its own (now fallback-only) tail-link block.
 
+    2026-08-08 — twitter-tail-cta experiment. The old link-vs-no_link A/B
+    concluded; _tail_link_rate() now defaults to 1.0 (a tail is essentially
+    always added for promo posts). Once a tail is added, the arm is a coin
+    flip between BOTH tails carrying the AI-written bridge:
+      - 'link': the bridge ends with the tracked URL (historical behavior).
+      - 'name': the bridge ends with the PLAIN product name, no URL — passed
+        via --cta-mode name and NEVER appending link_url.
+    A rate below 1.0 (or personal_brand's TWITTER_TAIL_LINK_RATE=0) still
+    yields the 'no_link' arm, which stamps but doesn't feed the tail-cta card.
+
     Idempotent: a candidate that already carries tail_link_variant is a
     no-op. Guards against any re-run of this stage over the same candidate
     (retry, salvage, plan re-merge) re-rolling the decision and re-appending
-    link_url onto a reply_text that already has it baked in.
+    the tail onto a reply_text that already has it baked in.
     """
     if not link_url or candidate.get("tail_link_variant"):
         return
     rate = _tail_link_rate()
-    add_link = random.random() < rate
-    candidate["tail_link_variant"] = "link" if add_link else "no_link"
-    if not add_link:
+    if random.random() >= rate:
+        # Tail explicitly disabled (rate < 1.0 / personal_brand). Stamp the
+        # no_link arm; it does not feed the twitter-tail-cta card.
+        candidate["tail_link_variant"] = "no_link"
         print(f"[gen] candidate_id={candidate.get('candidate_id')} "
               f"tail_link: ab_no_link (rate={rate})", flush=True)
         return
     reply_text = (candidate.get("reply_text") or "").strip()
-    cmd = [
-        "python3", LINK_TAIL,
-        "--reply-text", reply_text,
-        "--link-url", link_url,
-        "--thread-text", candidate.get("thread_text") or "",
-        "--project", candidate.get("matched_project") or "",
-        "--platform", "twitter",
-        "--timeout", str(LINK_TAIL_TIMEOUT_SEC),
-    ]
+    project = candidate.get("matched_project") or ""
+    use_link = random.random() < _cta_link_share()
+    candidate["tail_link_variant"] = "link" if use_link else "name"
+    if use_link:
+        product_name = ""
+        mech = f"{reply_text} {link_url}".strip()
+        cmd = [
+            "python3", LINK_TAIL,
+            "--reply-text", reply_text,
+            "--link-url", link_url,
+            "--thread-text", candidate.get("thread_text") or "",
+            "--project", project,
+            "--platform", "twitter",
+            "--cta-mode", "url",
+            "--timeout", str(LINK_TAIL_TIMEOUT_SEC),
+        ]
+    else:
+        # Name arm: end with the plain product name, NO URL in the reply.
+        product_name = _resolve_product_name(project)
+        mech = f"{reply_text} {product_name}".strip()
+        cmd = [
+            "python3", LINK_TAIL,
+            "--reply-text", reply_text,
+            "--product-name", product_name,
+            "--thread-text", candidate.get("thread_text") or "",
+            "--project", project,
+            "--platform", "twitter",
+            "--cta-mode", "name",
+            "--timeout", str(LINK_TAIL_TIMEOUT_SEC),
+        ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=LINK_TAIL_TIMEOUT_SEC + 30)
         rc, out = r.returncode, r.stdout
     except subprocess.TimeoutExpired:
-        candidate["reply_text"] = f"{reply_text} {link_url}".strip()
+        candidate["reply_text"] = mech
         candidate["link_tail_outcome"] = "hard_timeout"
         print(f"[gen] candidate_id={candidate.get('candidate_id')} "
-              f"link_tail: hard_timeout; keeping mechanical concat", flush=True)
+              f"link_tail[{candidate['tail_link_variant']}]: hard_timeout; "
+              f"keeping mechanical concat", flush=True)
         return
     obj = parse_last_json_object(out) or {}
     if obj.get("text"):
@@ -225,12 +301,13 @@ def apply_tail_link(candidate: dict, link_url: str) -> None:
     else:
         # link_tail.py is supposed to ALWAYS return JSON; if we got nothing,
         # hard-fall-back to the mechanical concat so the card still shows a
-        # complete draft (link still present) instead of a bare reply.
-        candidate["reply_text"] = f"{reply_text} {link_url}".strip()
+        # complete draft (tail still present) instead of a bare reply.
+        candidate["reply_text"] = mech
         outcome = f"hard_fallback_no_json:rc={rc}"
     candidate["link_tail_outcome"] = outcome
     print(f"[gen] candidate_id={candidate.get('candidate_id')} "
-          f"link_tail: {outcome} (elapsed={obj.get('elapsed_sec')}s)", flush=True)
+          f"link_tail[{candidate['tail_link_variant']}]: {outcome} "
+          f"(elapsed={obj.get('elapsed_sec')}s)", flush=True)
 
 
 def run_generate(product: str, keyword: str, slug: str) -> tuple[str, str]:
