@@ -158,14 +158,12 @@ class _Worker(threading.Thread):
         # unaffected (CDP is offscreen-raster + synthetic input; the occlusion
         # flags keep hidden tabs painting).
         # DEFAULT ON (user decision 2026-08-07, reverses the 2026-07-30 default-off
-        # call): the guard hides an offscreen harness that steals the foreground
-        # unless explicitly opted out. Two knobs, by design:
-        #   S4L_NO_HARNESS_HIDE  -> HARD override, force off, checked FIRST so it
-        #       always wins (this is the one-time interactive-login escape hatch).
-        #   S4L_HARNESS_HIDE=0   -> SOFT opt-out for a machine that wants it off.
-        # Unset or any non-"0" value => hide is active (the new default).
-        if os.environ.get("S4L_NO_HARNESS_HIDE"):
-            return
+        # call). ONE flag by design (2026-08-08 — the old S4L_NO_HARNESS_HIDE
+        # override was removed to end the double-flag confusion):
+        #   S4L_HARNESS_HIDE unset / any value except "0" => hide active (default)
+        #   S4L_HARNESS_HIDE=0                            => disabled — the single
+        #       off switch (e.g. to keep a harness window visible for a one-time
+        #       interactive login, then set it back to 1 / unset it).
         if os.environ.get("S4L_HARNESS_HIDE", "1") == "0":
             return
         pos = details.get("window_position") or ""
