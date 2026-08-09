@@ -371,6 +371,42 @@ def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
             "your job here.\n"
         )
 
+    if cta_mode == "name":
+        return f"""You are writing ONLY the bridge sentence that gets APPENDED after a social media reply we already drafted (shown below). This is a one-shot task. Output ONLY the bridge sentence itself: no preamble, no explanation, no quotes, and do NOT repeat, paraphrase, or rewrite any part of the reply below \u2014 it is already final and will be appended before your output automatically, verbatim.
+
+PLATFORM: {platform}
+PROJECT: {project}
+PRODUCT NAME: {product_name}
+
+{voice_rule}
+
+{learned_prefs_section}
+
+{length_rule}
+
+ORIGINAL THREAD WE ARE REPLYING TO:
+{thread_text}
+
+REPLY ALREADY DRAFTED (fixed, DO NOT repeat or modify \u2014 your sentence is appended after this automatically):
+{reply_text}
+
+YOUR TASK:
+Write ONE bridge sentence (\u2264 22 words) that:
+  1. References the SINGLE strongest specific claim, mechanism, or detail from the reply above (e.g. "rephrasing on revisit", "a 4-axis rubric", "200ms p95", "automatic distractor scoring") \u2014 pick ONE concrete thing, not a category.
+  2. Names a CONCRETE PRODUCT MECHANISM that delivers it (verb + noun, inferred from the project context). Do NOT say "a tool for this", "something that helps", "made this for it" \u2014 those are banned.
+  3. Ends with the plain product name "{product_name}" written as ORDINARY TEXT \u2014 NOT a link. This is intentional and required: do NOT include any URL, any "http" or "https", any "www", and no domain (nothing that looks like "name.com" / "name.io"). No "click here", "check it out", "give it a try".
+  4. Reads in the voice of the reply above (lowercase if reply is lowercase, casual if reply is casual).
+  5. Obeys the VOICE RELATIONSHIP rule above. This rule overrides any default phrasing instinct.
+  6. Obeys the LEARNED PREFERENCES above when present. This rule overrides the example sentences below on conflict.
+
+OUTPUT FORMAT (strict):
+Output ONLY your bridge sentence, ending in the plain product name "{product_name}", on a single line. Nothing else: no JSON, no markdown, no quotes, no URL, and absolutely none of the reply text shown above.
+
+Example bridge sentences (do NOT copy verbatim \u2014 these are FORM examples, voice-matched to this project, each ending in the product NAME, no link):
+{example_block}
+
+Write the bridge sentence now."""
+
     return f"""You are writing ONLY the bridge sentence that gets APPENDED after a social media reply we already drafted (shown below). This is a one-shot task. Output ONLY the bridge sentence itself: no preamble, no explanation, no quotes, and do NOT repeat, paraphrase, or rewrite any part of the reply below \u2014 it is already final and will be appended before your output automatically, verbatim.
 
 PLATFORM: {platform}
@@ -552,9 +588,15 @@ THIRD_PARTY_VOICE_VIOLATIONS = (
 )
 
 
-def passes_quality_gate(bridge: str, link_url: str,
+# Name-arm URL guards: the 'name' CTA must NOT contain any link. Reject a
+# full URL or a bare domain (so the model can't sneak the tracked link back in
+# under the product-name arm).
+_BARE_DOMAIN_RE = re.compile(r"\b[a-z0-9-]+\.[a-z]{2,}\b", re.IGNORECASE)
+
+
+def passes_quality_gate(bridge: str, mention: str, *,
                         voice_relationship: str = "first_party",
-                        ) -> tuple[bool, str]:
+                        cta_mode: str = "url") -> tuple[bool, str]:
     """Return (passes, reason_if_not).
 
     Validates the model-written BRIDGE SENTENCE ALONE. reply_text is trusted,
@@ -562,28 +604,53 @@ def passes_quality_gate(bridge: str, link_url: str,
     the append-only contract means reply_text can't fail this gate, only the
     newly generated bridge can.
 
-    Hard rules:
-      - must contain link_url
-      - must end with link_url (allow trailing whitespace, nothing else)
+    `mention` is the CTA target the bridge must end with: the landing-page URL
+    in url mode, the plain product name in name mode.
+
+    url-mode hard rules (unchanged):
+      - must contain the URL
+      - must end with the URL (allow trailing whitespace, nothing else)
       - must NOT contain banned phrases
-      - must not be wildly longer than a sentence (MAX_BRIDGE_CHARS): the
-        model ignored the "bridge sentence only" contract and is attempting
-        a full rewrite — a structural violation, not a phrasing nitpick
+      - must not be wildly longer than a sentence (MAX_BRIDGE_CHARS)
       - on third_party projects, must NOT use first-person-plural product
-        ownership phrases ("we ship", "we built", "our product", ...). The
-        link_tail prompt selects voice-matched examples but the model can
-        still drift; on violation we fall back to the mechanical concat so
-        the post still ships without impersonating the client (root cause of
-        the 2026-05-27 Agora OODAO incident).
+        ownership phrases (root cause of the 2026-05-27 Agora OODAO incident).
+
+    name-mode hard rules:
+      - must CONTAIN the product name
+      - must NOT contain any URL or bare domain (the model may not smuggle the
+        tracked link back into the no-link arm)
+      - same banned-phrase, third_party-voice, and MAX_BRIDGE_CHARS checks.
     """
     if not bridge:
         return (False, "empty")
-    if link_url not in bridge:
+
+    if cta_mode == "name":
+        if mention and mention not in bridge:
+            return (False, "no_product_name")
+        if re.search(r"https?://", bridge, re.IGNORECASE):
+            return (False, "url_in_name_arm")
+        if _BARE_DOMAIN_RE.search(bridge):
+            return (False, "domain_in_name_arm")
+        lower = bridge.lower()
+        for phrase in BANNED_PHRASES:
+            if phrase in lower:
+                return (False, f"banned_phrase: {phrase!r}")
+        if voice_relationship == "third_party":
+            for rx in THIRD_PARTY_VOICE_VIOLATIONS:
+                m = rx.search(bridge)
+                if m:
+                    return (False, f"third_party_voice_violation: {m.group(0)!r}")
+        if len(bridge) > MAX_BRIDGE_CHARS:
+            return (False, f"bridge_too_long:{len(bridge)}>{MAX_BRIDGE_CHARS}")
+        return (True, "")
+
+    # url mode (mention == link_url) — behavior unchanged.
+    if mention not in bridge:
         return (False, "no_url")
     # Trailing-URL check (nothing meaningful after URL, optional ./! is fine
     # to strip; but our prompt forbids trailing period — so just check no
     # alphanumeric content follows).
-    tail = bridge.split(link_url, 1)[1].strip()
+    tail = bridge.split(mention, 1)[1].strip()
     if tail and re.search(r"[A-Za-z0-9]", tail):
         return (False, f"content_after_url: {tail[:40]!r}")
     lower = bridge.lower()
@@ -604,6 +671,12 @@ def mechanical_fallback(reply_text: str, link_url: str) -> str:
     """The pre-existing concat behavior. Identical to the line we replace
     in twitter_post_plan.py."""
     return f"{reply_text} {link_url}".strip() if link_url else reply_text
+
+
+def mechanical_fallback_name(reply_text: str, product_name: str) -> str:
+    """Name-arm analogue of mechanical_fallback: append the plain product name
+    (no URL) when the model call is skipped or fails."""
+    return f"{reply_text} {product_name}".strip() if product_name else reply_text
 
 
 def main() -> int:
