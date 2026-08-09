@@ -35,6 +35,18 @@ Usage (CLI / from twitter_post_plan.py):
         --project "studyly" \\
         --platform "twitter"
 
+    # 'name' CTA arm (twitter-tail-cta experiment, launched 2026-08-08): end
+    # the bridge with the PLAIN product name instead of a tracked URL. No link,
+    # not clickable — intentional. Requires --product-name (or a resolvable
+    # config.json entry for --project); no --link-url is used.
+    python3 link_tail.py \\
+        --reply-text "Step 2 CK was the one that burned me out worst..." \\
+        --cta-mode name \\
+        --product-name "Studyly" \\
+        --thread-text "huge milestone, just passed step 2..." \\
+        --project "studyly" \\
+        --platform "twitter"
+
 Stdout (single JSON object):
     {"ok": true, "text": "<reply_text with bridge tail + URL>",
      "tail": "<just the bridge sentence with URL>",
@@ -137,6 +149,26 @@ def enforce_budget(text: str, link_url: str,
     return _trim_to_chars(text, limit), True
 
 
+def enforce_budget_name(text: str, product_name: str,
+                        limit: int = TWEET_LIMIT) -> tuple[str, bool]:
+    """Name-arm analogue of enforce_budget: guarantee x_weighted_len(text) <=
+    limit by trimming the BODY, never the trailing plain product name. Unlike
+    the URL arm there is no flat t.co weighting — the product name counts as
+    its own real length. Returns (text, was_trimmed)."""
+    if x_weighted_len(text) <= limit:
+        return text, False
+    stripped = text.rstrip()
+    if product_name and stripped.endswith(product_name):
+        head = stripped[: stripped.rfind(product_name)].rstrip()
+        # Budget left for the body after reserving the product name + a joining
+        # space.
+        max_head = limit - x_weighted_len(product_name) - 1
+        trimmed_head = _trim_to_chars(head, max_head)
+        return (trimmed_head + " " + product_name).strip(), True
+    # No product name at the tail (shouldn't happen): hard word-trim.
+    return _trim_to_chars(text, limit), True
+
+
 def _load_project_entry(project: str) -> dict:
     """Load the matched project's raw config.json entry (case-insensitive
     name match), or {} if config.json is unreadable or the project is
@@ -174,6 +206,28 @@ def resolve_learned_preferences_block(project_entry: dict) -> str:
     no entries yet."""
     return learned_preferences.prompt_block(project_entry)
 
+
+def resolve_product_name(project_entry: dict, override: str | None,
+                         project: str = "") -> str:
+    """Plain-text product name for the 'name' CTA arm (twitter-tail-cta).
+
+    Priority: an explicit --product-name override, then the config.json
+    entry's `product_name`, then its `name`, then a title-cased fallback
+    derived from the --project arg (so we always have SOMETHING to plant even
+    for a project missing from config.json). The name arm has nothing to
+    append otherwise, so this deliberately never returns empty when a project
+    string is present.
+    """
+    if override and override.strip():
+        return override.strip()
+    pn = (project_entry.get("product_name") or "").strip()
+    if pn:
+        return pn
+    nm = (project_entry.get("name") or "").strip()
+    if nm:
+        return nm
+    return (project or "").replace("_", " ").replace("-", " ").strip().title()
+
 # Paths to the Claude Code CLI in order of preference. run_claude.sh resolves
 # `claude` from PATH; we fall back to a direct nvm path if PATH lookup fails
 # (twitter_post_plan.py is invoked from a launchd shell that may have a thin
@@ -207,8 +261,17 @@ def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
                  project: str, platform: str,
                  voice_relationship: str = "first_party",
                  learned_prefs_block: str = "",
-                 bridge_budget: int | None = None) -> str:
+                 bridge_budget: int | None = None,
+                 cta_mode: str = "url", product_name: str = "") -> str:
     """Compose the one-shot prompt for the bridge sentence ONLY.
+
+    `cta_mode` selects how the bridge ENDS (twitter-tail-cta experiment,
+    launched 2026-08-08):
+      - "url"  (default): the sentence ends with the tracked landing-page URL,
+        the historical behavior — unchanged, byte-for-byte.
+      - "name": the sentence ends with the PLAIN product name (`product_name`)
+        as ordinary text, NOT a link. No URL, no "http", no domain. This plants
+        brand awareness without spending a raw tracked link's engagement cost.
 
     The model is never asked to reproduce or rewrite the reply already
     drafted; it's shown that text for context and told explicitly not to
@@ -256,6 +319,21 @@ def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
             f"  - \"we ship the same recall-on-revisit pattern in {project}, scores against a 4-axis rubric, {link_url}\""
         )
 
+    # Name arm: replace the URL-ending example sentences with product-NAME-ending
+    # ones (voice-matched, same form). The bridge must END with the plain
+    # product name as ordinary text \u2014 no URL anywhere.
+    if cta_mode == "name":
+        if voice_relationship == "third_party":
+            example_block = (
+                f"  - \"fwiw the rubric scoring on rephrased stems is what {project} ships, {product_name}\"\n"
+                f"  - \"same recall-on-revisit pattern, scored against a 4-axis rubric, that's {product_name}\""
+            )
+        else:
+            example_block = (
+                f"  - \"fwiw the rubric scoring on rephrased stems is what we built {product_name} for\"\n"
+                f"  - \"we ship the same recall-on-revisit pattern, scored against a 4-axis rubric, in {product_name}\""
+            )
+
     # X-specific hard length budget. The reply's body is FIXED (never resized
     # by the model); only the bridge sentence's own budget matters, computed
     # by the caller from how much room the already-drafted body leaves.
@@ -263,14 +341,23 @@ def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
     # no tight cap there.
     length_rule = ""
     if platform == "twitter" and bridge_budget is not None:
-        length_rule = (
-            f"HARD LENGTH LIMIT for YOUR SENTENCE ONLY (X counts EVERY link as "
-            f"exactly {URL_WEIGHT} characters, no matter how long it looks; "
-            f"that's already reserved below):\n"
-            f"- Everything you write BEFORE the URL must be \u2264 {max(bridge_budget, 0)} "
-            f"characters. The reply above is fixed length; you are not resizing "
-            f"it, only adding a short sentence after it.\n"
-        )
+        if cta_mode == "name":
+            length_rule = (
+                f"HARD LENGTH LIMIT for YOUR SENTENCE ONLY:\n"
+                f"- Everything you write, INCLUDING the product name at the end, "
+                f"must be \u2264 {max(bridge_budget, 0)} characters. The reply above is "
+                f"fixed length; you are not resizing it, only adding a short "
+                f"sentence after it.\n"
+            )
+        else:
+            length_rule = (
+                f"HARD LENGTH LIMIT for YOUR SENTENCE ONLY (X counts EVERY link as "
+                f"exactly {URL_WEIGHT} characters, no matter how long it looks; "
+                f"that's already reserved below):\n"
+                f"- Everything you write BEFORE the URL must be \u2264 {max(bridge_budget, 0)} "
+                f"characters. The reply above is fixed length; you are not resizing "
+                f"it, only adding a short sentence after it.\n"
+            )
 
     learned_prefs_section = ""
     if learned_prefs_block:
