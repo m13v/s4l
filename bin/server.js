@@ -813,9 +813,17 @@ const PLATFORM_LABELS = {
 // is logged on posts.tail_link_variant for every Twitter post that has a
 // non-empty link_url at draft time. Keys match the DB values verbatim.
 const TAIL_LINK_VARIANT_DEFS = {
-  link:    { label: 'With link',  desc: 'reply ends with bridge sentence + URL' },
-  no_link: { label: 'No link',    desc: 'reply posted as-is, no URL appended' },
+  link:    { label: 'With link',    desc: 'reply ends with bridge sentence + URL' },
+  no_link: { label: 'No link',      desc: 'reply posted as-is, no URL appended' },
+  name:    { label: 'Product name', desc: 'reply ends with bridge sentence + plain product name (no URL)' },
 };
+
+// twitter-tail-cta cutover (2026-08-08): the link-vs-name experiment reuses
+// posts.tail_link_variant (values 'link'/'name'), the SAME column the
+// concluded link-vs-no_link A/B wrote. This date separates the two eras — the
+// tail-cta query filters posted_at > TAIL_CTA_CUTOVER so it never mixes in the
+// old link-arm rows that share the 'link' value.
+const TAIL_CTA_CUTOVER = '2026-08-08';
 
 // ai-disclosure-suffix variant defs (campaigns.id=3, "ai_disclosure_100",
 // suffix " written with ai", sample_rate=0.5, platforms=reddit,twitter,
@@ -6738,16 +6746,72 @@ async function handleApi(req, res) {
           variants,
         }];
 
-        // Second experiment: twitter-tail-link (shipped 2026-05-22).
-        // Per-post coin flip in twitter_post_plan.py; variant lives on
-        // posts.tail_link_variant. No candidate-funnel axis here (assignment
-        // happens at post time, not candidate time) so n_candidates / n_posted
-        // both equal the post count and the funnel columns render as "—".
-        // Click attribution joins post_links + post_link_clicks (is_bot=false)
-        // so the no_link arm correctly shows 0 clicks (no URL to click).
-        // 30-day window matches the cycle_variant query above.
+        // Second experiment: twitter-tail-link (with / without).
+        // FROZEN SNAPSHOT — concluded 2026-08-08, winner = no_link. Ran
+        // 2026-05-22..08-08 as a live posts.tail_link_variant query; the
+        // link-vs-no_link A/B is retired and replaced by twitter-tail-cta
+        // (link vs plain product name) below, which reuses the SAME column.
+        // Numbers are the final 30-day readout captured at conclusion
+        // (2026-08-08). Kept as a static historical card rather than
+        // re-querying a now-frozen arm split (a live query would also start
+        // mixing in the new 'name'-era rows).
+        const TL_FROZEN = [
+          { key: 'link',    n_posts: 405, avg_views: 50.2, avg_likes: 0.054, avg_replies: 0.059, avg_clicks: 0.556 },
+          { key: 'no_link', n_posts: 219, avg_views: 86.1, avg_likes: 0.142, avg_replies: 0.233, avg_clicks: 0 },
+        ];
+        const tlDefs = TAIL_LINK_VARIANT_DEFS;
+        const tlVariants = TL_FROZEN.map(v => ({
+          key: v.key,
+          label: tlDefs[v.key].label,
+          desc: tlDefs[v.key].desc,
+          n_candidates: v.n_posts,
+          n_batches: null,
+          n_posted: v.n_posts,
+          n_skipped: 0,
+          n_expired: 0,
+          n_pending: 0,
+          post_rate_pct: null,
+          thread_age_min_p50: null,
+          avg_views: v.avg_views,
+          avg_likes: v.avg_likes,
+          avg_replies: v.avg_replies,
+          avg_clicks: v.avg_clicks,
+          weight_pct: null,            // assignment retired; no live traffic split
+          is_winner: v.key === 'no_link',
+          started_at: '2026-05-22T12:00:00',
+        }));
+        const tlTotals = tlVariants.reduce((acc, v) => {
+          acc.n_candidates += v.n_candidates;
+          acc.n_posted += v.n_posted;
+          return acc;
+        }, { n_candidates: 0, n_posted: 0, n_batches: null });
+        experiments.push({
+          id: 'twitter-tail-link',
+          name: 'Twitter tail link (with / without)',
+          status: 'concluded',
+          winner: 'no_link',
+          started_at: '2026-05-22T12:00:00',
+          concluded_at: '2026-08-08T12:00:00',
+          hypothesis: 'Replies without a tail link (no CTA bridge + URL) earn more engagement (views, likes, replies) than replies with one. Click-through is the offsetting cost.',
+          result: 'no_link won: ~4x replies, ~2.6x likes, ~1.7x views vs the link arm; the link arm bought ~0.56 clicks/post. Retired 2026-08-08, replaced by twitter-tail-cta (link vs name).',
+          primary_metric: 'avg_replies',
+          progress: null,
+          totals: tlTotals,
+          variants: tlVariants,
+        });
+
+        // Successor experiment: twitter-tail-cta (link vs product name),
+        // launched 2026-08-08. Both arms append the AI-written CTA bridge;
+        // 'link' ends it with the tracked URL (old behavior), 'name' ends it
+        // with the plain product name (no URL, intentional and user-approved).
+        // Arm lives on posts.tail_link_variant IN ('link','name'); the cutover
+        // date (TAIL_CTA_CUTOVER) fences these rows off from the concluded
+        // link-vs-no_link history that shares the same column and 'link' value.
+        // Same metric expressions + click attribution as the old tail-link
+        // block (avg_clicks divides by ALL posts, so the name arm correctly
+        // shows ~0 clicks — no URL to click).
         try {
-          const tlRows = await pq(`
+          const ctaRows = await pq(`
             SELECT p.tail_link_variant AS variant,
                    COUNT(*) AS n_posts,
                    AVG(p.views) AS avg_views,
@@ -6763,20 +6827,20 @@ async function handleApi(req, res) {
               WHERE pl2.post_id IS NOT NULL
               GROUP BY pl2.post_id
             ) pl ON pl.post_id = p.id
-            WHERE p.tail_link_variant IS NOT NULL
-              AND p.posted_at > NOW() - INTERVAL '30 days'
+            WHERE p.tail_link_variant IN ('link','name')
+              AND p.posted_at > '${TAIL_CTA_CUTOVER}'
               AND LOWER(CASE WHEN LOWER(p.platform)='x' THEN 'twitter' ELSE p.platform END) = 'twitter'
               AND p.our_content <> '(mention - no original post)'
             GROUP BY p.tail_link_variant
           `, []);
-          const tlDefs = TAIL_LINK_VARIANT_DEFS;
-          const tlVariants = ['link', 'no_link'].map(k => {
-            const row = (tlRows || []).find(r => r.variant === k) || {};
+          const ctaDefs = TAIL_LINK_VARIANT_DEFS;
+          const ctaVariants = ['link', 'name'].map(k => {
+            const row = (ctaRows || []).find(r => r.variant === k) || {};
             const n = Number(row.n_posts || 0);
             return {
               key: k,
-              label: tlDefs[k].label,
-              desc: tlDefs[k].desc,
+              label: ctaDefs[k].label,
+              desc: ctaDefs[k].desc,
               n_candidates: n,
               n_batches: null,
               n_posted: n,
@@ -6792,44 +6856,40 @@ async function handleApi(req, res) {
               started_at: row.started_at || null,
             };
           });
-          const tlTotals = tlVariants.reduce((acc, v) => {
+          const ctaTotals = ctaVariants.reduce((acc, v) => {
             acc.n_candidates += v.n_candidates;
             acc.n_posted += v.n_posted;
             return acc;
           }, { n_candidates: 0, n_posted: 0, n_batches: null });
-          // Assignment weights read LIVE from .env so the dashboard never
-          // shows a stale hardcoded split. TWITTER_TAIL_LINK_RATE is the
-          // fraction assigned to the 'link' arm; the rest go to 'no_link'.
-          // Falls back to 0.5 only if the var is absent/unparseable. The
-          // "Weight" column shows this configured intent; the "Actual share"
-          // row above the table shows what was really posted, so any drift
-          // between intended and observed split is visible at a glance.
-          const tlRate = (() => {
-            const raw = (loadEnv().TWITTER_TAIL_LINK_RATE || '').trim();
+          // Assignment weight read LIVE from .env: TWITTER_TAIL_CTA_LINK_SHARE
+          // is P(link | a tail is added); the rest go to 'name'. Falls back to
+          // 0.5 if absent/unparseable.
+          const ctaRate = (() => {
+            const raw = (loadEnv().TWITTER_TAIL_CTA_LINK_SHARE || '').trim();
             const n = Number(raw);
             return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
           })();
-          const tlWeightLink = Math.round(tlRate * 1000) / 10;
-          const tlWeightNoLink = Math.round((1 - tlRate) * 1000) / 10;
-          tlVariants.forEach(v => {
-            v.weight_pct = v.key === 'link' ? tlWeightLink : tlWeightNoLink;
+          const ctaWeightLink = Math.round(ctaRate * 1000) / 10;
+          const ctaWeightName = Math.round((1 - ctaRate) * 1000) / 10;
+          ctaVariants.forEach(v => {
+            v.weight_pct = v.key === 'link' ? ctaWeightLink : ctaWeightName;
           });
-          const tlStartedAt = tlVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+          const ctaStartedAt = ctaVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
           experiments.push({
-            id: 'twitter-tail-link',
-            name: 'Twitter tail link (with / without)',
+            id: 'twitter-tail-cta',
+            name: 'Twitter tail CTA (link vs product name)',
             status: 'running',
-            started_at: tlStartedAt,
-            hypothesis: 'Replies without a tail link (no CTA bridge + URL) earn more engagement (views, likes, replies) than replies with one. Click-through is the offsetting cost.',
+            started_at: ctaStartedAt,
+            hypothesis: 'A clear plain-text product-name mention recovers the engagement a raw tracked link costs, while still planting brand awareness. The link arm keeps click-through; the name arm trades tracked clicks for reach.',
             primary_metric: 'avg_replies',
             progress: null,  // no fixed target
-            totals: tlTotals,
-            variants: tlVariants,
+            totals: ctaTotals,
+            variants: ctaVariants,
           });
-        } catch (e2) {
-          // Log but don't break the whole response if the tail-link block
-          // fails; the first experiment is still useful on its own.
-          console.error('[api/experiments] tail-link block failed:', e2 && e2.message || e2);
+        } catch (eCta) {
+          // Log but don't break the whole response if the tail-cta block
+          // fails; the other experiments are still useful on their own.
+          console.error('[api/experiments] tail-cta block failed:', eCta && eCta.message || eCta);
         }
 
         // twitter-draft-prompt (running 2026-06-29). Per-CYCLE arm assigned in
