@@ -683,8 +683,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reply-text", required=True,
                     help="The reply we already drafted (no link).")
-    ap.add_argument("--link-url", required=True,
-                    help="The landing page URL to fold in.")
+    ap.add_argument("--link-url", default="",
+                    help="The landing page URL to fold in (url mode).")
+    ap.add_argument("--cta-mode", default="url", choices=["url", "name"],
+                    help="How the bridge ends: 'url' (tracked landing-page "
+                         "link, default) or 'name' (plain product name, no "
+                         "URL — twitter-tail-cta experiment).")
+    ap.add_argument("--product-name", default=None,
+                    help="Override the product name used in the 'name' CTA "
+                         "arm. Defaults to config.json product_name/name for "
+                         "--project, else a title-cased --project slug.")
     ap.add_argument("--thread-text", default="",
                     help="The original thread / tweet we are replying to.")
     ap.add_argument("--project", required=True,
@@ -702,19 +710,51 @@ def main() -> int:
                     help="Skip run_claude.sh; call claude directly. For testing.")
     args = ap.parse_args()
 
+    cta_mode = args.cta_mode
     reply_text = (args.reply_text or "").strip()
     link_url = (args.link_url or "").strip()
-    if not reply_text or not link_url:
-        # Garbage in → mechanical concat (which respects empty link_url).
-        out = {
+    project_entry = _load_project_entry(args.project)
+    product_name = ""
+    if cta_mode == "name":
+        product_name = resolve_product_name(
+            project_entry, args.product_name, args.project)
+    # `mention` is the CTA target the bridge must end with, threaded through
+    # every output/fallback path: the URL in url mode, the product name in
+    # name mode.
+    mention = product_name if cta_mode == "name" else link_url
+
+    def _mech() -> str:
+        return (mechanical_fallback_name(reply_text, product_name)
+                if cta_mode == "name"
+                else mechanical_fallback(reply_text, link_url))
+
+    def _enforce(text: str, lim: int) -> tuple[str, bool]:
+        if cta_mode == "name":
+            return enforce_budget_name(text, product_name, lim)
+        return enforce_budget(text, link_url, lim)
+
+    def _emit(out: dict) -> None:
+        # Stamp the CTA mode on every object; name mode also carries the
+        # product name under "mention" for downstream logging.
+        out["cta_mode"] = cta_mode
+        if cta_mode == "name":
+            out["mention"] = product_name
+        print(json.dumps(out), flush=True)
+
+    # url mode requires reply_text + link_url; name mode requires
+    # reply_text + product_name.
+    missing = (not reply_text) or (
+        (not product_name) if cta_mode == "name" else (not link_url))
+    if missing:
+        # Garbage in → mechanical concat (respects an empty CTA target).
+        _emit({
             "ok": True,
-            "text": mechanical_fallback(reply_text, link_url),
-            "tail": link_url,
+            "text": _mech(),
+            "tail": mention,
             "model_call_ok": False,
             "fallback_used": True,
             "error": "missing_input",
-        }
-        print(json.dumps(out), flush=True)
+        })
         return 0
 
     # Plugin (MCP approve_drafts) flow sets S4L_SKIP_LINK_TAIL=1. The bridge only
@@ -727,50 +767,50 @@ def main() -> int:
     # the bridge sentence.
     if os.environ.get("S4L_SKIP_LINK_TAIL") == "1":
         limit = TWEET_LIMIT if args.platform == "twitter" else None
-        fb_text, fb_trim = enforce_budget(
-            mechanical_fallback(reply_text, link_url), link_url,
-            limit if limit is not None else TWEET_LIMIT * 100)
-        out = {
+        fb_text, fb_trim = _enforce(
+            _mech(), limit if limit is not None else TWEET_LIMIT * 100)
+        _emit({
             "ok": True,
             "text": fb_text,
-            "tail": link_url,
+            "tail": mention,
             "model_call_ok": False,
             "fallback_used": True,
             "budget_trimmed": fb_trim,
             "error": "skipped_plugin_flow",
             "elapsed_sec": 0.0,
-        }
-        print(json.dumps(out), flush=True)
+        })
         return 0
 
-    project_entry = _load_project_entry(args.project)
     voice_relationship = args.voice_relationship or resolve_voice_relationship(project_entry)
     learned_prefs_block = resolve_learned_preferences_block(project_entry)
     # Length cap is X-specific; reddit/linkedin pass None (no tail trim).
     limit = TWEET_LIMIT if args.platform == "twitter" else None
 
     # Deterministic no-room guard: if the already-drafted reply alone leaves
-    # no meaningful space for a bridge sentence before the (flat-weighted)
-    # URL, skip the Claude call outright — a squeezed-in fragment is worse
-    # than no bridge — and fall back to the mechanical concat like any other
-    # failure path.
+    # no meaningful space for a bridge sentence before the CTA target, skip
+    # the Claude call outright — a squeezed-in fragment is worse than no
+    # bridge — and fall back to the mechanical concat like any other failure
+    # path. url mode reserves the flat 23-char URL weight; name mode reserves
+    # the product name's real length.
     bridge_budget = None
     if limit is not None:
-        bridge_budget = limit - URL_WEIGHT - 1 - x_weighted_len(reply_text)
+        if cta_mode == "name":
+            bridge_budget = (limit - x_weighted_len(product_name) - 1
+                             - x_weighted_len(reply_text))
+        else:
+            bridge_budget = limit - URL_WEIGHT - 1 - x_weighted_len(reply_text)
         if bridge_budget < MIN_BRIDGE_CHARS:
-            fb_text, fb_trim = enforce_budget(
-                mechanical_fallback(reply_text, link_url), link_url, limit)
-            out = {
+            fb_text, fb_trim = _enforce(_mech(), limit)
+            _emit({
                 "ok": True,
                 "text": fb_text,
-                "tail": link_url,
+                "tail": mention,
                 "model_call_ok": False,
                 "fallback_used": True,
                 "budget_trimmed": fb_trim,
                 "error": f"no_room_for_bridge:{bridge_budget}",
                 "elapsed_sec": 0.0,
-            }
-            print(json.dumps(out), flush=True)
+            })
             return 0
 
     prompt = build_prompt(
@@ -780,6 +820,7 @@ def main() -> int:
         voice_relationship=voice_relationship,
         learned_prefs_block=learned_prefs_block,
         bridge_budget=bridge_budget,
+        cta_mode=cta_mode, product_name=product_name,
     )
 
     started = time.time()
@@ -788,41 +829,38 @@ def main() -> int:
     elapsed = round(time.time() - started, 2)
 
     if not ok:
-        fb_text, fb_trim = enforce_budget(
-            mechanical_fallback(reply_text, link_url), link_url,
-            limit if limit is not None else TWEET_LIMIT * 100)
-        out = {
+        fb_text, fb_trim = _enforce(
+            _mech(), limit if limit is not None else TWEET_LIMIT * 100)
+        _emit({
             "ok": True,
             "text": fb_text,
-            "tail": link_url,
+            "tail": mention,
             "model_call_ok": False,
             "fallback_used": True,
             "budget_trimmed": fb_trim,
             "error": err or "model_call_failed",
             "elapsed_sec": elapsed,
-        }
-        print(json.dumps(out), flush=True)
+        })
         return 0
 
     bridge = clean_output(raw)
-    passes, reason = passes_quality_gate(bridge, link_url,
-                                         voice_relationship=voice_relationship)
+    passes, reason = passes_quality_gate(
+        bridge, mention, voice_relationship=voice_relationship,
+        cta_mode=cta_mode)
     if not passes:
-        fb_text, fb_trim = enforce_budget(
-            mechanical_fallback(reply_text, link_url), link_url,
-            limit if limit is not None else TWEET_LIMIT * 100)
-        out = {
+        fb_text, fb_trim = _enforce(
+            _mech(), limit if limit is not None else TWEET_LIMIT * 100)
+        _emit({
             "ok": True,
             "text": fb_text,
-            "tail": link_url,
+            "tail": mention,
             "model_call_ok": True,
             "fallback_used": True,
             "budget_trimmed": fb_trim,
             "error": f"quality_gate_failed:{reason}",
             "raw_model_output": raw[:500],
             "elapsed_sec": elapsed,
-        }
-        print(json.dumps(out), flush=True)
+        })
         return 0
 
     # Successful path: append the model-written bridge to the UNMODIFIED
@@ -834,12 +872,12 @@ def main() -> int:
     if limit is not None:
         # Belt-and-suspenders: should be a no-op given the bridge_budget
         # precheck above, unless the model ignored the length rule. Trims
-        # from the END of the pre-URL text (the model's own bridge, appended
+        # from the END of the pre-CTA text (the model's own bridge, appended
         # last), so a well-behaved reply_text is only touched in the
         # degenerate case where reply_text alone already exceeds the limit.
-        final_text, budget_trimmed = enforce_budget(final_text, link_url, limit)
+        final_text, budget_trimmed = _enforce(final_text, limit)
 
-    out = {
+    _emit({
         "ok": True,
         "text": final_text,
         "tail": bridge,
@@ -847,8 +885,7 @@ def main() -> int:
         "fallback_used": False,
         "budget_trimmed": budget_trimmed,
         "elapsed_sec": elapsed,
-    }
-    print(json.dumps(out), flush=True)
+    })
     return 0
 
 
