@@ -196,3 +196,4 @@ config.json.lock
 persona_corpus.txt
 last_profile_scan.json
 .subreddit_bans_cache.json
+.cache/
