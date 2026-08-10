@@ -10,14 +10,17 @@
     "email": "i@m13v.com",
     "url": "https://s4l.ai"
   },
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ]
+  },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
     "mcp_config": {
-      "command": "${__dirname}/vendor/node-darwin-arm64/bin/node",
-      "args": [
-        "${__dirname}/dist/index.js"
-      ],
+      "command": "${__dirname}/launch.js",
+      "args": [],
       "env": {
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
       }
