@@ -5689,13 +5689,21 @@ async function handleApi(req, res) {
         '  FROM twitter_candidates ' +
         "  WHERE discovered_at > NOW() - INTERVAL '7 days' " +
         '    AND virality_score IS NOT NULL AND install_id IS NOT NULL ' +
+        // Count-anchored thresholds (2026-08-10), mirroring the website API
+        // (src/lib/api/posting-mode.ts POSTING_MODE_TARGET_PER_DAY): per mode
+        // the Nth-best score in the 7d pool, N = target/day * 7 (90/30/5).
+        // Pool smaller than N -> MIN of the whole pool, i.e. everything
+        // passes, matching the live route's bar-off fail-open.
+        '), ranked AS ( ' +
+        '  SELECT iid, v, ROW_NUMBER() OVER (PARTITION BY iid ORDER BY v DESC) AS rn ' +
+        '  FROM pool ' +
         '), thr AS ( ' +
         '  SELECT iid, ' +
-        '    percentile_cont(0.9)   WITHIN GROUP (ORDER BY v) AS t_high, ' +
-        '    percentile_cont(0.97)  WITHIN GROUP (ORDER BY v) AS t_medium, ' +
-        '    percentile_cont(0.995) WITHIN GROUP (ORDER BY v) AS t_low, ' +
+        '    MIN(v) FILTER (WHERE rn <= 630) AS t_high, ' +
+        '    MIN(v) FILTER (WHERE rn <= 210) AS t_medium, ' +
+        '    MIN(v) FILTER (WHERE rn <= 35)  AS t_low, ' +
         '    COUNT(*)::int AS pool_n ' +
-        '  FROM pool GROUP BY iid ' +
+        '  FROM ranked GROUP BY iid ' +
         '), bmax AS ( ' +
         '  SELECT iid, batch_id, MAX(v) AS mx FROM pool GROUP BY iid, batch_id ' +
         '), est AS ( ' +
