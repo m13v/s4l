@@ -32,7 +32,12 @@ log() { echo "[s4l-install] $*"; }
 die() { echo "[s4l-install] ERROR: $*" >&2; exit 1; }
 
 [ "$(uname -s)" = "Darwin" ] || die "macOS only for now."
-[ "$(uname -m)" = "arm64" ] || die "Apple Silicon only for now (the bundle vendors a darwin-arm64 Node)."
+# The bundle vendors both darwin-arm64 and darwin-x64 Node binaries (1.7.9+);
+# pick the one matching this machine.
+case "$(uname -m)" in
+  x86_64|amd64) NODE_ARCH="x64" ;;
+  *)            NODE_ARCH="arm64" ;;
+esac
 
 URL="$STABLE_URL"
 [ "${S4L_CHANNEL:-}" = "staging" ] && URL="$STAGING_URL"
@@ -45,7 +50,9 @@ log "downloading $URL"
 mkdir -p "$TMP/app"
 /usr/bin/unzip -q "$TMP/s4l.mcpb" -d "$TMP/app" || die "unzip failed"
 [ -f "$TMP/app/dist/index.js" ] || die "bundle missing dist/index.js (bad download?)"
-[ -x "$TMP/app/vendor/node-darwin-arm64/bin/node" ] || die "bundle missing vendored node"
+# Older bundles (pre-1.7.9) only vendor arm64; accept either so a staging box
+# pinned to an old release still installs on Apple Silicon.
+[ -x "$TMP/app/vendor/node-darwin-$NODE_ARCH/bin/node" ] || [ -x "$TMP/app/vendor/node-darwin-arm64/bin/node" ] || die "bundle missing vendored node for $NODE_ARCH"
 
 mkdir -p "$STATE_DIR"
 rm -rf "$APP_DIR.new"
@@ -55,7 +62,8 @@ mv "$APP_DIR.new" "$APP_DIR"
 rm -rf "$APP_DIR.old"
 log "installed bundle to $APP_DIR"
 
-NODE="$APP_DIR/vendor/node-darwin-arm64/bin/node"
+NODE="$APP_DIR/vendor/node-darwin-$NODE_ARCH/bin/node"
+[ -x "$NODE" ] || NODE="$APP_DIR/vendor/node-darwin-arm64/bin/node"
 SERVER="$APP_DIR/dist/index.js"
 SAFE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
