@@ -18,6 +18,11 @@ Providers:
                         (headless, subscription-authenticated). Requires the
                         ChatGPT app installed and logged in. No queue, no
                         worker, no app-open requirement.
+  gemini-api            answer inline via the Gemini generateContent REST API
+                        (key-authenticated, no local app at all). The hosted
+                        lane's provider: works headless on any Linux box.
+                        Key: $GEMINI_API_KEY, else macOS keychain
+                        `gemini-api-key`.
 
 CLI:
   python3 scripts/draft_provider.py get            -> prints the active provider
@@ -32,7 +37,7 @@ import os
 import sys
 import time
 
-VALID_PROVIDERS = ("claude-desktop-queue", "claude-p", "codex-exec")
+VALID_PROVIDERS = ("claude-desktop-queue", "claude-p", "codex-exec", "gemini-api")
 DEFAULT_PROVIDER = "claude-desktop-queue"
 
 # The npm @openai/codex install is unreliable on macOS (XProtect false-positives
@@ -87,6 +92,27 @@ def codex_bin() -> str | None:
     if os.access(CODEX_APP_BIN, os.X_OK):
         return CODEX_APP_BIN
     return None
+
+
+def gemini_api_key() -> str | None:
+    """Resolved Gemini API key, or None. Env wins (the hosted/Linux path);
+    macOS keychain `gemini-api-key` is the operator-Mac fallback."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", "gemini-api-key", "-w"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        key = (out.stdout or "").strip()
+        return key or None
+    except Exception:
+        return None
 
 
 def main() -> int:
