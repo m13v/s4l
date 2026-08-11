@@ -2637,6 +2637,19 @@ def _post_iteration(plan, reddit_username):
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     active_campaigns = load_active_reddit_campaigns()
+    # S4L_SKIP_CAMPAIGN_SUFFIX=1: reviewed/approved posts never get the
+    # active-campaign suffix (e.g. " written with ai"). The MCP approval
+    # poster (mcp/src/index.ts::postApproved) has set this env since the
+    # reddit card path shipped, but this script never read it, so reviewed
+    # reddit posts kept getting a suffix the reviewer never saw on the card
+    # (2026-08-10, carrabre). Mirrors twitter_browser.py's reply handler.
+    # The cron/autopilot pipeline never sets it, so the A/B disclosure
+    # experiment keeps running there.
+    if os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes"):
+        if active_campaigns:
+            print("[post_reddit] S4L_SKIP_CAMPAIGN_SUFFIX set: campaign "
+                  "suffixes disabled for this plan (reviewed posts land clean)")
+        active_campaigns = []
     # Persona posts never carry a product campaign suffix (2026-07-17): the
     # reddit analog of the X lane's TWITTER_TAIL_LINK_RATE=0. Resolved from
     # config (persona:true on the plan's project), NOT from lane env; the
