@@ -16,8 +16,14 @@ docs/codex-port-design.md):
                         (_run_codex_exec; gpt-5.6-sol default, schema rides
                         the prompt — OpenAI strict schema mode rejects our
                         lenient schemas).
+  gemini-api            answer inline via the Gemini generateContent REST API
+                        (_run_gemini_api; gemini-pro-latest default with a
+                        one-shot flash downgrade on 404, schema rides the
+                        prompt for the same lenient-schema reason). The
+                        hosted-lane provider: key-authenticated, no local
+                        app, runs headless on Linux.
 
-All three return byte-identical claude `--output-format json` envelopes and
+All four return byte-identical claude `--output-format json` envelopes and
 the same 0/1/79 exit semantics, so callers can't tell them apart. The queue
 machinery below (next/result, worker notes, heartbeats) only runs for the
 default provider; the inline providers skip it entirely, which also means no
@@ -897,6 +903,160 @@ def _run_codex_exec(ns, qtype: str, prompt: str, schema_text: str | None) -> int
         _disarm_deathwatch(job_id)
 
 
+def _run_gemini_api(ns, qtype: str, prompt: str, schema_text: str | None) -> int:
+    """gemini-api provider: answer the turn inline via the Gemini
+    generateContent REST API. Key-authenticated, fully headless: this is the
+    hosted-lane provider (no Claude Desktop, no ChatGPT app, runs on Linux).
+    Same envelope, same 0/1/79 exit semantics as the other inline providers.
+
+    Schema rides the prompt (not responseSchema): Gemini's structured-output
+    schema dialect is an OpenAPI subset that rejects parts of our lenient
+    claude-style schemas, so _validate_against_schema stays the single gate,
+    matching the codex-exec precedent. responseMimeType application/json still
+    forces bare-JSON output for schema'd jobs; schemaless jobs (link-tail)
+    stay plain text.
+    """
+    import urllib.error
+    import urllib.request
+
+    key = draft_provider.gemini_api_key()
+    if not key:
+        _plog(f"gemini-api provider active but no GEMINI_API_KEY / keychain gemini-api-key; failing {qtype}")
+        return 1
+
+    batch = (os.environ.get("BATCH_ID") or os.environ.get("SA_CYCLE_ID") or "-").strip() or "-"
+    job_id = uuid.uuid4().hex
+    _arm_deathwatch(job_id, qtype, batch)
+    _act_write(qtype)
+    try:
+        if schema_text:
+            prompt = (
+                f"{prompt}\n\n"
+                "FINAL ANSWER FORMAT: reply with ONLY a JSON value matching this "
+                "JSON Schema. No prose, no markdown fences, nothing else:\n"
+                f"{schema_text}"
+            )
+        # Model default mirrors codex-exec's probe-by-use pattern: try the pro
+        # alias first (drafting quality is the product), downgrade ONCE to the
+        # flash alias on a model-not-found 404 and log it loudly. The -latest
+        # aliases are Google-maintained so this never pins a dead model id.
+        model = os.environ.get("S4L_GEMINI_MODEL", "").strip() or "gemini-pro-latest"
+        fallback_model = "gemini-flash-latest"
+        gen_config = {"temperature": 0.7, "maxOutputTokens": 16384}
+        if schema_text:
+            gen_config["responseMimeType"] = "application/json"
+        body = json.dumps(
+            {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": gen_config,
+            }
+        ).encode()
+
+        budget = max(60, ns.timeout - 60)
+        _plog(f"gemini-api start {qtype} job {job_id} batch={batch} model={model} timeout={budget}s")
+        started = time.time()
+        resp_obj = None
+        for attempt_model in (model, fallback_model if fallback_model != model else None):
+            if not attempt_model:
+                break
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{attempt_model}:generateContent"
+            )
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(
+                    req, timeout=max(60, budget - int(time.time() - started))
+                ) as resp:
+                    resp_obj = json.loads(resp.read().decode())
+                break
+            except urllib.error.HTTPError as e:
+                tail = ""
+                try:
+                    tail = e.read().decode()[-400:]
+                except Exception:
+                    pass
+                if e.code == 404 and attempt_model == model:
+                    _plog(
+                        f"gemini-api model {attempt_model} not found (404); "
+                        f"retrying job {job_id} with {fallback_model}"
+                    )
+                    continue
+                _act_clear()
+                _plog(f"gemini-api HTTP {e.code} on job {job_id} ({qtype}); tail: {tail}")
+                return 1
+            except TimeoutError:
+                _act_clear()
+                _plog(f"gemini-api timed out after {budget}s on job {job_id} ({qtype})")
+                return 79  # mirror the queue path's "blocked, skip cleanly"
+            except Exception as e:
+                _act_clear()
+                _plog(f"gemini-api request failed on job {job_id} ({qtype}): {e}")
+                return 1
+        if resp_obj is None:
+            _act_clear()
+            _plog(f"gemini-api no response on job {job_id} ({qtype})")
+            return 1
+
+        try:
+            cand = resp_obj["candidates"][0]
+            text = "".join(
+                p.get("text", "") for p in cand.get("content", {}).get("parts", [])
+            ).strip()
+            finish = cand.get("finishReason", "?")
+        except (KeyError, IndexError, TypeError):
+            _act_clear()
+            block = (resp_obj.get("promptFeedback") or {}).get("blockReason", "?")
+            _plog(f"gemini-api no candidates on job {job_id} ({qtype}); blockReason={block}")
+            return 1
+        if not text:
+            _act_clear()
+            _plog(f"gemini-api empty answer on job {job_id} ({qtype}); finishReason={finish}")
+            return 1
+
+        # Same lenient parse as codex-exec: JSON when it parses, fenced JSON
+        # unwrapped, otherwise the raw text as a plain string (link-tail jobs).
+        obj = None
+        parsed = False
+        for candidate in (text, re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()):
+            try:
+                obj = json.loads(candidate)
+                parsed = True
+                break
+            except Exception:
+                continue
+        if not parsed:
+            obj = text
+
+        err = _validate_against_schema(obj, schema_text)
+        if err:
+            _act_clear()
+            _plog(f"gemini-api result rejected for job {job_id} ({qtype}): {err}")
+            return 1
+
+        _emit_envelope(obj)
+        _mark_drain_success()
+        _stamp_heartbeat("gemini-api", qtype)
+        usage = resp_obj.get("usageMetadata") or {}
+        tokens = usage.get("totalTokenCount", "?")
+        try:
+            _ncand = len(obj.get("candidates")) if isinstance(obj, dict) and isinstance(obj.get("candidates"), list) else "?"
+        except Exception:
+            _ncand = "?"
+        _plog(
+            f"gemini-api done job {job_id} batch={batch} ({qtype}) in {int(time.time() - started)}s "
+            f"tokens={tokens} finish={finish}; {_ncand} candidates -> producer assembles the plan"
+        )
+        return 0
+    finally:
+        _disarm_deathwatch(job_id)
+
+
 def _run_claude_p(ns, qtype: str, prompt: str, schema_text: str | None) -> int:
     """claude-p provider: answer the turn inline via the real `claude -p`
     (Claude Code CLI, subscription-authenticated). No queue, no worker, no
@@ -999,6 +1159,8 @@ def cmd_provider(ns) -> int:
         return _run_codex_exec(ns, qtype, prompt, schema_text)
     if _prov == "claude-p":
         return _run_claude_p(ns, qtype, prompt, schema_text)
+    if _prov == "gemini-api":
+        return _run_gemini_api(ns, qtype, prompt, schema_text)
 
     job_id = uuid.uuid4().hex
     created = time.time()
