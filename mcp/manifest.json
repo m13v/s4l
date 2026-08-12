@@ -19,8 +19,10 @@
     "type": "node",
     "entry_point": "dist/index.js",
     "mcp_config": {
-      "command": "${__dirname}/launch.js",
-      "args": [],
+      "command": "${__dirname}/vendor/node-darwin-arm64/bin/node",
+      "args": [
+        "${__dirname}/dist/index.js"
+      ],
       "env": {
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
       }
