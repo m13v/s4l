@@ -387,7 +387,9 @@ console.log('  manifest tools ('+tools.length+'): '+tools.map(t=>t.name).join(',
 # points at this vendored binary's absolute path, so every session type — main
 # chat, agent-mode, any future session type — spawns the SAME real binary.
 # Both macOS arches since 1.7.9: arm64 (every deployed box) AND x64 (Intel Macs
-# still on Tahoe). mcp/launch.js picks the arch-matched binary at spawn time.
+# still on Tahoe). Since the 2026-08-12 launch.js removal the manifest points
+# straight at the arm64 binary, so x64 rides along in the bundle but is NOT
+# spawnable via the manifest (no deployed Intel boxes today).
 NODE_RUNTIME_VERSION="v24.18.0"
 NODE_RUNTIME_PLATFORMS="darwin-arm64 darwin-x64"
 NODE_CACHE_DIR="$REPO_ROOT/.cache/node-runtime"
@@ -491,7 +493,7 @@ for sub in mcp/dist/version.json mcp/package.json; do
   echo "  pipeline.tgz $sub: $SUBV ok"
 done
 
-REQUIRED_FILES="dist/index.js dist/runtime.js manifest.json launch.js"
+REQUIRED_FILES="dist/index.js dist/runtime.js manifest.json"
 for p in $NODE_RUNTIME_PLATFORMS; do
   REQUIRED_FILES="$REQUIRED_FILES vendor/node-$p/bin/node"
 done
@@ -501,25 +503,26 @@ for f in $REQUIRED_FILES; do
   n=$(printf '%s\n' "$LISTING" | grep -c "[0-9:]   $f\$" || true)
   [[ "$n" -ge 1 ]] || die "bundle missing $f"
 done
-echo "  runtime + server + manifest + launcher + vendored node (both arches): ok"
+echo "  runtime + server + manifest + vendored node (both arches): ok"
 
 # The compat gate inside Claude Desktop only recognizes a node-type extension
 # when mcp_config.command is the bare string "node" or a path ending in .js
 # (its fo() command-recognizer). Pointing at the vendored node BINARY shipped
 # "this extension is incompatible" to every Mac without a system Node.js
-# (first hit: new-user install, 2026-08-10). Guard the manifest shape so a
-# future edit cannot silently regress it.
+# (first hit: new-user install, 2026-08-10). The launch.js shim that satisfied
+# the gate was itself broken by Desktop 1.28929.0 (stdio-inherit re-exec lost
+# the MCP transport), so per user decision 2026-08-12 the binary-path command
+# is shipped again and this check is a WARNING, not a blocker.
 MANIFEST_CMD=$(unzip -p "$BUNDLE" manifest.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).server.mcp_config.command" 2>/dev/null || echo "?")
 case "$MANIFEST_CMD" in
   node|node.exe|*.js) echo "  manifest command Desktop-recognizable ($MANIFEST_CMD): ok" ;;
-  *) die "manifest mcp_config.command '$MANIFEST_CMD' is not recognizable by Claude Desktop's node compat gate (must be 'node' or end in .js); Macs without system Node.js will see 'incompatible' at install" ;;
+  *) echo "  WARNING: manifest mcp_config.command '$MANIFEST_CMD' is not recognizable by Claude Desktop's node compat gate (must be 'node' or end in .js); Macs without system Node.js may see 'incompatible' at install" >&2 ;;
 esac
 
-# The vendored binaries and the launcher must survive the zip round-trip with
+# The vendored binaries must survive the zip round-trip with
 # their executable bits intact (extract to a temp dir and run --version where
 # the host arch allows; a permissions regression here would silently produce a
-# Node that Desktop can spawn but that refuses to execute, or a launch.js that
-# agent-mode cannot exec).
+# Node that Desktop can spawn but that refuses to execute).
 VENDOR_CHECK_DIR="$(mktemp -d)"
 for p in $NODE_RUNTIME_PLATFORMS; do
   unzip -q -o "$BUNDLE" "vendor/node-$p/bin/node" -d "$VENDOR_CHECK_DIR"
@@ -533,13 +536,7 @@ for p in $NODE_RUNTIME_PLATFORMS; do
     echo "  vendored node ($p) survives bundle round-trip with exec bit intact; --version run skipped (host $HOST_OS-$HOST_ARCH cannot exec $p)"
   fi
 done
-unzip -q -o "$BUNDLE" "launch.js" -d "$VENDOR_CHECK_DIR"
-LAUNCH_CHECK="$VENDOR_CHECK_DIR/launch.js"
-[[ -x "$LAUNCH_CHECK" ]] || die "launch.js in bundle lost its executable bit (agent-mode literal spawn would fail)"
-head -c 9 "$LAUNCH_CHECK" | grep -q '^#!/bin/sh' || die "launch.js in bundle is missing its #!/bin/sh shebang"
-node --check "$LAUNCH_CHECK" || die "launch.js in bundle is not valid JavaScript (Desktop built-in-node spawn would fail)"
 rm -rf "$VENDOR_CHECK_DIR"
-echo "  launch.js: exec bit + shebang + JS syntax ok"
 
 if [[ "$DO_RELEASE" == "0" ]]; then
   say "Done (--no-release). Bundle ready at: $BUNDLE"
