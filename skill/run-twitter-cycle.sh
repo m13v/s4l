@@ -800,6 +800,17 @@ log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will s
 # Python pipeline runs each banked query via headless Chrome and writes the
 # tweets directly to SCAN_TWEETS_FILE for the shell.
 
+# --- Phase 1 search transport (2026-08-12) -----------------------------------
+# browser (default): CDP scrape via twitter_scan.py through the twitter-harness
+#   Chrome. Needs the browser lock, harness bootstrap, and the two X-session
+#   preflights below.
+# api: twitterapi.io via scripts/twitter_scan_api.py (same SCAN_TWEETS_FILE
+#   contract). No browser, no lock, no preflights — the hosted-container lane
+#   and any box without a harness. Key: $TWITTERAPI_IO_KEY or keychain
+#   `twitterapi-io-key`.
+TW_SEARCH_TRANSPORT="${S4L_TWITTER_SEARCH_TRANSPORT:-browser}"
+
+if [ "$TW_SEARCH_TRANSPORT" != "api" ]; then
 log "Acquiring twitter-browser lock for Phase 1 scan..."
 acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
 log "twitter-browser lock held (pid=$$) Phase 1"
@@ -988,6 +999,10 @@ print(dur, dur//60, cons)' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo "0 0 0")
     log "  X access gate lifted after ~${_DUR_M}m (${_RCONS} consecutive gated probes); cleared backoff marker and resuming normal cycle."
 fi
 log "  Pre-flight access OK: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+
+else
+    log "Phase 1 search transport: api (twitterapi.io); skipping browser lock, harness bootstrap, and X session/access preflights."
+fi
 
 # --- Phase 1 retry loop (2026-05-27) ----------------------------------------
 # When a single scan produces fewer than RETRY_TARGET candidates that survive
@@ -1190,7 +1205,19 @@ except Exception: print(0)
 # browser-harness invocation handles the full loop so we don't pay the CLI
 # startup cost N times. Each scan() call appends one JSONL record to
 # $SCAN_TWEETS_FILE, which the existing shell-side parse below consumes.
-if [ "$QUERIES_COUNT" -gt 0 ]; then
+if [ "$QUERIES_COUNT" -gt 0 ] && [ "$TW_SEARCH_TRANSPORT" = "api" ]; then
+    log "Lean Phase 1: executing $QUERIES_COUNT queries via twitterapi.io (S4L_TWITTER_SEARCH_TRANSPORT=api)"
+    # API-transport twin of the browser-harness loop below: same env contract,
+    # same SCAN_TWEETS_FILE JSONL output, no browser/CDP dependency. Parity
+    # contract documented in scripts/twitter_scan_api.py.
+    SCAN_TWEETS_FILE="$SCAN_TWEETS_FILE" \
+    BATCH_ID="$BATCH_ID" \
+    TWITTER_CYCLE_VARIANT="$TWITTER_CYCLE_VARIANT" \
+    FRESHNESS_HOURS_DISCOVER="$FRESHNESS_HOURS_DISCOVER" \
+    ENGAGED_TWEET_IDS="$ENGAGED_TWEET_IDS" \
+    QUERIES_TMP="$QUERIES_TMP" \
+        python3 "$REPO_DIR/scripts/twitter_scan_api.py" 2>&1 | tee -a "$LOG_FILE"
+elif [ "$QUERIES_COUNT" -gt 0 ]; then
     log "Lean Phase 1: executing $QUERIES_COUNT queries via browser-harness CDP"
     # browser-harness upstream main reads the script from STDIN (the `-c` flag was
     # removed). Feed the body via a quoted heredoc and pass $REPO_DIR / $QUERIES_TMP
@@ -1562,8 +1589,10 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 # stats.sh) can run their browser steps in this window instead of waiting for us
 # to finish. We re-acquire just before Phase 2b posts, blocking up to the
 # acquire_lock timeout if another pipeline is mid-run.
-log "Releasing twitter-browser lock between Phase 1 scrape and Phase 2b posting..."
-release_lock "twitter-browser" 2>>"$LOG_FILE"
+if [ "$TW_SEARCH_TRANSPORT" != "api" ]; then
+    log "Releasing twitter-browser lock between Phase 1 scrape and Phase 2b posting..."
+    release_lock "twitter-browser" 2>>"$LOG_FILE"
+fi
 # (2026-06-16) NO `rm -f twitter-browser-lock.json` here. The blind rm was
 # ownership-unaware and ran AFTER release_lock, so under a pipeline handoff it
 # deleted a LIVE peer's session mutex (defect b) -> two browser ops on one X
