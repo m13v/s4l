@@ -13,8 +13,11 @@
 //
 // The same file must serve three spawn paths:
 //   1. Desktop chat bridge: runs this file with Claude's built-in Node
-//      (Electron UtilityProcess). The JS below re-execs the vendored,
-//      arch-matched Node so behavior matches every other path.
+//      (Electron UtilityProcess). The JS below serves the MCP session
+//      IN-PROCESS: the UtilityProcess's stdin/stdout are not guaranteed to be
+//      real fds (Desktop 1.28929.0 broke stdio:"inherit" re-exec — handshake
+//      timeout + leaked child on every attach), so the transport must stay in
+//      this process.
 //   2. Agent-mode/Cowork and any literal spawner: exec()s this file directly.
 //      The #!/bin/sh shebang runs the one-line sh half above, which picks the
 //      vendored Node by `uname -m` and never needs a system Node.
@@ -42,8 +45,19 @@ Promise.resolve().then(async () => {
     vendored = path.join(root, "vendor", "node-darwin-arm64", "bin", "node");
   }
 
+  // Under Claude Desktop's built-in Node (Electron UtilityProcess) the MCP
+  // transport on our stdin/stdout is not guaranteed to be a real fd pair —
+  // Desktop 1.28929.0 carries it over an internal channel, so a child spawned
+  // with stdio:"inherit" writes into the void, initialize never answers, and
+  // Desktop declares the extension unresponsive (leaking the child each try).
+  // Serve the MCP session in-process in that lane; the re-exec below stays for
+  // spawners that hand us real pipes.
+  const underElectron =
+    process.versions.electron != null || process.type === "utility";
+
   if (
     process.env[REEXEC_ENV] === "1" ||
+    underElectron ||
     process.platform !== "darwin" ||
     !fs.existsSync(vendored)
   ) {
