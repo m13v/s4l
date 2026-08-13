@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
-"""twitter_post_api.py — API posting transport (twitterapi.io write lane).
+"""twitter_post_api.py — API posting transport (GetXAPI write lane).
 
-The hosted-lane counterpart of `twitter_browser.py reply`: posts X replies and
-tweets through twitterapi.io's v2 write endpoints instead of driving the CDP
-Chrome. Decision 2026-08-12 (user): twitterapi.io, not the official X API.
+The hosted-lane counterpart of `twitter_browser.py reply`: posts X replies,
+tweets, and deletions through GetXAPI (api.getxapi.com) instead of driving the
+CDP Chrome. Bring-your-own-cookie model: the tenant's live X session cookies
+(auth_token, plus ct0/twid when available) ride each request; GetXAPI executes
+the action against X's private endpoints and returns the tweet id.
 
-How the write lane works (docs.twitterapi.io):
-  1. POST /twitter/user_login_v2 {user_name, email, password, totp_secret?,
-     proxy} -> login_cookie. twitterapi.io performs the X login server-side;
-     ~$0.005/call. Cookies "remain valid indefinitely" with good standing +
-     residential proxy, so login is a RARE bootstrap step, not per-post.
-  2. POST /twitter/create_tweet_v2 {auth_session (login_cookies), tweet_text,
-     reply_to_tweet_id?, proxy} -> tweet_id.
-  All write calls REQUIRE a residential proxy URL (http://user:pass@host:port).
+Provider history (2026-08-12): twitterapi.io's write lane was implemented
+first but requires a server-side password login (user_login_v2) that cannot
+pass SMS-2FA / login challenges, and its login_cookies blob rejects raw
+session cookies. GetXAPI accepts the session cookies we already hold (the
+same ones the browser transport uses), needs no password, no TOTP, and its
+proxy is optional. Live-proven same day: reply 2087730228160278671 posted
+200-clean under our own thread. One implementation only, per the
+minimize-code-footprint rule; if the provider ever changes again, REPLACE
+this lane, do not layer a second one.
 
-Credential resolution (env wins, then macOS keychain; hosted containers use
-env, the operator Mac uses keychain):
-  API key:      $TWITTERAPI_IO_KEY, else keychain `twitterapi-io-key`, else
-                keychain `twitterapi-io-m13v` (legacy entry).
-  login cookie: $S4L_TAPI_LOGIN_COOKIE, else keychain
-                `twitterapi-io-login-cookie` (account = X handle).
-  proxy:        $S4L_TAPI_PROXY, else keychain `decodo-residential-proxy`.
+Credential resolution (env wins, then macOS keychain / mirror file; hosted
+containers use env or per-tenant DB values, the operator Mac uses local
+sources):
+  API key:  $GETXAPI_KEY, else keychain `getxapi-key`.
+  cookies:  $S4L_X_AUTH_TOKEN (+ optional $S4L_X_CT0, $S4L_X_TWID), else the
+            harness cookie mirror JSON at $S4L_X_COOKIE_MIRROR (default
+            ~/.claude/browser-profiles/browser-harness.x-cookies.json — the
+            durable 0600 mirror connect_x refreshes on every connect).
+  proxy:    $S4L_TAPI_PROXY, else keychain `decodo-residential-proxy`, else
+            none (GetXAPI's proxy field is optional; we pass ours for IP
+            hygiene so account actions egress residential).
 
-CLI (all print a single JSON result line to stdout; secrets never printed):
-  login  --handle m13v_ --email i@m13v.com [--password-keychain x.com]
-         performs user_login_v2 and stores the cookie in the keychain.
+CLI (single JSON result line on stdout; secrets never printed):
   reply  <tweet_id_or_url> <text...>
   tweet  <text...>
-  delete <tweet_id>
+  delete <tweet_id_or_url>
 
-Exit codes: 0 ok; 1 error; 3 auth (login cookie missing/expired -> re-login).
+Exit codes: 0 ok; 1 error; 3 auth (cookies missing/stale -> reconnect X).
 """
 
 from __future__ import annotations
@@ -43,7 +48,10 @@ import sys
 import urllib.error
 import urllib.request
 
-API = "https://api.twitterapi.io"
+API = "https://api.getxapi.com"
+DEFAULT_MIRROR = os.path.expanduser(
+    "~/.claude/browser-profiles/browser-harness.x-cookies.json"
+)
 _STATUS_ID_RE = re.compile(r"/status/(\d+)")
 
 
@@ -60,33 +68,8 @@ def _keychain(service: str) -> str | None:
         return None
 
 
-def _keychain_store(service: str, account: str, value: str) -> bool:
-    try:
-        r = subprocess.run(
-            ["security", "add-generic-password", "-a", account, "-s", service,
-             "-w", value, "-U"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
 def _api_key() -> str | None:
-    return (
-        os.environ.get("TWITTERAPI_IO_KEY", "").strip()
-        or _keychain("twitterapi-io-key")
-        or _keychain("twitterapi-io-m13v")
-    )
-
-
-def _login_cookie() -> str | None:
-    return (
-        os.environ.get("S4L_TAPI_LOGIN_COOKIE", "").strip()
-        or _keychain("twitterapi-io-login-cookie")
-    )
+    return os.environ.get("GETXAPI_KEY", "").strip() or _keychain("getxapi-key")
 
 
 def _proxy() -> str | None:
@@ -96,21 +79,28 @@ def _proxy() -> str | None:
     )
 
 
-def _post(path: str, body: dict, key: str, timeout: float = 60.0) -> dict:
-    req = urllib.request.Request(
-        f"{API}{path}",
-        data=json.dumps(body).encode(),
-        headers={"X-API-Key": key, "Content-Type": "application/json"},
-        method="POST",
-    )
+def _cookies() -> dict:
+    """{auth_token, ct0?, twid?} from env, else the harness cookie mirror."""
+    tok = os.environ.get("S4L_X_AUTH_TOKEN", "").strip()
+    if tok:
+        out = {"auth_token": tok}
+        for env, field in (("S4L_X_CT0", "ct0"), ("S4L_X_TWID", "twid")):
+            v = os.environ.get(env, "").strip()
+            if v:
+                out[field] = v
+        return out
+    path = os.environ.get("S4L_X_COOKIE_MIRROR", "").strip() or DEFAULT_MIRROR
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        try:
-            return json.loads(e.read().decode())
-        except Exception:
-            return {"status": "error", "msg": f"http_{e.code}"}
+        with open(path) as f:
+            mirror = json.load(f)
+    except Exception:
+        return {}
+    vals = {
+        c.get("name"): c.get("value")
+        for c in mirror.get("cookies", [])
+        if c.get("name") in ("auth_token", "ct0", "twid")
+    }
+    return {k: v for k, v in vals.items() if v}
 
 
 def _tweet_id(arg: str) -> str | None:
@@ -124,68 +114,59 @@ def _emit(obj: dict) -> None:
     print(json.dumps(obj))
 
 
-def cmd_login(ns) -> int:
+def _call(path: str, extra: dict) -> int:
     key = _api_key()
     if not key:
-        _emit({"status": "error", "msg": "no twitterapi.io API key"})
+        _emit({"status": "error", "msg": "no GetXAPI key ($GETXAPI_KEY / keychain getxapi-key)"})
         return 1
-    proxy = _proxy()
-    if not proxy:
-        _emit({"status": "error", "msg": "no residential proxy configured"})
-        return 1
-    password = os.environ.get("S4L_TAPI_X_PASSWORD", "").strip() or _keychain(
-        ns.password_keychain
-    )
-    if not password:
-        _emit({"status": "error", "msg": f"no password in env or keychain {ns.password_keychain!r}"})
-        return 1
-    body = {
-        "user_name": ns.handle,
-        "email": ns.email,
-        "password": password,
-        "proxy": proxy,
-    }
-    totp = os.environ.get("S4L_TAPI_TOTP_SECRET", "").strip() or (
-        _keychain(ns.totp_keychain) if ns.totp_keychain else None
-    )
-    if totp:
-        body["totp_secret"] = totp
-    out = _post("/twitter/user_login_v2", body, key, timeout=120.0)
-    cookie = out.get("login_cookie") or out.get("login_cookies") or ""
-    if out.get("status") == "success" and cookie:
-        stored = _keychain_store("twitterapi-io-login-cookie", ns.handle, cookie)
-        _emit({"status": "success", "cookie_stored_in_keychain": stored,
-               "cookie_len": len(cookie)})
-        return 0
-    _emit({"status": "error", "msg": out.get("msg") or out.get("message") or str(out)[:300]})
-    return 1
-
-
-def _write_call(path: str, extra: dict) -> int:
-    key = _api_key()
-    if not key:
-        _emit({"status": "error", "msg": "no twitterapi.io API key"})
-        return 1
-    cookie = _login_cookie()
-    if not cookie:
-        _emit({"status": "auth", "msg": "no login cookie; run `twitter_post_api.py login` first"})
+    ck = _cookies()
+    if not ck.get("auth_token"):
+        _emit({"status": "auth", "msg": "no X session cookies (env or cookie mirror); reconnect X"})
         return 3
+    body = dict(ck)
     proxy = _proxy()
-    if not proxy:
-        _emit({"status": "error", "msg": "no residential proxy configured"})
-        return 1
-    body = {"login_cookies": cookie, "proxy": proxy}
+    if proxy:
+        body["proxy"] = proxy
     body.update(extra)
-    out = _post(path, body, key, timeout=90.0)
-    status = out.get("status")
-    msg = (out.get("msg") or out.get("message") or "")
-    if status == "success":
-        _emit({"status": "success", "tweet_id": out.get("tweet_id") or out.get("data", {}).get("tweet_id"), "msg": msg})
+    req = urllib.request.Request(
+        f"{API}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            out = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        tail = ""
+        try:
+            tail = e.read().decode()[:300]
+        except Exception:
+            pass
+        if e.code in (401, 403):
+            _emit({"status": "auth", "msg": f"http_{e.code}: {tail}"})
+            return 3
+        _emit({"status": "error", "msg": f"http_{e.code}: {tail}"})
+        return 1
+    except Exception as e:
+        _emit({"status": "error", "msg": f"{type(e).__name__}: {e}"})
+        return 1
+
+    # Response shapes: {success/status, tweet_id | data:{...}} — be lenient.
+    tid = (
+        out.get("tweet_id")
+        or (out.get("data") or {}).get("tweet_id")
+        or (out.get("data") or {}).get("id")
+    )
+    ok = out.get("success") is True or out.get("status") in ("success", "ok") or bool(tid)
+    msg = str(out.get("msg") or out.get("message") or out.get("error") or "")
+    if ok:
+        _emit({"status": "success", "tweet_id": tid, "msg": msg[:200]})
         return 0
-    if re.search(r"cookie|login|session|auth", msg, re.IGNORECASE):
+    if re.search(r"auth|cookie|session|401|403", msg, re.IGNORECASE):
         _emit({"status": "auth", "msg": msg[:300]})
         return 3
-    _emit({"status": "error", "msg": msg[:300] or str(out)[:300]})
+    _emit({"status": "error", "msg": (msg or str(out))[:300]})
     return 1
 
 
@@ -194,14 +175,11 @@ def cmd_reply(ns) -> int:
     if not tid:
         _emit({"status": "error", "msg": f"cannot parse tweet id from {ns.target!r}"})
         return 1
-    return _write_call(
-        "/twitter/create_tweet_v2",
-        {"tweet_text": " ".join(ns.text), "reply_to_tweet_id": tid},
-    )
+    return _call("/twitter/tweet/create", {"text": " ".join(ns.text), "reply_to_tweet_id": tid})
 
 
 def cmd_tweet(ns) -> int:
-    return _write_call("/twitter/create_tweet_v2", {"tweet_text": " ".join(ns.text)})
+    return _call("/twitter/tweet/create", {"text": " ".join(ns.text)})
 
 
 def cmd_delete(ns) -> int:
@@ -209,20 +187,12 @@ def cmd_delete(ns) -> int:
     if not tid:
         _emit({"status": "error", "msg": f"cannot parse tweet id from {ns.target!r}"})
         return 1
-    return _write_call("/twitter/delete_tweet_v2", {"tweet_id": tid})
+    return _call("/twitter/tweet/delete", {"tweet_id": tid})
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    pl = sub.add_parser("login", help="user_login_v2 -> store cookie in keychain")
-    pl.add_argument("--handle", required=True)
-    pl.add_argument("--email", required=True)
-    pl.add_argument("--password-keychain", default="x.com",
-                    help="keychain service holding the X password")
-    pl.add_argument("--totp-keychain", default=None)
-    pl.set_defaults(fn=cmd_login)
 
     pr = sub.add_parser("reply", help="reply to a tweet (id or URL)")
     pr.add_argument("target")
@@ -233,7 +203,7 @@ def main() -> int:
     pt.add_argument("text", nargs="+")
     pt.set_defaults(fn=cmd_tweet)
 
-    pd = sub.add_parser("delete", help="delete a tweet by id")
+    pd = sub.add_parser("delete", help="delete a tweet by id or URL (own tweets only)")
     pd.add_argument("target")
     pd.set_defaults(fn=cmd_delete)
 
