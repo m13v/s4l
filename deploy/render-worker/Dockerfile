@@ -34,6 +34,7 @@ RUN npx remotion browser ensure
 
 # Code + assets. public/ (328M clips) and audio/ (67M) are the fat layers.
 COPY mixer/remotion/remotion.config.ts mixer/remotion/tsconfig.json ./
+COPY mixer/remotion/scripts ./scripts
 COPY mixer/remotion/src ./src
 COPY mixer/remotion/public ./public
 COPY mixer/audio /app/mixer/audio
