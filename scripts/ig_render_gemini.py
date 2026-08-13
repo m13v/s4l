@@ -26,9 +26,21 @@ Usage:
   ig_render_gemini.py --scenario mixer --variant spa         # product reel
   ig_render_gemini.py --dry-run                              # no DB write, no out/ write
   ig_render_gemini.py --force                                # ignore draft-buffer guard
+  ig_render_gemini.py --upload-gcs                           # publish mp4 to GCS,
+                                                             # store the URL as video_path
+  ig_render_gemini.py --upload-gcs --post trial              # full headless run:
+                                                             # render + row + IG publish
+
+Cloud mode (Cloud Run render worker): --upload-gcs + --post make the run
+fully host-independent — the mp4 goes to GCS (bucket $S4L_GCS_BUCKET, token
+from the local ADC file when present, else the GCE/Cloud Run metadata
+server) and the IG publish happens right here via post_to_ig's pure
+functions, with creds from $IG_USER_ID/$IG_LONG_TOKEN/$IG_APP_SECRET (else
+~/instagram-graph-api/.env).
 
 Env: S4L_GEMINI_MODEL (default gemini-pro-latest, 404-falls-back to
-gemini-flash-latest), GEMINI_API_KEY (else keychain gemini-api-key).
+gemini-flash-latest), GEMINI_API_KEY (else keychain gemini-api-key),
+S4L_GCS_BUCKET (default mk0r-media-temp), AUTOPOSTER_API_BASE.
 """
 
 from __future__ import annotations
