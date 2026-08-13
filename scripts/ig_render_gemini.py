@@ -326,9 +326,13 @@ def run_tlh(args, ctx: dict, manifest: dict) -> dict:
     opener = tlh_cfg.get("caption_opener") or "here is a story."
     story_brief = tlh_cfg.get("story_brief")
 
+    import random
     pool = sorted(k for k in manifest if k.startswith("tlh-"))
     if len(pool) < TLH_CLIP_COUNT:
         raise SystemExit(f"tlh clip pool too small: {len(pool)}")
+    # Shuffle before embedding in the prompt: models over-pick the first
+    # entries of a sorted list, which clusters clips from one lesson family.
+    random.shuffle(pool)
     used_angles = [a for a in (ctx.get("used_theme_angles_14d") or []) if a]
 
     prompt = tlh_prompt(pool, used_angles, story_brief, opener)
