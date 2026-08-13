@@ -55,6 +55,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -562,6 +563,107 @@ def run_mixer(args, ctx: dict, manifest: dict) -> dict:
     }
 
 
+# ── GCS + IG (cloud mode) ─────────────────────────────────────────────────────
+
+GCS_ADC = Path.home() / ".config" / "gcloud" / "legacy_credentials" / "matt@mediar.ai" / "adc.json"
+IG_ENV_FILE = Path.home() / "instagram-graph-api" / ".env"
+
+
+def gcs_access_token() -> str:
+    """OAuth token for GCS: local ADC refresh-token file when present (operator
+    Mac), else the metadata server (Cloud Run / GCE service account)."""
+    if GCS_ADC.exists():
+        creds = json.loads(GCS_ADC.read_text())
+        data = urllib.parse.urlencode({
+            "client_id": creds["client_id"],
+            "client_secret": creds["client_secret"],
+            "refresh_token": creds["refresh_token"],
+            "grant_type": "refresh_token",
+        }).encode()
+        with urllib.request.urlopen(
+            urllib.request.Request("https://oauth2.googleapis.com/token", data=data),
+            timeout=30,
+        ) as r:
+            return json.loads(r.read())["access_token"]
+    req = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/instance/"
+        "service-accounts/default/token",
+        headers={"Metadata-Flavor": "Google"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())["access_token"]
+
+
+def gcs_upload(video_path: Path) -> str:
+    bucket = os.environ.get("S4L_GCS_BUCKET", "").strip() or "mk0r-media-temp"
+    token = gcs_access_token()
+    name = urllib.parse.quote(video_path.name, safe="")
+    url = (
+        f"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o"
+        f"?uploadType=media&name={name}"
+    )
+    req = urllib.request.Request(
+        url, data=video_path.read_bytes(), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4"},
+    )
+    with urllib.request.urlopen(req, timeout=180) as r:
+        json.loads(r.read())
+    public = f"https://storage.googleapis.com/{bucket}/{name}"
+    log(f"GCS: uploaded {video_path.name} -> {public}")
+    return public
+
+
+def resolve_ig_creds(account: str) -> dict:
+    """IG creds from env vars first (cloud), else ~/instagram-graph-api/.env
+    resolved through config.json's per-account env-var names (operator Mac)."""
+    env = dict(os.environ)
+    if not (env.get("IG_USER_ID") and env.get("IG_LONG_TOKEN") and env.get("IG_APP_SECRET")):
+        if IG_ENV_FILE.exists():
+            for line in IG_ENV_FILE.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env.setdefault(k.strip(), v.strip())
+    cfg = json.loads((REPO_DIR / "config.json").read_text())
+    rec = next(
+        (a for a in ((cfg.get("instagram") or {}).get("accounts") or [])
+         if (a.get("username") or "").lower() == account.lower()),
+        {},
+    )
+    user_id = env.get(rec.get("ig_user_id_env") or "IG_USER_ID") or env.get("IG_USER_ID")
+    token = env.get(rec.get("ig_long_token_env") or "IG_LONG_TOKEN") or env.get("IG_LONG_TOKEN")
+    secret = env.get("IG_APP_SECRET")
+    if not (user_id and token and secret):
+        raise SystemExit(f"IG creds unresolved for account {account!r}")
+    return {"ig_user_id": user_id, "ig_long_token": token, "ig_app_secret": secret}
+
+
+def post_now(video_path: Path, video_url: str, caption: str, account: str,
+             post_type: str, trial: bool) -> dict:
+    """Publish the already-uploaded reel from this process (cloud mode).
+    Reuses post_to_ig's pure functions so campaign suffixes, container flow,
+    and the mark_posted write stay single-sourced."""
+    sys.path.insert(0, str(REPO_DIR / "mixer"))
+    import post_to_ig as pig
+    from datetime import datetime, timezone
+
+    creds = resolve_ig_creds(account)
+    caption, campaign_ids = pig.apply_campaign_suffixes(caption)
+    if len(caption) > 2200:
+        raise SystemExit(f"caption {len(caption)} chars > IG hard limit after suffix")
+    meta = pig.ig_post_reel(
+        creds["ig_user_id"], creds["ig_long_token"], creds["ig_app_secret"],
+        video_url, caption, trial=trial,
+    )
+    posted_at = datetime.now(timezone.utc)
+    permalink = meta.get("permalink", "")
+    pig.mark_posted(video_path, video_url, permalink, posted_at,
+                    post_type=post_type, target_account=account,
+                    caption_text=caption, campaign_ids=campaign_ids)
+    log(f"published{' (trial)' if trial else ''}: {permalink}")
+    return {"permalink": permalink, "media_id": meta.get("id"), "trial": trial}
+
+
 # ── render + dub + persist ────────────────────────────────────────────────────
 
 def remotion_render(composition: str, props: dict, out_path: Path) -> None:
@@ -621,7 +723,15 @@ def main() -> None:
                     help="render to /tmp, print the row, skip DB + out/")
     ap.add_argument("--force", action="store_true",
                     help="bypass the draft-buffer guard")
+    ap.add_argument("--upload-gcs", action="store_true",
+                    help="upload the dubbed mp4 to GCS and store its public "
+                         "URL as the row's video_path (cloud mode)")
+    ap.add_argument("--post", choices=("trial", "normal"),
+                    help="publish to IG right after the row insert (implies "
+                         "--upload-gcs); 'trial' = non-followers only")
     args = ap.parse_args()
+    if args.post:
+        args.upload_gcs = True
     if args.scenario == "mixer" and not args.variant:
         raise SystemExit("--scenario mixer requires --variant")
 
@@ -675,9 +785,14 @@ def main() -> None:
         log(f"deliverables: {video_path} ({duration}s) + caption "
             f"({len(plan['caption'])} chars)")
 
+        gcs_url = None
+        if args.upload_gcs:
+            gcs_url = gcs_upload(video_path)
+            plan["metadata"]["render_host"] = os.uname().nodename
+
         row = {
             "post_number": args.post_number,
-            "video_path": str(video_path),
+            "video_path": gcs_url or str(video_path),
             "caption_text": plan["caption"],
             "post_type": plan["post_type"],
             "target_account": args.account,
@@ -698,13 +813,22 @@ def main() -> None:
         resp = api_post("/api/v1/media-posts", row)
         allocated = ((resp.get("data") or {}).get("post_number"))
         log(f"draft row created: post_number={allocated}")
+
+        post_result = None
+        if args.post:
+            post_result = post_now(
+                video_path, gcs_url, plan["caption"], args.account,
+                plan["post_type"], trial=(args.post == "trial"),
+            )
+
         print(json.dumps({
             "post_number": allocated,
-            "video_path": str(video_path),
+            "video_path": gcs_url or str(video_path),
             "caption_len": len(plan["caption"]),
             "variant_id": plan["variant_id"],
             "post_type": plan["post_type"],
             "theme_angle": plan["metadata"].get("theme_angle"),
+            "posted": post_result,
         }, indent=2))
     finally:
         release_render_lock()
