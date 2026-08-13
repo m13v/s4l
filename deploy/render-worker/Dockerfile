@@ -45,4 +45,7 @@ COPY deploy/render-worker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /app/mixer/remotion/out
 
 ENV HOME=/root
+# remotion.config.ts runs scripts/probe-clip-durations.mjs on every CLI start;
+# its ffprobe default is the Mac Homebrew path, so point it at the apt one.
+ENV FFPROBE=/usr/bin/ffprobe
 ENTRYPOINT ["/entrypoint.sh"]
