@@ -24,6 +24,7 @@ cp "$REPO_DIR/mixer/remotion/package.json" \
    "$REPO_DIR/mixer/remotion/remotion.config.ts" \
    "$REPO_DIR/mixer/remotion/tsconfig.json" \
    "$CTX/mixer/remotion/"
+cp -R "$REPO_DIR/mixer/remotion/scripts" "$CTX/mixer/remotion/scripts"
 cp -R "$REPO_DIR/mixer/remotion/src" "$CTX/mixer/remotion/src"
 cp -R "$REPO_DIR/mixer/remotion/public" "$CTX/mixer/remotion/public"
 # Orchestrator + its imports only (identity/http_api/draft_provider).
