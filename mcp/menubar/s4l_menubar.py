@@ -3568,7 +3568,12 @@ class S4LMenuBar(rumps.App):
         # built to avoid (2026-07-16 user report). Every other consequence of
         # a decision (review event, posting-queue enqueue) still happens
         # here, per draft, same as the normal single-card path.
-        self._ship_review_event(batch, decision)
+        # Auto-expiries (card countdown crossed the hard-expire deadline, see
+        # s4l_card's local hard-expire block) are machine retirements, not
+        # judgments: like Discard All, they must never reach the review-events
+        # -> feedback-digest -> learned_preferences rail.
+        if not decision.get("auto_expired"):
+            self._ship_review_event(batch, decision)
         if not decision.get("approved"):
             n = decision.get("n")
             # Durable local record FIRST, mirroring the approve branch below.
@@ -3584,6 +3589,15 @@ class S4LMenuBar(rumps.App):
                 self._session_decisions.append(dict(decision))
             except Exception as e:
                 _capture(e, phase="reject_stamp_decision")
+
+            # Auto-expiries stop at the durable store stamp: no loopback call.
+            # The backend row's own Phase 0 freshness gate flips it
+            # status='expired' on the next cycle (same 6h/48h clock the card
+            # counted down), and the loopback needs Claude Desktop up — which
+            # is exactly what's NOT guaranteed in the sleep/wake and
+            # dead-producer scenarios this path exists for.
+            if decision.get("auto_expired"):
+                return
 
             def _persist_reject():
                 try:
@@ -3679,7 +3693,19 @@ class S4LMenuBar(rumps.App):
                 "Review sooner from the S4L menu.",
             )
         elif not any(d.get("approved") for d in decisions):
-            self._notify("S4L", "No drafts approved — nothing posted.")
+            n_exp = sum(1 for d in decisions if d.get("auto_expired"))
+            if n_exp and n_exp == len(decisions):
+                # The whole stack self-retired (typically a wake after
+                # sleep/hibernate): say what happened instead of the generic
+                # line, or the vanished cards look like a bug.
+                plural = "s" if n_exp != 1 else ""
+                self._notify(
+                    "S4L",
+                    f"Discarded {n_exp} stale draft{plural} — past the "
+                    "freshness window, too old to post.",
+                )
+            else:
+                self._notify("S4L", "No drafts approved — nothing posted.")
 
     def _discard_all_pending(self, _=None):
         """Bulk-discard every pending draft card: rejected with NO reason,
