@@ -714,6 +714,34 @@ def _age_expiry_display(iso, platform):
     return text, urgent
 
 
+# Local hard-expire at the countdown site (2026-08-17): when a card's clock
+# crosses zero it is RETIRED locally (terminal, reason local_clock_expired)
+# instead of just relabeling itself "expired" while staying approvable. The
+# real freshness gate is cycle-driven (backend Phase 0 flip + merge-time
+# prune), so any stretch where cycles don't run — machine asleep on a dead
+# battery, producer down, hidden window absorbing drafts overnight — used to
+# leave long-expired cards presentable; approving one is a silent no-op
+# server-side (2026-07-09, and again on the 2026-08-17 hibernate wake, 14
+# cards approved 6-19h stale). Corner-card mode only: canvas tiles keep the
+# label-only behavior (the canvas is always an explicit user-opened surface
+# with its own replace flow). The on-screen card additionally requires
+# AUTO_EXPIRE_IDLE_SECONDS without interaction and an unedited draft before
+# it self-retires, so it is never yanked out from under someone actively
+# working the moment the clock crosses zero.
+AUTO_EXPIRE_IDLE_SECONDS = 60
+
+
+def _draft_expired(d):
+    """True when this draft's Phase 0 hard-expire deadline has passed — the
+    same clock the header countdown renders (_expiry_secs_left). False when
+    the countdown doesn't apply (reddit cards, missing timestamp)."""
+    d = d or {}
+    secs = _expiry_secs_left(
+        (d.get("stats") or {}).get("tweet_posted_at"), d.get("platform")
+    )
+    return secs is not None and secs <= 0
+
+
 # Hover popover on the header's age/expiry label (2026-07-15 per user): the
 # reviewer sees the countdown but not necessarily WHY it exists, so the
 # popover pairs the live seconds-granular clock with the reasoning behind the
@@ -1371,7 +1399,41 @@ class _ReviewController(NSObject):
         return eye
 
     @objc.python_method
+    @objc.python_method
+    def _retire_expired_current(self):
+        """Stamp the CURRENT draft terminal as local_clock_expired and fire its
+        decision, without advancing (callers own what happens next). The swept
+        card was never reviewed, so per-card telemetry is cleared first: stale
+        interactions/dwell from the previously shown card must not ride along
+        on a machine decision."""
+        d = self._drafts[self._idx]
+        self._interactions = []
+        self._card_shown_at = None
+        self._selected_draft = None
+        _log(
+            f"auto-expired n={d.get('n')} cid={d.get('candidate_id')} "
+            f"(card {self._idx + 1} of {len(self._drafts)})"
+        )
+        self._record(False, auto_expired=True)
+        self._fire_decision()
+
     def _render(self):
+        # Hard-expire sweep (2026-08-17, corner-card mode only — see the
+        # AUTO_EXPIRE_IDLE_SECONDS block): retire every already-expired draft
+        # at the front of the stack BEFORE building UI for it, so a stack
+        # that sat through a sleep/hibernate never presents dead cards. No
+        # idle guard here — nothing on screen is being yanked; this card was
+        # about to be shown for the first time (or re-shown after a decision
+        # on its predecessor).
+        if self._host_view is None:
+            while self._idx < len(self._drafts) and _draft_expired(
+                self._drafts[self._idx]
+            ):
+                self._retire_expired_current()
+                self._idx += 1
+            if self._idx >= len(self._drafts):
+                self._finish()
+                return
         d = self._drafts[self._idx]
         # Fresh card (not a card <-> reason-picker swap): reset telemetry.
         if self._rendered_idx != self._idx:
@@ -1974,6 +2036,25 @@ class _ReviewController(NSObject):
             return
         try:
             d = self._drafts[self._idx]
+            # The on-screen card crossed its hard-expire deadline: retire it
+            # (terminal, local_clock_expired) instead of letting it sit
+            # approvable under an "expired" label — approving it is a silent
+            # server-side no-op. Guarded so it never yanks a card someone is
+            # actively working: requires AUTO_EXPIRE_IDLE_SECONDS with no
+            # interaction AND an unedited draft body. While either guard
+            # holds, the label keeps showing "expired"; the tick re-checks
+            # every second and retires once the user goes idle. Corner-card
+            # mode only (canvas tiles keep label-only behavior).
+            if self._host_view is None and _draft_expired(d):
+                idle_ok = (
+                    self._last_interaction_at is None
+                    or time.time() - self._last_interaction_at
+                    >= AUTO_EXPIRE_IDLE_SECONDS
+                )
+                if idle_ok and not self._draft_hand_edited(d):
+                    self._retire_expired_current()
+                    self._advance()
+                    return
             stats = d.get("stats") or {}
             text, urgent = _age_expiry_display(
                 stats.get("tweet_posted_at"), d.get("platform")
@@ -2236,7 +2317,10 @@ class _ReviewController(NSObject):
             return d.get("reply_text") or ""
 
     @objc.python_method
-    def _record(self, approved, reject_category=None, reject_note=None, loved=False):
+    def _record(
+        self, approved, reject_category=None, reject_note=None, loved=False,
+        auto_expired=False,
+    ):
         d = self._drafts[self._idx]
         # Two-draft cards: `orig` (what counts as "unedited") is whichever
         # draft is CURRENTLY SELECTED, not always the plan's default
@@ -2311,6 +2395,13 @@ class _ReviewController(NSObject):
                 "drop_link": bool(approved and drop_link),
                 "reject_category": reject_category,
                 "reject_note": (reject_note or "").strip() or None,
+                # Machine retirement, not a human judgment: the countdown
+                # crossed zero (see the local hard-expire block above). The
+                # store stamps terminal_reason=local_clock_expired and the
+                # menu bar ships NO review event for it (an expiry says
+                # nothing about draft quality; it must not reach the
+                # feedback-digest -> learned_preferences rail).
+                "auto_expired": bool(auto_expired),
                 "interactions": list(self._interactions),
                 "dwell_ms": self._dwell_ms(),
                 # Ride-along candidate context (from review_drafts) so the
