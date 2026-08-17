@@ -895,6 +895,11 @@ def store_stamp_decision(batch, decision):
             # None on single-draft cards. Durable locally so the choice
             # survives even if the review-events flush never lands.
             "draft_choice": decision.get("draft_choice"),
+            # Machine retirement (card countdown crossed the Phase 0 hard-
+            # expire deadline with no cycle around to prune it — sleep/wake,
+            # dead producer). Distinct from a human reject in terminal_reason
+            # below so dashboards/audits never count it as a judgment.
+            "auto_expired": bool(decision.get("auto_expired")),
             "decided_at": time_iso(),
         }
         if decision.get("approved"):
@@ -903,7 +908,11 @@ def store_stamp_decision(batch, decision):
             c.pop("post_error", None)
         else:
             c["terminal"] = True
-            c["terminal_reason"] = "human_rejected"
+            c["terminal_reason"] = (
+                "local_clock_expired"
+                if decision.get("auto_expired")
+                else "human_rejected"
+            )
         c["decision"] = payload
         return True
 
