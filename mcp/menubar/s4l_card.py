@@ -1182,6 +1182,12 @@ class _ReviewController(NSObject):
         self._add_snooze_accessory(panel)
         self._panel = panel
         self._render()
+        if self._panel is None:
+            # The hard-expire sweep retired the ENTIRE stack inside that
+            # first _render (every draft past deadline, e.g. a wake after
+            # hibernate) and _finish already closed the panel. Don't order
+            # the dead panel back onto the screen.
+            return
         panel.orderFrontRegardless()
         self._log_surface("presented")
         if self._focus:
@@ -2784,6 +2790,12 @@ def present_review(drafts, on_decision=None, on_complete=None, focus=False):
     _active = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_focus_(
         drafts, on_decision, on_complete, focus
     )
+    if _active is not None and _active._panel is None:
+        # The hard-expire sweep finished the whole stack during the initial
+        # render (_finish set the module global to None, but this assignment
+        # just overwrote it with the dead controller). Clear it so
+        # extend/heal/status never operate on a closed surface.
+        _active = None
 
 
 def extend_active(drafts):
