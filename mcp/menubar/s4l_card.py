@@ -2317,6 +2317,21 @@ class _ReviewController(NSObject):
             return d.get("reply_text") or ""
 
     @objc.python_method
+    def _draft_hand_edited(self, d):
+        """True when the on-screen text no longer matches ANY of this draft's
+        original bodies (reply_text plus each two-draft variant) — i.e. the
+        reviewer has invested a hand edit. Used only as an auto-expire guard,
+        so unknowable defaults to True (never yank what we can't verify)."""
+        try:
+            originals = {(d.get("reply_text") or "").strip()}
+            for dd in d.get("drafts") or []:
+                if isinstance(dd, dict):
+                    originals.add((dd.get("text") or "").strip())
+            return (self._current_text() or "").strip() not in originals
+        except Exception:
+            return True
+
+    @objc.python_method
     def _record(
         self, approved, reject_category=None, reject_note=None, loved=False,
         auto_expired=False,
