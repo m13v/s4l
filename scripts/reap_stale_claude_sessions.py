@@ -840,8 +840,19 @@ def main() -> int:
 
     targets_by_pid: dict[int, dict] = {}  # dedup across the two rules below
     for uuid, members in groups.items():
-        if len(members) <= 1:
-            continue  # a healthy / interactive session — never touch.
+        if len(members) <= 1 and inflight is None:
+            # Queue unreadable: cannot tell a husk from a worker about to claim, so
+            # the conservative fallback never touches a lone session. When the queue
+            # IS readable, singleton groups get the same type-driven sweep as larger
+            # ones. The 2026-08-16 wedge: one warm session never exited, Desktop's
+            # per_task_limit therefore never spawned a sibling, and the old
+            # unconditional `len(members) <= 1: continue` guard meant the reaper and
+            # the scheduler starved each other for ~55 minutes (reapable=1, killed=0
+            # every cycle). Everything in `members` is already a metadata- or
+            # cwd-confirmed S4L worker (interactive sessions are spared upstream in
+            # snapshot()), so rule (1)'s invariant applies to a group of one exactly
+            # as it does to a group of ten: claimless past claim_grace = proven husk.
+            continue
         members.sort(key=lambda p: p["age"])  # ascending: newest first
 
         if inflight is not None:
