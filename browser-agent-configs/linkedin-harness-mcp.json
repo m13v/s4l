@@ -14,7 +14,9 @@
         "PATH": "__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "BU_NAME": "linkedin-harness",
         "BH_PORT": "9556",
-        "BH_PROFILE_NAME": "browser-harness-linkedin"
+        "BH_PROFILE_NAME": "browser-harness-linkedin",
+        "BH_WINDOW_POS": "3814,-1050",
+        "BH_WINDOW_SIZE": "1024,1013"
       }
     }
   }

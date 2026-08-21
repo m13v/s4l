@@ -11,7 +11,9 @@
         "__HOME__/.claude/mcp-servers/browser-harness/server.py"
       ],
       "env": {
-        "PATH": "__HOME__/.local/bin:__NODE_BIN__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        "PATH": "__HOME__/.local/bin:__NODE_BIN__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "BH_WINDOW_POS": "3042,-1032",
+        "BH_WINDOW_SIZE": "1024,1013"
       }
     }
   }
