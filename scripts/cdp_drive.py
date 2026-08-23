@@ -67,8 +67,8 @@ def main():
     tab = active_page()
     c = CDP(tab["webSocketDebuggerUrl"])
     try:
-        c.cmd("Page.enable")
-        c.cmd("Runtime.enable")
+        if action in ("nav", "click"):
+            c.cmd("Page.enable")
         if action == "nav":
             url = sys.argv[2]
             c.cmd("Page.navigate", url=url)
