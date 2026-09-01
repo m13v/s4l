@@ -264,11 +264,27 @@ classification, output reason='blocklist_added:HANDLE:bot' or
 - Tier 2: Only if the thread is explicitly about a topic one of our projects solves AND nobody has offered a comparable tool yet AND the maintainer hasn't already resolved it. Mention casually.
 - Tier 3: Only if someone explicitly asks "what do you use" / "any tools for this" / "link?". Then give it directly.
 
-## Decision step: reply or skip?
+## Decision step: escalate, reply, or skip?
 
 Read the FULL thread above. There is NO cap on how many times we can reply to a thread. Active back-and-forth is encouraged when the conversation keeps developing and we have something useful to contribute. Do not skip just because we have prior comments in the thread. Skip only when one of the specific conditions below is clearly true.
 
-DEFAULT TO REPLY when you have substance. Lean toward engagement, not silence.
+CHECK ESCALATION FIRST. Escalation hands the thread to the human who owns
+this account; they answer by email and their answer is posted as the
+comment. ESCALATE (output action=escalate with a one-line reason) when any
+of these is true:
+- The replier directly addresses OUR author (by @mention or unmistakable
+  context) with a question about something WE said, e.g. "@{our_username}
+  could you expand on what you mean?". A personal question to us deserves
+  the human's own answer, not a generated one.
+- The replier reports a bug, breakage, or defect in one of OUR products
+  (anything in config.json). Bug reports need the maker's eyes.
+- The replier is the repo OWNER (or an obvious maintainer) engaging
+  seriously with our comment. Maintainer conversations are relationships
+  the human should hold personally.
+When a comment fits both ESCALATE and REPLY, escalate. Do not draft a
+reply text for an escalated comment.
+
+Otherwise, DEFAULT TO REPLY when you have substance. Lean toward engagement, not silence.
 
 SKIP (output action=skip) only when one of these is clearly true:
 - light_acknowledgment: the triggering comment is just thanks, emoji, +1, or other content-free acknowledgment
@@ -290,6 +306,9 @@ Output ONLY ONE JSON object. No markdown, no prose, no explanations, no code fen
 
 For skip:
 {{"action": "skip", "reason": "REASON_FROM_LIST_ABOVE"}}
+
+For escalate:
+{{"action": "escalate", "reason": "ONE_LINE_WHY_THE_HUMAN_SHOULD_ANSWER"}}
 
 For reply:
 {{"action": "reply", "text": "YOUR_REPLY_TEXT", "project": null, "engagement_style": "STYLE_NAME"}}
@@ -463,6 +482,7 @@ def main():
     processed = 0
     succeeded = 0
     skipped = 0
+    escalated = 0
     failed = 0
     total_usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_create": 0, "cost_usd": 0.0}
 
@@ -601,6 +621,28 @@ def main():
                 skipped += 1
                 print(f"[engage_github] #{reply['id']} SKIPPED: {reason} ({reply_elapsed:.0f}s) "
                       f"[${usage['cost_usd']:.4f}]")
+            elif decision.get("action") == "escalate":
+                # Flag-human escalation (2026-09-01): routes through
+                # reply_db.py escalated -> POST /api/v1/replies/{id}/flag-human,
+                # which sets status='escalated' and emails the [GH #id]
+                # escalation card from matt@s4l.ai. The human's Gmail reply is
+                # posted back to this thread verbatim by
+                # scripts/ingest_human_github_replies.py.
+                reason = (decision.get("reason") or "escalated by engage judgment").strip()
+                esc_res = subprocess.run(
+                    [PYTHON, REPLY_DB, "escalated", str(reply["id"]), reason],
+                    capture_output=True, text=True,
+                )
+                if esc_res.returncode == 0:
+                    escalated += 1
+                    print(f"[engage_github] #{reply['id']} ESCALATED: {reason} "
+                          f"({reply_elapsed:.0f}s) [{(esc_res.stdout or '').strip()[:120]}]")
+                else:
+                    # Escalation transport failed; leave the row pending so the
+                    # next cycle retries rather than losing the flag.
+                    failed += 1
+                    print(f"[engage_github] #{reply['id']} ESCALATE FAILED: "
+                          f"{(esc_res.stderr or esc_res.stdout or '')[:200]}")
             elif decision.get("action") == "reply":
                 reply_text = (decision.get("text") or "").strip()
                 project = decision.get("project")
@@ -648,7 +690,7 @@ def main():
     total_elapsed = time.time() - start_time
     print(f"\n[engage_github] === SUMMARY ===")
     print(f"[engage_github] processed={processed} succeeded={succeeded} "
-          f"skipped={skipped} failed={failed} elapsed={total_elapsed:.0f}s")
+          f"skipped={skipped} escalated={escalated} failed={failed} elapsed={total_elapsed:.0f}s")
     print(f"[engage_github] Total tokens: input={total_usage['input_tokens']} "
           f"output={total_usage['output_tokens']} "
           f"cache_read={total_usage['cache_read']} cache_create={total_usage['cache_create']}")
@@ -659,10 +701,14 @@ def main():
     # Canonical machine-readable summary line. github-engage.sh greps this and
     # writes ONE log_run.py row that also carries Phase A scan counters. See
     # the comment in engage_reddit.py for the duplicate-row history.
+    # escalated= rides along for observability; github-engage.sh's greps are
+    # token-anchored (posted=/skipped=/failed=/cost=) so the extra token is
+    # invisible to the existing log_run parsing.
     print(
         f"[engage_github] LOG_RUN_SUMMARY"
         f" posted={succeeded}"
         f" skipped={skipped}"
+        f" escalated={escalated}"
         f" failed={failed}"
         f" cost={total_usage['cost_usd']:.4f}"
         f" elapsed={int(total_elapsed)}"
