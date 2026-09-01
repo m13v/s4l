@@ -89,9 +89,15 @@ def main():
     discovered = 0
     skipped = 0
     errors = 0
+    consecutive_errors = 0
 
     for issue_key, thread_url in issues.items():
         repo, issue_num = issue_key.rsplit("/", 1)
+
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            print(f"  ABORT: {consecutive_errors} consecutive gh api failures "
+                  f"(rate limit / offline); stopping scan to preserve quota.")
+            break
 
         # post_id captured alongside thread_url in the posts GET above.
         post_id = post_id_by_url.get(thread_url)
@@ -107,11 +113,22 @@ def main():
             )
             if result.returncode != 0:
                 errors += 1
+                consecutive_errors += 1
+                stderr_l = (result.stderr or "").lower()
+                if "rate limit" in stderr_l or "api rate limit exceeded" in stderr_l:
+                    print(f"  ABORT: gh rate limit hit on {issue_key}; stopping scan.")
+                    break
+                # Exponential backoff on consecutive failures (2s, 4s, 8s, 16s)
+                # so a flapping API gets breathing room instead of a hammer.
+                time.sleep(min(2 ** consecutive_errors, 30))
                 continue
             comments = json.loads(result.stdout) if result.stdout.strip() else []
+            consecutive_errors = 0
         except Exception as e:
             print(f"  ERROR scanning {issue_key}: {e}")
             errors += 1
+            consecutive_errors += 1
+            time.sleep(min(2 ** consecutive_errors, 30))
             continue
 
         # Find our comments to know their timestamps
