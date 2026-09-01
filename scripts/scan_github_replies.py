@@ -26,13 +26,18 @@ _cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
 from config import config_path as _canonical_config_path, load_config
 CONFIG_PATH = _canonical_config_path()
 
-# NOTE: posts/replies for GitHub live under platform='github' in the DB; the
-# 'github_issues' value used here matches zero rows, so Phase A has long been a
-# no-op. Preserved verbatim during the HTTP-only migration to avoid an
-# unrequested volume/cost change (switching to 'github' would suddenly scan all
-# ~6.8k GitHub posts). If you want to actually scan GitHub replies, flip
-# SCAN_PLATFORM to 'github' deliberately.
-SCAN_PLATFORM = "github_issues"
+# posts/replies for GitHub live under platform='github' in the DB. This was
+# 'github_issues' (matching zero rows, making Phase A a no-op) until
+# 2026-09-01, when the user asked for the deliberate flip. Volume is bounded
+# so the flip does NOT scan all ~6.8k historical GitHub posts: only active
+# posts from the last SCAN_WINDOW_DAYS are fetched (218 threads at flip time),
+# and consecutive gh API failures back off and abort the scan instead of
+# hammering a spent rate limit (Phase A.5 shares the same gh quota).
+SCAN_PLATFORM = "github"
+SCAN_WINDOW_DAYS = 60
+# Stop the scan after this many CONSECUTIVE gh api failures: a run that hits
+# this is rate-limited or offline, and every further call just burns quota.
+MAX_CONSECUTIVE_ERRORS = 5
 
 
 
@@ -49,8 +54,12 @@ def main():
     # Get all active GitHub posts we've commented on. The posts GET returns id +
     # thread_url together, so we capture the post_id map here and skip the
     # per-thread lookup the direct-SQL version used to do.
+    from datetime import datetime, timedelta, timezone
+    since_iso = (datetime.now(timezone.utc) - timedelta(days=SCAN_WINDOW_DAYS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
     resp = api_get("/api/v1/posts",
-                   query={"platform": SCAN_PLATFORM, "status": "active", "limit": 500})
+                   query={"platform": SCAN_PLATFORM, "status": "active",
+                          "since": since_iso, "limit": 500})
     rows = ((resp or {}).get("data") or {}).get("posts") or []
 
     issues = {}
