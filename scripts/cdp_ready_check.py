@@ -24,6 +24,18 @@ crashed ("Aw, Snap") keeps its title/url in every listing while sitting dead;
 probe each page with a trivial Runtime.evaluate and reload it IN PLACE on
 failure — fresh renderer, no kill, no new window, no focus change.
 
+DEAD SESSION DISPATCH (2026-08-20, recurred 2026-09-01): a parked tab whose
+DevTools SESSION dispatch is dead never replies to any per-tab command, so the
+in-place Page.reload hangs too and cannot revive it — while the browser-level
+ws stays healthy and this probe used to report ready anyway (Playwright then
+hung at connect for every posting attempt; on 09-01 that burned all 5 drain
+retries on two human-approved drafts). The reload is therefore RE-VERIFIED
+with a second Runtime.evaluate; a tab that still doesn't answer gets REPLACED
+via browser-level Target.createTarget(background=True) + Target.closeTarget
+(the proven fix both incidents — no Chrome restart, no focus steal, session
+cookies intact). Only if replacement itself fails does the verdict flip to
+ready=false, so hc_ensure_browser's two-strike reap finally has a real signal.
+
 Usage: cdp_ready_check.py [CDP_URL] [TIMEOUT_MS]
 
 Prints a one-line JSON verdict to stdout (same shape/keys as before; mode is
@@ -84,9 +96,13 @@ def main() -> int:
         info = _get_json(f"{url}/json/version", timeout=3)
         _ws_call(info["webSocketDebuggerUrl"], "Browser.getVersion", timeout_s)
 
-        # Renderer-liveness sweep: revive crashed tabs in place, best-effort;
-        # revival must never fail the readiness verdict the wedge gate uses.
+        # Renderer-liveness sweep. A crashed renderer revives with an in-place
+        # reload; a tab with dead session dispatch (reload hangs too) gets
+        # REPLACED via browser-level commands. Only an unfixable page tab
+        # fails the verdict — see DEAD SESSION DISPATCH in the docstring.
         revived = 0
+        replaced = 0
+        dead = 0
         pages = []
         try:
             pages = [t for t in _get_json(f"{url}/json/list", timeout=3)
@@ -95,23 +111,54 @@ def main() -> int:
                 try:
                     _ws_call(t["webSocketDebuggerUrl"], "Runtime.evaluate",
                              4.0, expression="1")
+                    continue
                 except Exception:
-                    try:
-                        _ws_call(t["webSocketDebuggerUrl"], "Page.reload", 8.0)
-                        revived += 1
-                    except Exception:
-                        pass
+                    pass
+                try:
+                    _ws_call(t["webSocketDebuggerUrl"], "Page.reload", 8.0)
+                except Exception:
+                    pass
+                # Re-verify: a reload that went through proves dispatch is
+                # alive again; one that hung proves it never will be.
+                try:
+                    _ws_call(t["webSocketDebuggerUrl"], "Runtime.evaluate",
+                             4.0, expression="1")
+                    revived += 1
+                    continue
+                except Exception:
+                    pass
+                # Dead session dispatch: replace the TAB, keep Chrome. Only
+                # http(s) tabs are recreated (the harness daemon's
+                # is_real_page refuses about:/chrome: tabs); the dead one is
+                # closed only after its replacement exists so the browser is
+                # never left tabless.
+                page_url = t.get("url") or ""
+                try:
+                    if not page_url.startswith("http"):
+                        raise ValueError(f"unreplaceable url {page_url[:40]!r}")
+                    _ws_call(info["webSocketDebuggerUrl"], "Target.createTarget",
+                             8.0, url=page_url, background=True)
+                    _ws_call(info["webSocketDebuggerUrl"], "Target.closeTarget",
+                             8.0, targetId=t["id"])
+                    replaced += 1
+                except Exception:
+                    dead += 1
         except Exception:
             pass
 
         out = {
-            "ready": True, "mode": "raw_ws", "contexts": len(pages),
+            "ready": dead == 0, "mode": "raw_ws", "contexts": len(pages),
             "elapsed_s": round(time.time() - t0, 2),
         }
         if revived:
             out["revived"] = revived
+        if replaced:
+            out["replaced"] = replaced
+        if dead:
+            out["dead_pages"] = dead
+            out["error"] = "page_session_dead_unreplaceable"
         print(json.dumps(out))
-        return 0
+        return 0 if dead == 0 else 1
     except Exception as e:
         print(json.dumps({
             "ready": False, "mode": "raw_ws",
