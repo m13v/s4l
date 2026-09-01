@@ -189,6 +189,25 @@ elif cmd == "skip_batch":
             "claude_session_id": CLAUDE_SESSION_ID,
         })
     print(f"ok {len(data['ids'])}")
+elif cmd == "escalated":
+    # reply_db.py escalated ID "reason"
+    # GitHub reply lane flag-human escalation: routes through the dedicated
+    # POST /api/v1/replies/{id}/flag-human endpoint (NOT the generic PATCH),
+    # which sets status='escalated', stores the reason, and sends the
+    # [GH #id] escalation email from matt@s4l.ai in one round trip, mirroring
+    # dm_conversation.py's flag-human command. A row already replied or
+    # escalated comes back { flagged: false, skipped: true } and we print
+    # the skip instead of erroring, so a double-decision never 500s the lane.
+    from http_api import api_post
+    rid, reason = int(sys.argv[2]), sys.argv[3]
+    resp = api_post(f"/api/v1/replies/{rid}/flag-human", {"reason": reason},
+                    ok_on_conflict=True)
+    data = ((resp or {}).get("data") or {})
+    if data.get("flagged"):
+        email = "sent" if data.get("email_sent") else "NOT SENT"
+        print(f"ok {rid} escalated (email {email})")
+    else:
+        print(f"skip {rid} not re-flagged ({data.get('reason', 'unknown')})")
 elif cmd == "set_project":
     # reply_db.py set_project ID "project_name"
     # Used by engage_reddit.py to attribute a posted reply to a recommended
