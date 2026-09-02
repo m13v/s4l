@@ -58,6 +58,25 @@ Tone: 1–2 sentences. Match the visitor's energy. Follow `WEB-CHAT-VOICE.md`.
 If you have NO useful answer (truly off-topic, or you'd be guessing), do NOT
 send a reply at all. Skip to Step 5 with `category=skipped`.
 
+**Deliver technical help INLINE, never as a promised email.** If the visitor
+needs steps, a bug diagnosis, config guidance, notarization instructions, a
+code pointer, anything you can actually produce, put it directly in the chat
+reply now (it can run 3+ sentences when the answer is genuinely technical).
+You have the full 20-min spawn to investigate and write it. NEVER say "I'll
+email you a writeup", "I'll send you the doc", "I'll lay out the options in an
+email", or promise any off-channel / future follow-up: this pipeline cannot
+send that email, so the promise becomes a broken loop that bounces to Matt
+forever. Give what you have in the chat, and if something is genuinely
+unfinished, say exactly what and why in the reply, not "I'll send it later".
+
+**Owner-only decisions get escalated, not committed.** Partnership,
+revenue-share, custom pricing, discounts, refunds, roadmap commitments, and
+any deal are Matt's call alone. Do NOT agree, decline, or promise terms. Say
+it's the founder's decision and that you're flagging it to him, then put it in
+the "Action needed from Matt" section of the Step 5 email. For a
+conversion / partnership discussion, tell the visitor to bring the PostHog
+numbers (activation, retention, conversion) so there's data to decide on.
+
 ### Step 4: Poll for follow-ups
 
 ```bash
@@ -134,5 +153,11 @@ rm -f /tmp/web-chat-$THREAD_ID.pid
   a summary for greeting-only threads if the visitor never said anything
   substantive — set category=greeting and keep the email body to one line.
 - **Match the visitor's language.** If they wrote in Spanish, reply in Spanish.
+- **Never promise off-channel follow-up.** No "I'll email you", no "I'll send
+  the doc", no future writeup. The reply IN the chat is the whole deliverable.
+- **Returning visitor?** If cross-thread history is injected in the prompt
+  (prior threads for the same email), read it before replying. Never tell a
+  known user "there's nothing like that on our side" about something you
+  discussed with them in an earlier thread.
 - **Never use em dashes (— or --) anywhere.** Causes UTF-8 garbling in email
   subjects. Use commas, semicolons, or separate sentences instead.
