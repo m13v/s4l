@@ -91,6 +91,16 @@ for i in $(seq 0 $((NUM - 1))); do
     # Build prompt (history is dumped from Postgres for freshness).
     HISTORY_JSON=$("$PYTHON_BIN" "$SCRIPTS_DIR/dump_web_chat_history.py" --thread "$THREAD_ID")
 
+    # Cross-thread memory: prior conversations with this same visitor (other
+    # threads, matched by email). Prevents the agent going cold on a returning
+    # user. Always safe to inline: the script prints an empty skeleton on any
+    # error, so a failed lookup never blocks the reply.
+    CROSS_THREAD_JSON="{}"
+    if [ -n "$EMAIL" ]; then
+        CROSS_THREAD_JSON=$("$PYTHON_BIN" "$SCRIPTS_DIR/dump_visitor_history.py" \
+            --email "$EMAIL" --exclude "$THREAD_ID" --project "$PROJECT" 2>/dev/null || echo "{}")
+    fi
+
     # Pull this project's config block to give Claude context.
     PROJECT_CFG=$(/opt/homebrew/bin/jq --arg n "$PROJECT" '.projects[] | select(.name==$n)' "$REPO_DIR/config.json" 2>/dev/null || echo "{}")
 
@@ -116,6 +126,15 @@ $PROJECT_CFG
 ## Full conversation history (from Postgres)
 \`\`\`json
 $HISTORY_JSON
+\`\`\`
+
+## Prior threads with this SAME visitor (cross-thread memory)
+This visitor has talked to you before on other threads (matched by email).
+Read this so you recognise a returning user; NEVER tell them "there is nothing
+like that on our side" about something you discussed with them earlier. If
+\`thread_count\` is 0 this is a brand-new visitor.
+\`\`\`json
+$CROSS_THREAD_JSON
 \`\`\`
 
 Process this chat now. Follow WEB-CHAT-SKILL.md exactly.
