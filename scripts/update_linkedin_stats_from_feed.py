@@ -115,8 +115,15 @@ def load_feed(path: str) -> list[dict]:
         cid = r.get("comment_id")
         if not cid:
             continue
+        # all_comment_ids (scraper, 2026-09-04): every comment urn found in
+        # the feed article. The article can anchor on a reply's urn instead
+        # of OUR comment's (LinkedIn DOM change ~June 2026 that zeroed all
+        # matches), so the match loop below tries each id. Older feed files
+        # without the field degrade to the single comment_id, as before.
+        all_ids = r.get("all_comment_ids") or [cid]
         out.append({
             "comment_id":  str(cid),
+            "all_comment_ids": [str(c) for c in all_ids if c],
             "parent_kind": r.get("parent_kind") or "",
             "parent_id":   str(r.get("parent_id") or ""),
             "impressions": r.get("impressions"),
@@ -225,12 +232,24 @@ def run(from_json: str,
     updates = []
     unmatched = []
     errors = 0
+    matched_row_ids = set()
 
     for fr in feed:
-        row = posts_by_cid.get(fr["comment_id"])
+        # Try every comment id the article carried; the DB knows OUR
+        # comment's id, the article may be anchored on a reply's.
+        row = None
+        for cid in fr.get("all_comment_ids") or [fr["comment_id"]]:
+            row = posts_by_cid.get(cid)
+            if row is not None:
+                break
         if row is None:
             unmatched.append(fr["comment_id"])
             continue
+        # Two feed articles can surface urns from the same thread; apply
+        # each DB row at most once so a thread's stats aren't double-written.
+        if row["id"] in matched_row_ids:
+            continue
+        matched_row_ids.add(row["id"])
         try:
             updates.append(compute_one(row, fr, dry_run=dry_run, quiet=quiet))
         except Exception as e:

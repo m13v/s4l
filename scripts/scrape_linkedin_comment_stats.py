@@ -1055,12 +1055,10 @@ HARVEST_JS_TEMPLATE = r"""
   function harvest() {
     let added_this_tick = 0;
     document.querySelectorAll('article').forEach(art => {
-      const urnEl = art.querySelector(
+      const urnEls = art.querySelectorAll(
         '[data-urn^="urn:li:comment:"], [data-id^="urn:li:comment:"]'
       );
-      if (!urnEl) return;
-      const urn = urnEl.getAttribute('data-urn')
-                || urnEl.getAttribute('data-id') || '';
+      if (!urnEls.length) return;
       // Accept BOTH the bare-kind form `urn:li:comment:(ugcPost:X,Y)`
       // (current LinkedIn DOM) and the fully-qualified form
       // `urn:li:comment:(urn:li:ugcPost:X,Y)` (legacy / Voyager-derived).
@@ -1068,9 +1066,26 @@ HARVEST_JS_TEMPLATE = r"""
       // optional so we don't silently drop articles if LinkedIn switches
       // formats. Mirror of the Python regex fix in
       // update_linkedin_comment_stats_from_feed.py (2026-05-11).
-      const m = urn.match(/^urn:li:comment:\((?:urn:li:)?(\w+):(\d+),(\d+)\)$/);
-      if (!m) return;
-      const parent_kind = m[1], parent_id = m[2], comment_id = m[3];
+      //
+      // 2026-09-04: harvest EVERY comment urn in the article, not just the
+      // first. Since ~June the activity feed can anchor the article on a
+      // REPLY's urn (a follow-up of ours, or someone's reply to us), so the
+      // first urn stopped being reliably OUR comment — every feed row went
+      // unmatched and LinkedIn stats froze at 2026-06-01. All ids ride
+      // along in all_comment_ids; the matcher picks whichever one the DB
+      // stores in our_url's commentUrn.
+      const parsed = [];
+      urnEls.forEach(el => {
+        const urn = el.getAttribute('data-urn')
+                  || el.getAttribute('data-id') || '';
+        const m = urn.match(/^urn:li:comment:\((?:urn:li:)?(\w+):(\d+),(\d+)\)$/);
+        if (m) parsed.push({ parent_kind: m[1], parent_id: m[2], comment_id: m[3] });
+      });
+      if (!parsed.length) return;
+      const parent_kind = parsed[0].parent_kind,
+            parent_id   = parsed[0].parent_id,
+            comment_id  = parsed[0].comment_id;
+      const all_comment_ids = [...new Set(parsed.map(p => p.comment_id))];
 
       let impressions = null, reactions = null, replies = null;
       let saw_like = false, saw_reply = false;
@@ -1107,6 +1122,9 @@ HARVEST_JS_TEMPLATE = r"""
       if (!prev) added_this_tick++;
       acc.set(comment_id, {
         comment_id, parent_kind, parent_id,
+        all_comment_ids: prev
+          ? [...new Set([...(prev.all_comment_ids || []), ...all_comment_ids])]
+          : all_comment_ids,
         impressions: (impressions !== null ? impressions
                        : (prev ? prev.impressions : null)),
         reactions:   (reactions   !== null ? reactions
