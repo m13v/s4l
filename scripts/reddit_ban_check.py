@@ -195,35 +195,39 @@ def record_confirmed_bans(subs, project=None) -> dict:
         return {"banned": [], "recorded": [], "upgraded": [], "unknown": unknown}
 
     path = config_path()
-    with open(path) as f:
-        cfg = json.load(f)
-    bans = cfg.setdefault("subreddit_bans", {})
-    blocked = bans.setdefault("comment_blocked", [])
-    by_sub = {(_ban_entry_sub(e) or "").lower(): e for e in blocked}
+    # Atomic read-modify-write via config_io (flock + tmp + os.replace); the
+    # old open(..., "w") + json.dump here truncated config.json when killed
+    # mid-stream (2026-09-09 root cause, Sentry S4L-9E / S4L-95).
+    from config_io import locked_config
+    with locked_config(path) as (cfg, save):
+        bans = cfg.setdefault("subreddit_bans", {})
+        blocked = bans.setdefault("comment_blocked", [])
+        by_sub = {(_ban_entry_sub(e) or "").lower(): e for e in blocked}
 
-    for sub in banned:
-        entry = by_sub.get(sub)
-        if entry is None:
-            blocked.append(_make_ban_entry(sub, "account_blocked_in_sub", project))
-            recorded.append(sub)
-        elif entry.get("reason") != "account_blocked_in_sub":
-            # upgrade a weak/manual entry so the digest ban event can fire
-            from datetime import datetime, timezone
-            entry["reason"] = "account_blocked_in_sub"
-            if not entry.get("added_at"):
-                entry["added_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-            entry.setdefault("noticed_by_project", project)
-            upgraded.append(sub)
+        for sub in banned:
+            entry = by_sub.get(sub)
+            if entry is None:
+                blocked.append(_make_ban_entry(sub, "account_blocked_in_sub", project))
+                recorded.append(sub)
+            elif entry.get("reason") != "account_blocked_in_sub":
+                # upgrade a weak/manual entry so the digest ban event can fire
+                from datetime import datetime, timezone
+                entry["reason"] = "account_blocked_in_sub"
+                if not entry.get("added_at"):
+                    entry["added_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+                entry.setdefault("noticed_by_project", project)
+                upgraded.append(sub)
+
+        if recorded or upgraded:
+            blocked.sort(key=lambda e: (_ban_entry_sub(e) or ""))
+            save()
 
     if recorded or upgraded:
-        blocked.sort(key=lambda e: (_ban_entry_sub(e) or ""))
-        with open(path, "w") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
         # Mirror to the backend subreddit_bans table (source of truth as of
         # 2026-07-19; config.json is the write-through cache). Best-effort:
         # readers union both sources, so a failed mirror never un-bans.
+        # Runs AFTER the config flock releases (network call).
         try:
             import subreddit_bans_client
             for sub in recorded + upgraded:

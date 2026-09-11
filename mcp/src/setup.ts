@@ -193,9 +193,35 @@ function readScope(): ScopeState {
   }
 }
 
+// Atomic write: stage a temp sibling, then rename over the real path. Every
+// config.json truncation traced on 2026-09-09 (Sentry S4L-9E / S4L-95) was a
+// non-atomic writeFileSync either killed mid-stream or caught in the write
+// window by a concurrent reader; rename makes readers see the old document or
+// the new one, never a partial. Node has no built-in flock, so unlike the
+// Python writers (scripts/config_io.py takes <config>.lock) this does not
+// serialize concurrent writers — atomicity alone closes the truncation class,
+// and cross-process write races on these paths are already rare.
+function atomicWriteFileSync(filePath: string, data: string): void {
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, data, "utf-8");
+  fs.renameSync(tmp, filePath);
+}
+
+// The one config.json write path in this module: timestamped backup, then an
+// atomic rename-style write. configPath() is realpath-resolved, so the rename
+// writes through symlinks instead of replacing them (2026-07-11/13 incidents).
+function writeConfigFile(cfgPath: string, cfg: ConfigFile): void {
+  if (fs.existsSync(cfgPath)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+  }
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  atomicWriteFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+}
+
 function writeScope(s: ScopeState): void {
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2) + "\n", "utf-8");
+  atomicWriteFileSync(STATE_PATH, JSON.stringify(s, null, 2) + "\n");
 }
 
 export function managedProjects(): string[] {
@@ -222,7 +248,14 @@ function readConfig(): ConfigFile {
   if (!fs.existsSync(cfgPath)) return { projects: [] };
   const raw = fs.readFileSync(cfgPath, "utf-8").trim();
   if (!raw) return { projects: [] };
-  return JSON.parse(raw) as ConfigFile;
+  try {
+    return JSON.parse(raw) as ConfigFile;
+  } catch {
+    // Writers are atomic (rename-over), but a read that raced a replace can
+    // still land on a stale view on some filesystems. One re-read rides out
+    // that window; a second failure is a genuinely broken file — throw.
+    return JSON.parse(fs.readFileSync(cfgPath, "utf-8").trim()) as ConfigFile;
+  }
 }
 
 export function projectExists(name: string): boolean {
@@ -413,12 +446,7 @@ export function applySetup(input: ProjectInput): {
     created = true;
   }
   const cfgPath = configPath();
-  if (fs.existsSync(cfgPath)) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-  }
-  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  writeConfigFile(cfgPath, cfg);
   void sendStateSnapshot("config_write");
 
   if (!persona) recordManagedProject(input.name);
@@ -471,12 +499,7 @@ export function recordRedditAccount(username: string): { written: boolean; detai
   if (!reddit.login_method) reddit.login_method = "browser";
   try {
     const cfgPath = configPath();
-    if (fs.existsSync(cfgPath)) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-    }
-    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    writeConfigFile(cfgPath, cfg);
     void sendStateSnapshot("config_write");
     return { written: true, detail: `accounts.reddit.username = ${clean}` };
   } catch (e: any) {
@@ -615,12 +638,7 @@ export function ensurePersonaProject(
   }
 
   const cfgPath = configPath();
-  if (fs.existsSync(cfgPath)) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-  }
-  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  writeConfigFile(cfgPath, cfg);
 
   // Raw dictation transcript -> persona_corpus.txt sidecar (NOT config.json).
   // Mirrors scripts/build_persona.py cmd_apply: config.json is inlined into many
@@ -671,13 +689,7 @@ export function ensureShortLinksDefault(): { healed: string[] } {
       changed = true;
     }
     if (changed) {
-      const cfgPath = configPath();
-      if (fs.existsSync(cfgPath)) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-      }
-      fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-      fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      writeConfigFile(configPath(), cfg);
       void sendStateSnapshot("config_write");
     }
   } catch {

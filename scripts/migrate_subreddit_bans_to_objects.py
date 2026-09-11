@@ -102,9 +102,11 @@ def main() -> int:
         print("Nothing to migrate (all entries already in new shape).")
         return 0
 
-    with CONFIG_PATH.open("w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
+    # Atomic write (flock + tmp + os.replace); a plain open("w") truncates
+    # config.json for concurrent readers if killed mid-dump (2026-09-09).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from config_io import save_config
+    save_config(config, cfg_path=str(CONFIG_PATH))
     print(f"Wrote {CONFIG_PATH}")
     return 0
 

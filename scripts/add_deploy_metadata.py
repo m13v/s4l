@@ -12,7 +12,12 @@ Shape:
 Preserves all existing keys and ordering within the landing_pages block.
 """
 import json
+import os
+import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config_io import save_config
 
 CONFIG = Path.home() / "social-autoposter" / "config.json"
 
@@ -62,7 +67,9 @@ def main():
             continue
         lp["deploy"] = DEPLOY_BY_NAME[name]
         changed += 1
-    CONFIG.write_text(json.dumps(cfg, indent=2) + "\n")
+    # Atomic write (flock + tmp + os.replace); a plain write_text truncates
+    # config.json for concurrent readers (2026-09-09 root cause).
+    save_config(cfg, cfg_path=str(CONFIG))
     print(f"updated {changed} project(s) in {CONFIG}")
 
 

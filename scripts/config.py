@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 _CACHE: dict | None = None
 _CACHE_PATH: str | None = None
@@ -92,7 +93,16 @@ def load_config(fresh: bool = False) -> dict:
         with open(path) as f:
             _CACHE = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return _CACHE if (_CACHE is not None and _CACHE_PATH == path) else {}
+        # Writers now go through config_io (flock + tmp + os.replace), so a
+        # torn file should be impossible on this OS — but a reader that opened
+        # the path just before an os.replace can still see a stale/partial
+        # view on some filesystems. One short retry rides out that window.
+        time.sleep(0.05)
+        try:
+            with open(path) as f:
+                _CACHE = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return _CACHE if (_CACHE is not None and _CACHE_PATH == path) else {}
     _CACHE_PATH = path
     _CACHE_MTIME = mtime
     return _CACHE

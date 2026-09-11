@@ -666,19 +666,20 @@ def mark_comment_blocked(thread_url: str,
         return
     sub = sub_match.group(1).lower()
     try:
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
-        bans = config.setdefault("subreddit_bans", {})
-        blocked = bans.setdefault("comment_blocked", [])
-        existing = _ban_entries_to_subs(blocked)
-        if sub not in existing:
-            blocked.append(_make_ban_entry(sub, reason, project))
-            blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=2)
-                f.write("\n")
-            print(f"[post_reddit] Added r/{sub} to subreddit_bans.comment_blocked "
-                  f"(reason={reason!r} project={project!r})")
+        # Atomic read-modify-write via config_io (flock + tmp + os.replace);
+        # the old open(..., "w") + json.dump here truncated config.json when
+        # killed mid-stream (2026-09-09 root cause, Sentry S4L-9E / S4L-95).
+        from config_io import locked_config
+        with locked_config(CONFIG_PATH) as (config, save):
+            bans = config.setdefault("subreddit_bans", {})
+            blocked = bans.setdefault("comment_blocked", [])
+            existing = _ban_entries_to_subs(blocked)
+            if sub not in existing:
+                blocked.append(_make_ban_entry(sub, reason, project))
+                blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
+                save()
+                print(f"[post_reddit] Added r/{sub} to subreddit_bans.comment_blocked "
+                      f"(reason={reason!r} project={project!r})")
     except Exception as e:
         print(f"[post_reddit] WARNING: could not persist blocked sub r/{sub}: {e}")
 
@@ -781,42 +782,44 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
         return
     reason_str: str | None = (abort_reason or "").strip()[:280] or None
     try:
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
-        bans = config.setdefault("subreddit_bans", {})
-        blocked = bans.setdefault("thread_blocked", [])
-        existing = _ban_entries_to_subs(blocked)
-        if sub not in existing:
-            new_entry = _make_ban_entry(sub, reason_str, project)
-            blocked.append(new_entry)
-            blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=2)
-                f.write("\n")
-            print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts "
-                  f"(reason={reason_str!r} project={project!r})")
-            _mirror_ban_to_backend("thread_blocked", new_entry)
-        else:
-            # Re-arm an existing QUARANTINE entry on a fresh quarantine strike
-            # (both old and new reasons carry the prefix). Never overwrite a
-            # permanent entry with a weaker time-limited one.
-            entry = next((e for e in blocked
-                          if isinstance(e, dict) and _ban_entry_sub(e) == sub), None)
-            old_reason = (entry or {}).get("reason") or ""
-            new_is_q = (reason_str or "").startswith(QUARANTINE_REASON_PREFIX)
-            if entry is not None and new_is_q and old_reason.startswith(QUARANTINE_REASON_PREFIX):
-                from datetime import datetime, timezone
-                entry["reason"] = reason_str
-                entry["added_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-                with open(CONFIG_PATH, "w") as f:
-                    json.dump(config, f, indent=2)
-                    f.write("\n")
-                print(f"[post_reddit] Refreshed r/{sub} thread quarantine "
-                      f"(30-day clock re-armed)")
-                _mirror_ban_to_backend("thread_blocked", entry)
+        # Atomic read-modify-write via config_io (flock + tmp + os.replace);
+        # the old open(..., "w") + json.dump here truncated config.json when
+        # killed mid-stream (2026-09-09 root cause, Sentry S4L-9E / S4L-95).
+        from config_io import locked_config
+        mirror_entry = None  # mirrored AFTER the flock releases (network call)
+        with locked_config(CONFIG_PATH) as (config, save):
+            bans = config.setdefault("subreddit_bans", {})
+            blocked = bans.setdefault("thread_blocked", [])
+            existing = _ban_entries_to_subs(blocked)
+            if sub not in existing:
+                new_entry = _make_ban_entry(sub, reason_str, project)
+                blocked.append(new_entry)
+                blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
+                save()
+                print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts "
+                      f"(reason={reason_str!r} project={project!r})")
+                mirror_entry = new_entry
             else:
-                print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
+                # Re-arm an existing QUARANTINE entry on a fresh quarantine strike
+                # (both old and new reasons carry the prefix). Never overwrite a
+                # permanent entry with a weaker time-limited one.
+                entry = next((e for e in blocked
+                              if isinstance(e, dict) and _ban_entry_sub(e) == sub), None)
+                old_reason = (entry or {}).get("reason") or ""
+                new_is_q = (reason_str or "").startswith(QUARANTINE_REASON_PREFIX)
+                if entry is not None and new_is_q and old_reason.startswith(QUARANTINE_REASON_PREFIX):
+                    from datetime import datetime, timezone
+                    entry["reason"] = reason_str
+                    entry["added_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+                    save()
+                    print(f"[post_reddit] Refreshed r/{sub} thread quarantine "
+                          f"(30-day clock re-armed)")
+                    mirror_entry = entry
+                else:
+                    print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
+        if mirror_entry is not None:
+            _mirror_ban_to_backend("thread_blocked", mirror_entry)
     except Exception as e:
         print(f"[post_reddit] WARNING: could not persist thread-blocked sub r/{sub}: {e}")
 
