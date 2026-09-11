@@ -267,6 +267,44 @@ rm -f "$THREADS_PLAN_FILE"
 export LINK_URL LINK_SOURCE
 echo "[link-gen] resolved LINK_URL='${LINK_URL}' LINK_SOURCE='${LINK_SOURCE}'" | tee -a "$LOG_FILE"
 
+# Wrap the resolved link through dm_short_links BEFORE it reaches the model
+# (2026-09-10 fix: every thread since Aug shipped a bare untracked URL, both
+# plain_url and audience_page sources). Normal operation mints a /r/<code>
+# short link (first-party click logging + canonical UTM on the redirect
+# target); mint failures fall back to the UTM-tagged direct URL inside
+# wrap_text_for_post; only a hard wrap error leaves the raw URL. The model
+# receives the WRAPPED URL in LINK_RULE, so the existing exact-URL typing
+# instruction and the post-flight link-verify apply unchanged to the tracked
+# form. MINTED_SESSION rides env into the DB-insert step, which backfills
+# post_links.post_id once the posts row exists.
+MINTED_SESSION=""
+if [ -n "$LINK_URL" ]; then
+  WRAP_JSON=$(/usr/bin/python3 -c "
+import json, sys
+sys.path.insert(0, sys.argv[3])
+try:
+    from dm_short_links import wrap_text_for_post
+    res = wrap_text_for_post(text=sys.argv[1], platform='twitter', project_name=sys.argv[2])
+    ok = bool(res.get('ok')) and bool((res.get('text') or '').strip())
+    print(json.dumps({'url': res['text'].strip() if ok else '',
+                      'minted_session': (res.get('minted_session') or '') if ok else '',
+                      'error': '' if ok else str(res.get('error') or 'empty_wrap')}))
+except Exception as e:
+    print(json.dumps({'url': '', 'minted_session': '', 'error': str(e)}))
+" "$LINK_URL" "$PROJECT" "$REPO_DIR/scripts")
+  WRAPPED_URL=$(/usr/bin/python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('url') or '')" "$WRAP_JSON")
+  MINTED_SESSION=$(/usr/bin/python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('minted_session') or '')" "$WRAP_JSON")
+  if [ -n "$WRAPPED_URL" ]; then
+    echo "[link-wrap] $LINK_URL -> $WRAPPED_URL (minted_session=${MINTED_SESSION:-none})" | tee -a "$LOG_FILE"
+    LINK_URL="$WRAPPED_URL"
+    export LINK_URL
+  else
+    WRAP_ERR=$(/usr/bin/python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('error') or '')" "$WRAP_JSON")
+    echo "[link-wrap] WARN wrap failed (${WRAP_ERR}); posting resolved URL unwrapped" | tee -a "$LOG_FILE"
+  fi
+fi
+export MINTED_SESSION
+
 # Build the prompt rule for tweet 1's link. Mandatory when we resolved a URL,
 # omitted otherwise (e.g. project has no website AND no landing_pages config).
 if [ -n "$LINK_URL" ]; then
@@ -471,6 +509,7 @@ if [ "$PERMALINK" != "null" ] && [ "$PERMALINK" != "" ] && [ "$PERMALINK" != "PA
   CAMPAIGN_SUFFIX="$CAMPAIGN_SUFFIX" \
   LINK_URL="$LINK_URL" \
   LINK_SOURCE="$LINK_SOURCE" \
+  MINTED_SESSION="$MINTED_SESSION" \
   /usr/bin/python3 <<'PYEOF' 2>&1 | tee -a "$LOG_FILE" || true
 import json, os, subprocess, sys
 sys.path.insert(0, os.path.join(os.environ["REPO_DIR"], "scripts"))
@@ -540,6 +579,18 @@ if not resp.get("ok", True) and (resp.get("error") or {}).get("code") == "duplic
 
 post_id = (resp.get("data") or {}).get("post", {}).get("id")
 print(f"[db-insert] OK — inserted posts.id={post_id} for {permalink}")
+
+# Backfill post_links.post_id for the code minted by the shell's link-wrap
+# step, connecting first-party /r/<code> clicks to this post row. Empty
+# MINTED_SESSION (no link, wrap failed, or UTM-only fallback) skips cleanly.
+minted_session = (os.environ.get("MINTED_SESSION") or "").strip()
+if minted_session and post_id:
+    try:
+        from dm_short_links import backfill_post_id
+        n = backfill_post_id(minted_session=minted_session, post_id=int(post_id))
+        print(f"[link-wrap] backfilled {n} post_links row(s) -> post_id={post_id}")
+    except Exception as e:
+        print(f"[link-wrap] WARN post_links backfill failed: {e}")
 
 # Campaign verification gate. Twitter has no edit API so we cannot fix the
 # tweet after posting; instead we verify the model honored the suffix
