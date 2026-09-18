@@ -171,6 +171,34 @@ NO_RESUME_WORKER_REQUIRED = (
 MACOS_MCP_RE = re.compile(r"(^|\s)(?:/[^ \t]+/)?mcp-server-macos-use(?:\s|$)")
 _SSH_RE = re.compile(r"^(?:/[^ \t]+/)?ssh(?:\s|$)")
 
+# The THIRD leak (found 2026-09-18, 16 orphans / 33 GB): the S4L MCP node server
+# itself. Before v1.7.12-rc.6 the server had no exit path on client death (the MCP
+# SDK never surfaces stdin EOF, and the eager panel HTTP listener pins the event
+# loop), so every dead client left a full server behind, reparented to launchd,
+# still running its heartbeat/relay timers. The server now self-exits, but old
+# binaries and old dist copies linger — reap any S4L server whose parent is gone,
+# UNLESS launchd itself manages it (`launchctl list` shows its pid): a
+# launchd-managed server legitimately has ppid 1 and would be respawned anyway.
+S4L_NODE_RE = re.compile(r"node(?:-darwin-[a-z0-9_]+/bin/node)?\s+\S*mcp/dist/index\.js(?:\s|$)")
+
+
+def _launchd_managed_pids() -> set:
+    """PIDs of processes launchd currently manages (first column of `launchctl list`).
+    Best-effort: an empty set on failure just means the ppid<=1 sweep below trusts
+    ppid alone, which matches the pre-launchd-aware behavior."""
+    try:
+        out = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except Exception:
+        return set()
+    pids = set()
+    for line in out.splitlines():
+        head = line.split("\t", 1)[0].strip()
+        if head.isdigit():
+            pids.add(int(head))
+    return pids
+
 
 def _run_ps() -> str:
     """`ps -axo` with a generous timeout + one retry. Under a runaway leak the box is
@@ -386,11 +414,13 @@ def archive_stale_worker_session_records(min_age_sec: int) -> int:
 def snapshot():
     """Snapshot the process table once.
 
-    Returns (procs, by_pid, macos_mcp, meta, stats):
+    Returns (procs, by_pid, macos_mcp, s4l_node, meta, stats):
       * procs     — metadata-confirmed S4L scheduled-task worker processes.
       * by_pid    — {pid: cmd} for every process (used to pair the disclaimer stub).
       * macos_mcp — {pid, ppid, age, cmd} for every `mcp-server-macos-use` node server
                     (the paired leak, reaped in main()).
+      * s4l_node  — {pid, ppid, age, cmd} for every S4L MCP node server
+                    (mcp/dist/index.js; the third leak, orphan-swept in main()).
       * meta      — {pid: {ppid, age}} for every process, so main() can tell whether an
                     MCP server's parent is still alive (orphan detection).
       * stats     — {ps_timed_out, snapshot_empty, worker_probe_seen, reapable_workers,
@@ -424,12 +454,13 @@ def snapshot():
         # not a swallowed exception.
         stats["ps_timed_out"] = True
         stats["snapshot_empty"] = True
-        return [], {}, [], {}, stats
+        return [], {}, [], [], {}, stats
     if not out.strip():
         stats["snapshot_empty"] = True
     me = os.getpid()
     procs = []
     macos_mcp = []
+    s4l_node = []
     by_pid = {}
     meta = {}
     session_index = load_session_index()
@@ -456,6 +487,12 @@ def snapshot():
         if MACOS_MCP_RE.search(cmd) and not _SSH_RE.match(cmd):
             macos_mcp.append({"pid": pid, "ppid": ppid, "age": age, "cmd": cmd})
             stats["macos_mcp_seen"] += 1
+            continue
+        # (a2) S4L MCP node servers — the third leak. Collected here, orphan-swept
+        # in main() with the launchd-managed exclusion.
+        if S4L_NODE_RE.search(cmd) and not _SSH_RE.match(cmd):
+            s4l_node.append({"pid": pid, "ppid": ppid, "age": age, "cmd": cmd})
+            stats["s4l_node_seen"] = stats.get("s4l_node_seen", 0) + 1
             continue
         # Telemetry probe: does this look like a claude-code agent worker at all?
         # Deliberately looser than SIG_REQUIRED, and it EXCLUDES the disclaimer stub
@@ -528,7 +565,7 @@ def snapshot():
             **worker_meta,
         })
     stats["reapable_workers"] = len(procs)
-    return procs, by_pid, macos_mcp, meta, stats
+    return procs, by_pid, macos_mcp, s4l_node, meta, stats
 
 
 def kill(pid: int) -> bool:
@@ -831,7 +868,7 @@ def main() -> int:
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
 
-    procs, by_pid, macos_mcp, meta, stats = snapshot()
+    procs, by_pid, macos_mcp, s4l_node, meta, stats = snapshot()
 
     # Group by session uuid.
     groups: dict[str, list[dict]] = {}
