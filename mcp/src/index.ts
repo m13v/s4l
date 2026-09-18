@@ -5729,6 +5729,26 @@ function readPanelEndpoint(): { url?: string; pid?: number } | null {
   }
 }
 
+// A live pid is not enough to trust panel-endpoint.json: the exit-hook unlink
+// never runs on SIGKILL, so the file can point at a dead pid that the OS later
+// RECYCLES for an unrelated process — kill(pid, 0) then reports "alive" and
+// every instance would cede forever (no panel owner, no heartbeat/relay owner)
+// until the squatter happens to exit. Accept the registration only when the
+// pid's command line actually looks like an S4L MCP server; on ps failure fall
+// back to liveness alone rather than stealing a possibly-valid slot.
+function isS4lServerPid(pid: number): boolean {
+  if (!isPidAlive(pid)) return false;
+  try {
+    const cmd = execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: 4000,
+    });
+    return cmd.includes("dist/index.js") || cmd.includes("@m13v/s4l-mcp");
+  } catch {
+    return true;
+  }
+}
+
 // True when this process should run per-INSTALL periodic work (heartbeat,
 // transcript/provider relays, state snapshots). Several server instances are
 // routinely alive at once (Desktop, Code side-panel, per-minute queue workers —
@@ -5736,13 +5756,13 @@ function readPanelEndpoint(): { url?: string; pid?: number } | null {
 // gate every one of them ran every timer: 16 concurrent instances meant 48
 // heartbeat python spawns per 15 min and a measured ~11k fs-events/sec from
 // duplicate relay scans. Reuse the panel-endpoint election writePanelUrl already
-// maintains: the registered live pid is the designated worker; when the file is
-// absent or points at a dead pid, anyone may run the work (the 120s reclaim tick
-// will elect a new owner shortly).
+// maintains: the registered live S4L-server pid is the designated worker; when
+// the file is absent, stale, or squatted, anyone may run the work (the 120s
+// reclaim tick will elect a new owner shortly).
 function isInstallTickOwner(): boolean {
   const existing = readPanelEndpoint();
   if (!existing?.pid || existing.pid === process.pid) return true;
-  return !isPidAlive(existing.pid);
+  return !isS4lServerPid(existing.pid);
 }
 
 // Publish the loopback URL to stable files so out-of-process readers can find
@@ -5769,7 +5789,7 @@ function writePanelUrl(url: string): void {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "panel-url"), url, "utf-8");
     const existing = readPanelEndpoint();
-    if (existing?.pid && existing.pid !== process.pid && isPidAlive(existing.pid)) {
+    if (existing?.pid && existing.pid !== process.pid && isS4lServerPid(existing.pid)) {
       // Someone else already holds a live registration (most likely a longer-
       // lived session than us) — don't clobber it. Our own panel is still up
       // and fully usable via `url` for anything that already has it (e.g. this
@@ -6764,7 +6784,8 @@ async function main() {
   // which just closes our stdin pipe) left a full server behind, reparented to
   // launchd. Handle EOF ourselves, plus signals, plus a ppid backstop for the
   // rare case where an inherited fd keeps the stdin pipe open past client death.
-  const shutdown = (reason: string) => {
+  let shutdownStarted = false;
+  const exitNow = (reason: string) => {
     console.error(`[social-autoposter-mcp] client gone (${reason}); exiting`);
     try {
       localPanel?.server.close();
@@ -6773,10 +6794,40 @@ async function main() {
     }
     process.exit(0);
   };
+  const shutdown = (reason: string, force = false) => {
+    if (shutdownStarted) {
+      // A second signal while we wait out a drain means "stop now".
+      if (force) exitNow(`${reason}, forced`);
+      return;
+    }
+    shutdownStarted = true;
+    if (!postingActive) {
+      exitNow(reason);
+      return;
+    }
+    // A posting drain is in flight: this process holds the shared
+    // twitter-browser shell lock under its OWN pid while a python poster child
+    // drives Chrome. Exiting now (a) lets the next per-minute cycle
+    // stale-reclaim the lock mid-post and (b) crashes the poster on EPIPE
+    // between a landed reply and its bookkeeping — the idempotent redrain then
+    // double-posts. Wait for the drain to finish (the interval is deliberately
+    // ref'd so it keeps the process alive), capped at the approve_drafts
+    // worst-case timeout.
+    console.error(
+      `[social-autoposter-mcp] client gone (${reason}); waiting for in-flight posting drain before exit`
+    );
+    const started = Date.now();
+    const wait = setInterval(() => {
+      if (!postingActive || Date.now() - started > 2 * 3600_000) {
+        clearInterval(wait);
+        exitNow(`${reason}, drain done`);
+      }
+    }, 5_000);
+  };
   process.stdin.on("end", () => shutdown("stdin end"));
   process.stdin.on("close", () => shutdown("stdin close"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM", true));
+  process.on("SIGINT", () => shutdown("SIGINT", true));
   // Skip the backstop when we were BORN with ppid 1 (a launchd-managed server is
   // legitimately parented to launchd; only a reparent-after-birth means orphaned).
   if (process.ppid !== 1) {
