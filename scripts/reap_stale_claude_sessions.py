@@ -444,6 +444,7 @@ def snapshot():
         "cwd_confirmed_workers": 0,
         "s4l_worker_cwd_seen": 0,
         "macos_mcp_seen": 0,
+        "s4l_node_seen": 0,
         "total_procs": 0,
     }
     try:
@@ -801,6 +802,58 @@ def requeue_dead_claims(by_pid, dry=False):
     return requeued
 
 
+QUEUE_GC_MAX_AGE_DAYS = int(os.environ.get("S4L_QUEUE_GC_MAX_AGE_DAYS", "30"))
+QUEUE_GC_MIN_INTERVAL_SEC = 6 * 3600
+QUEUE_GC_MAX_DELETE_PER_RUN = 500
+
+
+def gc_claude_queue() -> int:
+    """Delete consumed claude-queue artifacts (out-*.json, prompt-*.md,
+    deathwatch-armed-*.marker) older than QUEUE_GC_MAX_AGE_DAYS. Runs at most once
+    per QUEUE_GC_MIN_INTERVAL_SEC (stamp file), deletes at most
+    QUEUE_GC_MAX_DELETE_PER_RUN files per run. Never touches pending/, running/,
+    provider.log, or drain-status.json. Returns files deleted (0 on skip)."""
+    state_dir = os.environ.get("S4L_STATE_DIR") or os.path.expanduser("~/.social-autoposter-mcp")
+    qdir = os.path.join(state_dir, "claude-queue")
+    if not os.path.isdir(qdir):
+        return 0
+    stamp = os.path.join(qdir, ".gc-stamp")
+    now = time.time()
+    try:
+        if now - os.path.getmtime(stamp) < QUEUE_GC_MIN_INTERVAL_SEC:
+            return 0
+    except OSError:
+        pass  # no stamp yet -> run
+    try:
+        with open(stamp, "w") as f:
+            f.write(dt.datetime.now(dt.timezone.utc).isoformat() + "\n")
+    except OSError:
+        return 0
+    cutoff = now - QUEUE_GC_MAX_AGE_DAYS * 86400
+    deleted = 0
+    try:
+        names = os.listdir(qdir)
+    except OSError:
+        return 0
+    for name in names:
+        if deleted >= QUEUE_GC_MAX_DELETE_PER_RUN:
+            break
+        if not (
+            (name.startswith("out-") and name.endswith(".json"))
+            or (name.startswith("prompt-") and name.endswith(".md"))
+            or (name.startswith("deathwatch-armed-") and name.endswith(".marker"))
+        ):
+            continue
+        p = os.path.join(qdir, name)
+        try:
+            if os.path.getmtime(p) < cutoff:
+                os.unlink(p)
+                deleted += 1
+        except OSError:
+            continue
+    return deleted
+
+
 def main() -> int:
     dry = "--dry-run" in sys.argv
     max_age = _env_int("S4L_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
@@ -997,6 +1050,24 @@ def main() -> int:
         if dry or kill(mp["pid"]):
             macos_killed += 1
 
+    # (4) Reap orphaned S4L MCP node servers (mcp/dist/index.js) — the third leak.
+    # Servers since v1.7.12-rc.6 self-exit on client death; this sweep is the net
+    # for older binaries and for the backstop's blind spots. Only provably
+    # dead-parented servers are touched, and never one launchd manages (a
+    # launchd-managed server has ppid 1 legitimately and would be respawned).
+    # A short age floor avoids racing a just-orphaned new server that is about to
+    # self-exit.
+    s4l_node_killed = 0
+    if s4l_node:
+        launchd_pids = _launchd_managed_pids()
+        for sp in s4l_node:
+            pp = sp["ppid"]
+            if sp["pid"] in launchd_pids:
+                continue
+            if (pp <= 1 or pp not in live_pids) and sp["age"] >= 120:
+                if dry or kill(sp["pid"]):
+                    s4l_node_killed += 1
+
     mode = "queue" if inflight is not None else "age-fallback"
     leaked_groups = sum(1 for g in groups.values() if len(g) > 1)
 
@@ -1019,6 +1090,8 @@ def main() -> int:
         "claude_killed": killed,
         "disclaimer_killed": disclaimers,
         "macos_mcp_killed": macos_killed,
+        "s4l_node_seen": stats.get("s4l_node_seen", 0),
+        "s4l_node_killed": s4l_node_killed,
         "archived_sessions": archived_sessions,
         "requeued_stale_claims": requeued_claims,
         "spared_claim_pids": sorted(claim_pids),
@@ -1038,6 +1111,16 @@ def main() -> int:
     }
     write_status(status)
 
+    # (5) GC consumed claude-queue artifacts. out-*.json results (plus prompt
+    # sidecars and deathwatch markers) accumulate ungarbage-collected — 11.5k
+    # files spanning Jul-Sep were found on 2026-09-18, a steady fs-event and
+    # directory-scan tax. Results are consumed by the producer within its 1800s
+    # deadline, so 30 days is far beyond any reader. This deletes only queue
+    # RESULT artifacts, never DB rows (the no-retention-pruning rule covers
+    # *_candidates tables, which this does not touch). Stamped to run at most
+    # every 6h, capped per run.
+    gc_deleted = 0 if dry else gc_claude_queue()
+
     prefix = "[claude-reaper]" + (" DRY-RUN" if dry else "")
     print(
         f"{prefix} cycle mode={mode} inflight={inflight} ceiling={max_age}s"
@@ -1049,6 +1132,8 @@ def main() -> int:
         f" s4l_cwd_seen={stats['s4l_worker_cwd_seen']}"
         f" mcp_seen={stats['macos_mcp_seen']} killed={killed}"
         f" disclaimer_killed={disclaimers} mcp_killed={macos_killed}"
+        f" s4l_node_seen={stats['s4l_node_seen']} s4l_node_killed={s4l_node_killed}"
+        f" queue_gc_deleted={gc_deleted}"
         f" archived_sessions={archived_sessions}"
         f" ps_timeout={int(stats['ps_timed_out'])} empty={int(stats['snapshot_empty'])}"
         f" max_group={max_group} claim_grace={claim_grace}s",
