@@ -271,8 +271,12 @@ export function run(
       // 'close' waits for the stdio pipes to drain, which never happens when a
       // grandchild inherited them and outlives the child — the promise (and the
       // captured output) then leaked for the grandchild's lifetime. After the
-      // child itself exits, give the pipes a short grace to flush, then settle.
-      const drain = setTimeout(() => finish(code), 5_000);
+      // child itself exits, give the pipes a grace to flush, then settle. The
+      // setImmediate hop matters: if the event loop was stalled past the grace
+      // by sync work, timers fire BEFORE the poll phase reads the data already
+      // sitting in the kernel buffer — hopping to the check phase lets those
+      // reads land first instead of truncating a successful child's output.
+      const drain = setTimeout(() => setImmediate(() => finish(code)), 10_000);
       drain.unref();
     });
     child.on("error", (err) => {

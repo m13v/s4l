@@ -179,7 +179,33 @@ _SSH_RE = re.compile(r"^(?:/[^ \t]+/)?ssh(?:\s|$)")
 # binaries and old dist copies linger — reap any S4L server whose parent is gone,
 # UNLESS launchd itself manages it (`launchctl list` shows its pid): a
 # launchd-managed server legitimately has ppid 1 and would be respawned anyway.
-S4L_NODE_RE = re.compile(r"node(?:-darwin-[a-z0-9_]+/bin/node)?\s+\S*mcp/dist/index\.js(?:\s|$)")
+#
+# Matching: a bare "mcp/dist/index.js" suffix is NOT distinctive enough — it
+# misses the installed lanes (install.sh runs
+# ~/.social-autoposter-mcp/app/dist/index.js; the Desktop .mcpb runs
+# .../Claude Extensions/<id>/dist/index.js, a path containing spaces) and it
+# matches any third-party repo laid out as <repo>/mcp/dist/index.js. Require the
+# binary to be a node AND an S4L-owned marker in the command line.
+_S4L_NODE_MARKERS = (
+    "/.social-autoposter-mcp/app/dist/index.js",  # curl-installer lane
+    "/s4l/mcp/dist/index.js",                     # dev checkout
+    "/social-autoposter/mcp/dist/index.js",       # alt dev checkout name
+    "@m13v/s4l-mcp",                              # npx lane
+)
+
+
+def _is_s4l_node_server(cmd: str) -> bool:
+    parts = cmd.split()
+    if not parts or os.path.basename(parts[0]) != "node":
+        return False
+    if any(m in cmd for m in _S4L_NODE_MARKERS):
+        return True
+    # Desktop .mcpb lane: .../Claude Extensions/<social-autoposter id>/dist/index.js
+    return (
+        "Claude Extensions/" in cmd
+        and "social-autoposter" in cmd
+        and "dist/index.js" in cmd
+    )
 
 
 def _launchd_managed_pids() -> set:
@@ -491,7 +517,7 @@ def snapshot():
             continue
         # (a2) S4L MCP node servers — the third leak. Collected here, orphan-swept
         # in main() with the launchd-managed exclusion.
-        if S4L_NODE_RE.search(cmd) and not _SSH_RE.match(cmd):
+        if _is_s4l_node_server(cmd):
             s4l_node.append({"pid": pid, "ppid": ppid, "age": age, "cmd": cmd})
             stats["s4l_node_seen"] = stats.get("s4l_node_seen", 0) + 1
             continue
@@ -802,7 +828,10 @@ def requeue_dead_claims(by_pid, dry=False):
     return requeued
 
 
-QUEUE_GC_MAX_AGE_DAYS = int(os.environ.get("S4L_QUEUE_GC_MAX_AGE_DAYS", "30"))
+# _env_int + a floor: a malformed value must not kill the whole reaper at
+# import, and a value < 1 would put the cutoff in the future and delete
+# in-flight queue artifacts.
+QUEUE_GC_MAX_AGE_DAYS = max(1, _env_int("S4L_QUEUE_GC_MAX_AGE_DAYS", 30))
 QUEUE_GC_MIN_INTERVAL_SEC = 6 * 3600
 QUEUE_GC_MAX_DELETE_PER_RUN = 500
 
