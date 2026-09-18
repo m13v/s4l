@@ -54,6 +54,7 @@ for i in $(seq 0 $((NUM - 1))); do
     PAGE_URL=$(echo "$CHATS" | "$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)[$i].get('page_url',''))")
 
     PID_FILE="/tmp/web-chat-${THREAD_ID}.pid"
+    LOCK_DIR="/tmp/web-chat-${THREAD_ID}.lock"
 
     # Rate-limit circuit breaker (mirror Fazm /tmp/fazm-chat-ratelimit).
     if [ -f "/tmp/web-chat-ratelimit" ]; then
@@ -76,11 +77,34 @@ for i in $(seq 0 $((NUM - 1))); do
         rm -f "$PID_FILE"
     fi
 
+    # Atomic single-flight reservation. Acquired BEFORE any slow HTTP call
+    # (claim, history dump, cross-thread lookup) so a flaky/slow network cannot
+    # leave a multi-minute unguarded window in which every 15s launchd cycle
+    # re-selects the same unread thread and spawns a duplicate session, the root
+    # cause of the 8x-spawn / triple-reply pile-up. mkdir is atomic on POSIX:
+    # exactly one cycle wins the race. Stale locks (older than 1500s, past the
+    # 1200s gtimeout plus prep buffer) are reclaimed so a crashed session can't
+    # wedge a thread forever. The PID-file guard above stays as the secondary
+    # live-session check; the claim/cooldown stays as the tertiary guard.
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        LOCK_TS=$(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)
+        NOW_TS=$(date +%s)
+        if [ $((NOW_TS - LOCK_TS)) -gt 1500 ]; then
+            log "Reclaiming stale lock for $PROJECT/$THREAD_ID (age $((NOW_TS - LOCK_TS))s)"
+            rm -rf "$LOCK_DIR"
+            mkdir "$LOCK_DIR" 2>/dev/null || { log "Lock race for $THREAD_ID, skipping"; continue; }
+        else
+            log "Lock held for $PROJECT/$THREAD_ID (age $((NOW_TS - LOCK_TS))s), skipping"
+            continue
+        fi
+    fi
+
     log "Spawning session for $PROJECT/$THREAD_ID ($EMAIL, $UNREAD unread)"
 
     # Cooldown check (mirror claim-chat --check-only).
     if ! "$PYTHON_BIN" "$SCRIPTS_DIR/claim_web_chat.py" "$THREAD_ID" --check-only 2>>"$LOG_DIR/web-chat.log"; then
         log "Thread $THREAD_ID in cooldown, skipping"
+        rm -rf "$LOCK_DIR"
         continue
     fi
 
@@ -169,6 +193,7 @@ PROMPT_EOF
                 echo "[$(date)] PERSISTENT ERROR on $THREAD_ID (rate limit / credits / auth), pausing all spawns for 1h" >> "$LOG_DIR/web-chat.log"
                 echo "rate_limited $(date +%s)" > "/tmp/web-chat-ratelimit"
                 rm -f "$PROMPT_FILE" "$PID_FILE" "$FAIL_COUNT_FILE"
+                rm -rf "$LOCK_DIR"
                 exit 0
             fi
 
@@ -208,6 +233,7 @@ PROMPT_EOF
         fi
 
         rm -f "$PROMPT_FILE" "$PID_FILE"
+        rm -rf "$LOCK_DIR"
     ) &
 
     CLAUDE_PID=$!
