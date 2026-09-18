@@ -135,6 +135,15 @@ export function run(
     }
     let stdout = "";
     let stderr = "";
+    // Cap captured output to a tail. run() used to accumulate a child's full
+    // stdout+stderr unbounded for the child's lifetime; long-lived spawns (the
+    // 13h voice backfill) and stuck children pinned those strings and were the
+    // main driver of multi-GB server heaps. Callers that parse output read
+    // either whole small payloads or the LAST line, so keeping the tail
+    // preserves semantics. 8 MB per stream is far above any legitimate payload.
+    const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
+    const capTail = (s: string): string =>
+      s.length > MAX_CAPTURE_BYTES ? s.slice(s.length - (MAX_CAPTURE_BYTES >> 1)) : s;
     // Per-stream partial-line buffers so onLine fires on whole lines only,
     // regardless of how the OS chunks the pipe reads.
     let outBuf = "";
@@ -176,25 +185,40 @@ export function run(
       return buf;
     };
     let timer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
     if (opts.timeoutMs) {
       timer = setTimeout(() => {
         child.kill("SIGTERM");
+        // A child that ignores SIGTERM used to live (and hold its pipes and our
+        // buffers) forever. Escalate.
+        killTimer = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+        }, 10_000);
+        killTimer.unref();
       }, opts.timeoutMs);
     }
     child.stdout.on("data", (d) => {
       const s = d.toString();
-      stdout += s;
+      stdout = capTail(stdout + s);
       outBuf = pump(s, "stdout", outBuf);
       sinkOutBuf = sinkPump(s, "stdout", sinkOutBuf);
     });
     child.stderr.on("data", (d) => {
       const s = d.toString();
-      stderr += s;
+      stderr = capTail(stderr + s);
       errBuf = pump(s, "stderr", errBuf);
       sinkErrBuf = sinkPump(s, "stderr", sinkErrBuf);
     });
-    child.on("close", (code) => {
+    let settled = false;
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       // Flush any trailing partial line (output with no terminating newline).
       if (opts.onLine) {
         if (outBuf)
@@ -226,9 +250,21 @@ export function run(
           }
       }
       resolve({ code: code ?? -1, stdout, stderr });
+    };
+    child.on("close", (code) => finish(code));
+    child.on("exit", (code) => {
+      // 'close' waits for the stdio pipes to drain, which never happens when a
+      // grandchild inherited them and outlives the child — the promise (and the
+      // captured output) then leaked for the grandchild's lifetime. After the
+      // child itself exits, give the pipes a short grace to flush, then settle.
+      const drain = setTimeout(() => finish(code), 5_000);
+      drain.unref();
     });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({ code: -1, stdout, stderr: stderr + String(err) });
     });
   });
