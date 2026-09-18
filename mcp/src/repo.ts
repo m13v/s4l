@@ -144,6 +144,14 @@ export function run(
     const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
     const capTail = (s: string): string =>
       s.length > MAX_CAPTURE_BYTES ? s.slice(s.length - (MAX_CAPTURE_BYTES >> 1)) : s;
+    // The line-splitter buffers below only shed at '\n', so a child emitting
+    // long newline-free output (carriage-return progress bars, one huge line)
+    // would grow them unbounded for its lifetime — the same heap pathology the
+    // capture cap exists for. Keep only a tail of an oversized partial line
+    // (telemetry truncates lines to 8KB anyway).
+    const MAX_LINEBUF_BYTES = 1024 * 1024;
+    const capLineBuf = (buf: string): string =>
+      buf.length > MAX_LINEBUF_BYTES ? buf.slice(-8192) : buf;
     // Per-stream partial-line buffers so onLine fires on whole lines only,
     // regardless of how the OS chunks the pipe reads.
     let outBuf = "";
@@ -161,7 +169,7 @@ export function run(
           /* a progress sink must never break the wrapped command */
         }
       }
-      return buf;
+      return capLineBuf(buf);
     };
     // Parallel whole-line splitter that tees to the telemetry sink (if any),
     // kept separate from the onLine pump so neither path can affect the other.
@@ -182,38 +190,45 @@ export function run(
           /* the telemetry sink must never break the wrapped command */
         }
       }
-      return buf;
+      return capLineBuf(buf);
     };
+    let settled = false;
     let timer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
     if (opts.timeoutMs) {
       timer = setTimeout(() => {
         child.kill("SIGTERM");
         // A child that ignores SIGTERM used to live (and hold its pipes and our
-        // buffers) forever. Escalate.
+        // buffers) forever. Escalate — but GENEROUSLY: children trap SIGTERM on
+        // purpose to finish critical bookkeeping (twitter_post_plan.py finishes
+        // the current candidate's post + recording, which can take minutes, so a
+        // fast SIGKILL would reopen the posted-but-unrecorded double-post
+        // window). 15 min covers every graceful path; only a truly wedged child
+        // gets hard-killed.
         killTimer = setTimeout(() => {
           try {
             child.kill("SIGKILL");
           } catch {
             /* already gone */
           }
-        }, 10_000);
+        }, 15 * 60_000);
         killTimer.unref();
       }, opts.timeoutMs);
     }
     child.stdout.on("data", (d) => {
+      if (settled) return;
       const s = d.toString();
       stdout = capTail(stdout + s);
       outBuf = pump(s, "stdout", outBuf);
       sinkOutBuf = sinkPump(s, "stdout", sinkOutBuf);
     });
     child.stderr.on("data", (d) => {
+      if (settled) return;
       const s = d.toString();
       stderr = capTail(stderr + s);
       errBuf = pump(s, "stderr", errBuf);
       sinkErrBuf = sinkPump(s, "stderr", sinkErrBuf);
     });
-    let settled = false;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
