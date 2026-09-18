@@ -5729,6 +5729,22 @@ function readPanelEndpoint(): { url?: string; pid?: number } | null {
   }
 }
 
+// True when this process should run per-INSTALL periodic work (heartbeat,
+// transcript/provider relays, state snapshots). Several server instances are
+// routinely alive at once (Desktop, Code side-panel, per-minute queue workers —
+// each boots its own copy via the ~/.claude.json registration), and before this
+// gate every one of them ran every timer: 16 concurrent instances meant 48
+// heartbeat python spawns per 15 min and a measured ~11k fs-events/sec from
+// duplicate relay scans. Reuse the panel-endpoint election writePanelUrl already
+// maintains: the registered live pid is the designated worker; when the file is
+// absent or points at a dead pid, anyone may run the work (the 120s reclaim tick
+// will elect a new owner shortly).
+function isInstallTickOwner(): boolean {
+  const existing = readPanelEndpoint();
+  if (!existing?.pid || existing.pid === process.pid) return true;
+  return !isPidAlive(existing.pid);
+}
+
 // Publish the loopback URL to stable files so out-of-process readers can find
 // the ephemeral port without scraping `lsof`:
 //   - panel-url            plain text, for the Claude Code side-panel reverse proxy.
@@ -6740,6 +6756,35 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
+  // Exit when the client goes away. The SDK's StdioServerTransport listens only
+  // for stdin 'data'/'error' — never 'end'/'close' — so client death is invisible
+  // to it, and the eagerly-started panel HTTP listener below holds the event loop
+  // open forever. That combination orphaned 16 servers (33 GB RSS, duplicate
+  // autopilot timers) on 2026-09-18: every client exit (clean close OR SIGKILL,
+  // which just closes our stdin pipe) left a full server behind, reparented to
+  // launchd. Handle EOF ourselves, plus signals, plus a ppid backstop for the
+  // rare case where an inherited fd keeps the stdin pipe open past client death.
+  const shutdown = (reason: string) => {
+    console.error(`[social-autoposter-mcp] client gone (${reason}); exiting`);
+    try {
+      localPanel?.server.close();
+    } catch {
+      /* best-effort */
+    }
+    process.exit(0);
+  };
+  process.stdin.on("end", () => shutdown("stdin end"));
+  process.stdin.on("close", () => shutdown("stdin close"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  // Skip the backstop when we were BORN with ppid 1 (a launchd-managed server is
+  // legitimately parented to launchd; only a reparent-after-birth means orphaned).
+  if (process.ppid !== 1) {
+    const ppidWatch = setInterval(() => {
+      if (process.ppid === 1) shutdown("orphaned (ppid=1)");
+    }, 30_000);
+    ppidWatch.unref();
+  }
   // Eagerly start the loopback panel server so the Claude Code side panel (and any
   // reverse proxy in front of it) always has a backend to hit, without waiting for
   // a first `dashboard` call. Best-effort: a bind failure must never block boot.
@@ -6775,8 +6820,15 @@ async function main() {
   // (parity with the npx launchd heartbeat). Once on startup, then every 15m
   // while the desktop app keeps the server alive. unref() so it never holds the
   // process open past a normal exit.
+  // Heartbeat + the relays + snapshots below are per-INSTALL work: gate every
+  // tick on the panel-endpoint election (isInstallTickOwner) so N concurrent
+  // instances produce 1x the spawns, not Nx. The startup heartbeat stays
+  // unconditional — a fresh install must phone home before it ever wins an
+  // election.
   void sendHeartbeat("startup");
-  const hb = setInterval(() => void sendHeartbeat("interval"), 15 * 60_000);
+  const hb = setInterval(() => {
+    if (isInstallTickOwner()) void sendHeartbeat("interval");
+  }, 15 * 60_000);
   hb.unref();
   // Ship Claude session transcripts (scheduled queue-worker runs + s4l repo
   // sessions) to the Cloud Logging relay so a user's session can be
@@ -6787,7 +6839,7 @@ async function main() {
   if ((process.env.S4L_TRANSCRIPT_RELAY ?? "1") !== "0") {
     let transcriptRelayRunning = false;
     const relayTranscripts = () => {
-      if (transcriptRelayRunning) return;
+      if (transcriptRelayRunning || !isInstallTickOwner()) return;
       transcriptRelayRunning = true;
       runPython("scripts/relay_session_transcripts.py", ["--max-lines", "600"], {
         timeoutMs: 120_000,
@@ -6812,7 +6864,7 @@ async function main() {
   if ((process.env.S4L_PROVIDER_LOG_RELAY ?? "1") !== "0") {
     let providerRelayRunning = false;
     const relayProviderLog = () => {
-      if (providerRelayRunning) return;
+      if (providerRelayRunning || !isInstallTickOwner()) return;
       providerRelayRunning = true;
       runPython("scripts/relay_provider_log.py", ["--max-lines", "500"], {
         timeoutMs: 120_000,
@@ -6834,7 +6886,9 @@ async function main() {
   // the recurring tick only POSTs when something actually changed; setup.ts
   // additionally fires it right after every config write.
   void sendStateSnapshot("startup");
-  const ss = setInterval(() => void sendStateSnapshot("interval"), 15 * 60_000);
+  const ss = setInterval(() => {
+    if (isInstallTickOwner()) void sendStateSnapshot("interval");
+  }, 15 * 60_000);
   ss.unref();
 
   // Voice-exemplar catch-up + periodic refresh, checked on every boot
