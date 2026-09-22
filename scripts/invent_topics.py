@@ -189,20 +189,27 @@ def load_project_topics(project_name: str,
 
 
 def project_universe_strings(project_name: str) -> set[str]:
-    """Full active universe for the project from project_search_topics.
+    """Full universe for the project from project_search_topics, EVERY status.
 
     Read from /api/v1/project-search-topics for the freshest read at
     invent time. Lowercased for case-insensitive matching against
     proposals.
+
+    status=all (2026-09-22): the dedup/avoid set must include paused and
+    excluded topics, not just active ones. A paused topic absent from the
+    universe would be re-proposed as "new" and the validate_proposals upsert
+    (status='active') would silently resurrect it, undoing a deliberate
+    repositioning. Paused topics in the prompt's covered list are equally
+    correct: the model must not re-propose them.
     """
     try:
         resp = api_get(
             "/api/v1/project-search-topics",
-            query={"project": project_name, "status": "active"},
+            query={"project": project_name, "status": "all"},
         )
     except Exception as exc:
         raise SystemExit(
-            f"could not fetch active universe for project={project_name!r}: {exc}"
+            f"could not fetch topic universe for project={project_name!r}: {exc}"
         ) from exc
     rows = ((resp or {}).get("data") or {}).get("topics") or []
     return {(r.get("topic") or "").strip().lower() for r in rows if r.get("topic")}
