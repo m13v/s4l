@@ -38,6 +38,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import re
 import sys
 
@@ -126,14 +127,53 @@ def seeds_from_config(project):
     return out
 
 
+def _inactive_topic_cores(project):
+    """Normalized cores of the project's PAUSED/EXCLUDED topics, or an empty
+    set when the read fails (the filter degrades to a no-op; a transient API
+    error must never change the bank). On Reddit the harvested search_topic IS
+    the raw query string, so topic cores compare directly against query cores."""
+    try:
+        resp = api_get(
+            "/api/v1/project-search-topics",
+            {"project": project, "status": "all"},
+        )
+    except SystemExit as e:
+        print(f"reddit_query_bank: topic-status read failed for {project!r}; "
+              f"paused-topic filter skipped: {e}", file=sys.stderr)
+        return set()
+    rows = ((resp or {}).get("data") or {}).get("topics") or []
+    return {normalize(r.get("topic") or "")
+            for r in rows if (r.get("status") or "active") != "active"}
+
+
 def build_bank(project, limit=None, include_seeds=True, window_days=30):
     """Proven queries first, then config seeds not already covered (deduped by
-    normalized core). Capped to `limit` if given."""
+    normalized core). Capped to `limit` if given.
+
+    The topic universe (project_search_topics) is authoritative over trailing
+    stats (2026-09-22): a proven query whose topic was paused/excluded is
+    dropped even while its 30d stats still rank. Without this, a retired topic
+    keeps re-proving itself forever and, with proven filling the search cap,
+    a repositioning's new seed topics can never run."""
     proven = fetch_proven(project, window_days=window_days)
+    inactive = _inactive_topic_cores(project)
+    if inactive:
+        dropped = [b["query"] for b in proven if normalize(b["query"]) in inactive]
+        if dropped:
+            print(f"reddit_query_bank: dropped {len(dropped)} proven quer"
+                  f"{'y' if len(dropped) == 1 else 'ies'} from paused/excluded "
+                  f"topics for {project!r}: {dropped}", file=sys.stderr)
+            proven = [b for b in proven if normalize(b["query"]) not in inactive]
     seen = {normalize(b["query"]) for b in proven}
     bank = list(proven)
     if include_seeds:
-        for s in seeds_from_config(project):
+        # Shuffled (2026-09-22): seeds used to append in universe order, so
+        # with the cap the SAME first unproven seed took the only free slot
+        # every run and the rest were never tried. Random order rotates the
+        # exploration slot across the whole unproven tail run to run.
+        seeds = seeds_from_config(project)
+        random.shuffle(seeds)
+        for s in seeds:
             core = normalize(s["query"])
             if not core or core in seen:
                 continue
