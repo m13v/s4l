@@ -215,6 +215,10 @@ def build_candidates(config):
     thread_blocked = load_thread_blocked_subs(config)
     candidates = []
     for p in config.get("projects", []):
+        # Project-level archive flag wins over the per-lane flag: an archived
+        # project (enabled: false) must not post from ANY lane.
+        if p.get("enabled", True) is False:
+            continue
         t = p.get("threads") or {}
         if not t.get("enabled"):
             continue
