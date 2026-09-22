@@ -97,6 +97,10 @@ def angle_recency(project_recents, angle_text):
 def build_candidates(config, project_recents):
     candidates = []   # (project_dict, angle_text, floor_days, last_used_days_ago_or_None)
     for p in config.get("projects", []):
+        # Project-level archive flag wins over the per-lane flag: an archived
+        # project (enabled: false) must not post from ANY lane.
+        if p.get("enabled", True) is False:
+            continue
         tt = p.get("twitter_threads") or {}
         if not tt.get("enabled"):
             continue
