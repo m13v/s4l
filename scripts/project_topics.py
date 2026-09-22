@@ -156,13 +156,69 @@ def _bootstrap_from_config(name: str) -> int:
     return seeded
 
 
+def _sync_new_config_topics(name: str, active: List[str]) -> List[str]:
+    """Additive config->DB sync (2026-09-22). Before this, config.json
+    search_topics only reached the DB on the zero-active-rows first bootstrap;
+    topics ADDED to config later were silently ignored forever (this is how
+    Sundial's 09-11 math seeds never ran). Now any config topic the DB has
+    NEVER seen (in any status) is inserted as source='seed'/active on read.
+
+    Paused/excluded rows stay authoritative: a topic that still lingers in
+    config but was deliberately paused in the DB is known (status=all check)
+    and is NOT re-inserted or reactivated. Costs nothing in steady state: the
+    status=all read fires only when config carries a topic missing from the
+    active set. Returns the newly inserted topics ([] on any failure)."""
+    if os.environ.get("S4L_NO_TOPIC_AUTOSEED") == "1":
+        return []
+    missing = [t for t in _config_topics_for(name) if t not in set(active)]
+    if not missing:
+        return []
+    try:
+        from http_api import api_get, api_post
+        resp = api_get(
+            "/api/v1/project-search-topics",
+            query={"project": name, "status": "all"},
+        )
+    except Exception as e:
+        sys.stderr.write(
+            f"[project_topics] config-sync skipped project={name!r}: {e}\n"
+        )
+        return []
+    rows = ((resp or {}).get("data") or {}).get("topics") or []
+    known = {(r.get("topic") or "").strip() for r in rows}
+    inserted: List[str] = []
+    for topic in missing:
+        if topic in known:
+            continue  # exists paused/excluded (or raced in): leave it alone
+        try:
+            api_post(
+                "/api/v1/project-search-topics",
+                body={"project": name, "topic": topic,
+                      "source": "seed", "status": "active",
+                      "notes": "config->DB additive sync"},
+            )
+            inserted.append(topic)
+        except Exception as e:
+            sys.stderr.write(
+                f"[project_topics] config-sync FAILED project={name!r} "
+                f"topic={topic!r}: {e}\n"
+            )
+    if inserted:
+        sys.stderr.write(
+            f"[project_topics] config-sync added {len(inserted)} new topic(s) "
+            f"for project={name!r}: {inserted}\n"
+        )
+    return inserted
+
+
 def topics_for_project(name: str) -> List[str]:
     """Active topics for one project (DB-backed, process-cached, self-healing).
 
     On the first read where the DB has no active topics but config.json carries
     a search_topics[] seed, the seed is mirrored into the DB once and re-read,
     so adding a project to config.json is enough to make it run. After that the
-    DB is the single living source of truth."""
+    DB is the living source of truth for topic STATUS (pausing/excluding), while
+    topics newly ADDED to config keep flowing in via _sync_new_config_topics."""
     if not name:
         return []
     key = name.strip()
@@ -173,6 +229,8 @@ def topics_for_project(name: str) -> List[str]:
         _BOOTSTRAP_ATTEMPTED.add(key)
         if _bootstrap_from_config(key) > 0:
             topics = _fetch_active_topics(key)
+    else:
+        topics = topics + _sync_new_config_topics(key, topics)
     _CACHE[key] = topics
     return topics
 
