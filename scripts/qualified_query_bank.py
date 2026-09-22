@@ -122,6 +122,55 @@ def _fetch_rows(project=None):
     return list(data.get("rows") or [])
 
 
+_INACTIVE_TOPIC_CACHE: dict = {}
+
+
+def _inactive_topics_lc(project: str) -> set:
+    """Lowercased PAUSED/EXCLUDED topics for a project (process-cached), or an
+    empty set when the read fails so the filter degrades to a no-op. The topic
+    universe (project_search_topics) is authoritative over trailing stats
+    (2026-09-22): pausing a topic must pull its queries out of every bank
+    layer immediately, not after the 30d stats window fades."""
+    if project in _INACTIVE_TOPIC_CACHE:
+        return _INACTIVE_TOPIC_CACHE[project]
+    try:
+        resp = api_get(
+            "/api/v1/project-search-topics",
+            {"project": project, "status": "all"},
+        )
+    except SystemExit as e:
+        print(f"qualified_query_bank: topic-status read failed for "
+              f"{project!r}; paused-topic filter skipped: {e}", file=sys.stderr)
+        _INACTIVE_TOPIC_CACHE[project] = set()
+        return _INACTIVE_TOPIC_CACHE[project]
+    rows = ((resp or {}).get("data") or {}).get("topics") or []
+    _INACTIVE_TOPIC_CACHE[project] = {
+        (r.get("topic") or "").strip().lower()
+        for r in rows if (r.get("status") or "active") != "active"
+    }
+    return _INACTIVE_TOPIC_CACHE[project]
+
+
+def _drop_inactive_topic_rows(rows: list, project: str, layer: str) -> list:
+    """Drop bank-shaped rows whose search_topic is paused/excluded. Rows with
+    no topic attribution (legacy) are kept: this is a blocklist, not an
+    allowlist, so unknown topics never get silently filtered."""
+    inactive = _inactive_topics_lc(project)
+    if not inactive:
+        return rows
+    kept, dropped = [], []
+    for r in rows:
+        t = (r.get("search_topic") or r.get("topic") or "").strip().lower()
+        (dropped if t and t in inactive else kept).append(r)
+    if dropped:
+        topics = sorted({(r.get("search_topic") or r.get("topic") or "").strip()
+                         for r in dropped})
+        print(f"qualified_query_bank: dropped {len(dropped)} {layer} quer"
+              f"{'y' if len(dropped) == 1 else 'ies'} from paused/excluded "
+              f"topics for {project!r}: {topics}", file=sys.stderr)
+    return kept
+
+
 def build_bank(project, min_likes=1, min_clicks=1, limit=None):
     rows = _fetch_rows(project)
     # group by normalized core
@@ -167,6 +216,7 @@ def build_bank(project, min_likes=1, min_clicks=1, limit=None):
             "posts": c["posts"],
         })
 
+    bank = _drop_inactive_topic_rows(bank, project, "proven")
     # rank by clicks desc, then likes desc — so --limit keeps the strongest
     bank.sort(key=lambda b: (b["clicks"], b["likes"], b["posts"]), reverse=True)
     if limit:
@@ -195,7 +245,8 @@ def fetch_invented_queries(project: str, min_supply: int = INVENT_MIN_SUPPLY,
               f"{project!r}: {e}", file=sys.stderr)
         return []
     data = (resp or {}).get("data") or {}
-    return list(data.get("queries") or [])
+    return _drop_inactive_topic_rows(
+        list(data.get("queries") or []), project, "invented")
 
 
 def merge_invented(bank: list[dict], invented: list[dict]) -> list[dict]:
@@ -254,7 +305,7 @@ def fetch_seed_queries(project: str, limit: int = SEED_FETCH_LIMIT) -> list[dict
             "search_topic": (r.get("topic") or "").strip(),
             "likes": 0, "clicks": 0, "posts": 0,
         })
-    return out
+    return _drop_inactive_topic_rows(out, project, "seed")
 
 
 def backfill_seed(bank: list[dict], seed: list[dict],
