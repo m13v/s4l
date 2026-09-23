@@ -301,10 +301,19 @@ def _load_config():
 def projects_json(lane=None, only_project=None):
     """The ALL_PROJECTS_JSON block: per-project drafting config as a JSON
     string. lane='personal_brand' emits ONLY the persona project through the
-    whitelist; otherwise every project through the ops denylist.
+    whitelist; otherwise every ROUTABLE project through the ops denylist.
     only_project (reddit lane: one project per draft call) narrows the
     promotion output to that single project's entry. Returns '{}' on any
-    failure, mirroring the shell's `|| echo "{}"`."""
+    failure, mirroring the shell's `|| echo "{}"`.
+
+    Routable (2026-09-23): the promotion roster excludes persona entries and
+    archived projects (enabled: false). ALL_PROJECTS_JSON doubles as the prep
+    step's PROJECT ROUTING target list ("...unless the thread content clearly
+    better fits another project"), so an unfiltered roster let a promotion
+    cycle re-route a candidate onto the persona while the personal_brand lane
+    was switched OFF (observed 2026-09-23: a promotion-lane card posted as
+    PersonalBrand), or onto an archived project. The persona is reachable
+    ONLY via the personal_brand lane's whitelist branch above."""
     lane = lane if lane is not None else os.environ.get("S4L_ACTIVE_LANE", "")
     try:
         config = _load_config()
@@ -318,6 +327,10 @@ def projects_json(lane=None, only_project=None):
         out = {}
         for p in projects:
             if only_project and p.get("name") != only_project:
+                continue
+            if not only_project and (
+                p.get("persona") is True or p.get("enabled", True) is False
+            ):
                 continue
             out[p["name"]] = {k: v for k, v in p.items() if k not in _OPS_KEYS}
         return json.dumps(out, indent=2)
