@@ -13,8 +13,10 @@ Design constraints, deliberately:
   own clicks. It is purely cosmetic.
 - CSP-safe: the overlay is built with createElement + element.style.<prop> +
   textContent only. No innerHTML-with-style-attributes and no injected <style>
-  tag, both of which x.com's CSP can refuse. The "pulse" + "updated Ns ago"
-  ticker are driven by a JS setInterval, not CSS @keyframes.
+  tag, both of which x.com's CSP can refuse.
+- Static: no timers, no animation, no backdrop blur. The harness window is
+  kept painting even when hidden (--disable-backgrounding-occluded-windows),
+  so anything animated here redraws at display rate around the clock.
 - Survives navigation two ways: (1) Playwright add_init_script registers the
   builder on the browser context so every new document re-creates it, and
   (2) the watch loop re-asserts it via evaluate every couple seconds.
@@ -29,15 +31,14 @@ the locked pipeline scripts. Drive it from the CLI:
                                                         # log into the overlay
 
 `watch` is the always-on mode: it tails the newest skill/logs/twitter-cycle-*.log
-and pushes a friendly one-liner into the overlay as each step lands, with a
-heartbeat so even idle-looking moments read as alive. If the harness Chrome is
-down it sleeps and retries; it never crashes the pipeline.
+and repaints the overlay only when the status line changes or a page
+navigates. If the harness Chrome is down or has no http tab it backs off and
+retries; it never crashes the pipeline.
 """
 
 from __future__ import annotations
 
 import fcntl
-import glob
 import json
 import os
 import re
@@ -86,9 +87,7 @@ REASSURE = (
 
 # --- the page-side overlay builder ------------------------------------------
 # `_BODY` defines window.__s4lPaint(payload): idempotently creates the overlay
-# DOM, then updates its text. A lone setInterval drives both the pulse and the
-# "updated Ns ago" ticker so the overlay always looks alive between status
-# pushes. Built with createElement + element.style.<prop> + textContent only
+# DOM, then updates its text. Built with createElement + element.style.<prop> + textContent only
 # (CSP-safe; no <style> tag, no innerHTML-with-style-attrs). pointer-events is
 # none so the overlay can never intercept the automation's own clicks.
 _BODY = r"""
@@ -114,7 +113,6 @@ window.__s4lAnnounce = function(payload){
     bs.zIndex="2147483647"; bs.display="flex";
     bs.alignItems="center"; bs.justifyContent="center";
     bs.background="rgba(0,0,0,0.55)";
-    bs.backdropFilter="blur(3px)"; bs.webkitBackdropFilter="blur(3px)";
     // The ENTIRE modal (backdrop + card + text) is pointer-events:none so that a
     // bot click during this one-time window always passes through to the page,
     // even if the user never clicks OK. The OK button is the ONLY element that
@@ -184,7 +182,6 @@ window.__s4lPaint = function(payload){
       s.background="rgba(15,15,17,0.92)"; s.color="#fff";
       s.font="13px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
       s.boxShadow="0 6px 22px rgba(0,0,0,0.35)"; s.border="1px solid rgba(255,255,255,0.12)";
-      s.backdropFilter="blur(6px)"; s.webkitBackdropFilter="blur(6px)";
 
       var head = mk("div", root); head.style.display="flex"; head.style.alignItems="center"; head.style.gap="8px";
       head.style.cursor="move"; head.style.userSelect="none"; head.style.webkitUserSelect="none";
@@ -225,19 +222,13 @@ window.__s4lPaint = function(payload){
         document.addEventListener("mouseup", function(){ drag = null; });
       })();
 
-      if(st._iv) clearInterval(st._iv);
-      st._iv = setInterval(function(){
-        try{
-          var dt = Math.max(0, Math.round((Date.now()-st.ts)/1000));
-          st._ago.textContent = dt < 1 ? "now" : (dt < 60 ? dt+"s ago" : Math.round(dt/60)+"m ago");
-          var stale = dt > 90;                       // fade the dot once activity goes quiet
-          var phase = (Date.now()/650) % 2;
-          st._dot.style.opacity = stale ? "0.3" : (phase < 1 ? "1" : "0.35");
-        }catch(e){}
-      }, 250);
     }
+    // Documents painted by an older overlay version still run its 250ms ticker.
+    if(st._iv){ clearInterval(st._iv); st._iv = null; st._dot.style.opacity = "1"; }
     st._title.textContent = st.title;
     st._status.textContent = st.status;
+    var d = new Date(st.ts);
+    st._ago.textContent = "since " + ("0"+d.getHours()).slice(-2) + ":" + ("0"+d.getMinutes()).slice(-2);
   } catch(e) { /* overlay is best-effort, never throw into the page */ }
 };
 """
@@ -277,7 +268,14 @@ class Harness:
     def __enter__(self):
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.connect_over_cdp(self.cdp_url, timeout=5000)
+        try:
+            self._browser = self._pw.chromium.connect_over_cdp(self.cdp_url, timeout=5000)
+        except Exception:
+            # A started-but-unstopped Playwright leaks its node driver and leaves
+            # its asyncio loop running, so the next start() fails with "Sync API
+            # inside the asyncio loop".
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *exc):
@@ -291,6 +289,12 @@ class Harness:
                 self._pw.stop()
         except Exception:
             pass
+
+    def connected(self) -> bool:
+        try:
+            return bool(self._browser) and self._browser.is_connected()
+        except Exception:
+            return False
 
     def _pages(self):
         pages = []
@@ -323,10 +327,12 @@ class Harness:
             except Exception:
                 pass
 
-    def paint(self, title: str, reassure: str, status: str) -> int:
-        """Paint/refresh the overlay on every live page. Returns pages touched."""
+    def paint(self, title: str, reassure: str, status: str, ts_ms: int | None = None) -> int:
+        """Paint/refresh the overlay on every live page. Returns pages touched.
+        ts_ms is when the status last changed (defaults to now)."""
         n = 0
-        payload = {"title": title, "reassure": reassure, "status": status, "ts": int(time.time() * 1000)}
+        payload = {"title": title, "reassure": reassure, "status": status,
+                   "ts": ts_ms or int(time.time() * 1000)}
         for p in self._pages():
             try:
                 p.evaluate(PAINT_EXPR, payload)
@@ -363,14 +369,35 @@ def _safe_mtime(p: str) -> float:
         return 0.0
 
 
+_LOG_NAME_RE = re.compile(r"^twitter-cycle-\d{4}-\d{2}-\d{2}_\d{6}\.log$")
+_log_cache: dict = {"dir_mtime": None, "newest": None}
+
+
 def _latest_cycle_log() -> Path | None:
-    files = glob.glob(str(LOG_DIR / "twitter-cycle-*.log"))
-    if not files:
+    # LOG_DIR holds tens of thousands of cycle logs, so stat-ing each one every
+    # tick is expensive. Names embed the start time (lexicographic max = newest),
+    # and the directory's mtime changes only when a log is created or removed,
+    # so rescan only then.
+    try:
+        dir_mtime = os.stat(LOG_DIR).st_mtime
+    except OSError:
         return None
-    newest = max(files, key=_safe_mtime)
-    # The winner could STILL have been deleted between selection and use; the
-    # caller (_current_status) stats it again, so hand back None if it's gone.
-    return Path(newest) if os.path.exists(newest) else None
+    if dir_mtime != _log_cache["dir_mtime"]:
+        newest = None
+        try:
+            with os.scandir(LOG_DIR) as it:
+                for e in it:
+                    if _LOG_NAME_RE.match(e.name) and (newest is None or e.name > newest):
+                        newest = e.name
+        except OSError:
+            return None
+        _log_cache.update(dir_mtime=dir_mtime, newest=newest)
+    if not _log_cache["newest"]:
+        return None
+    # The winner could have been deleted since the scan; the caller stats it
+    # again, so hand back None if it's gone.
+    p = LOG_DIR / _log_cache["newest"]
+    return p if p.exists() else None
 
 
 _RE_SCAN = re.compile(r"project='([^']+)'\s+q=(['\"])(.*?)\2\s+kept=(\d+)")
@@ -391,7 +418,7 @@ def _prettify(line: str) -> str | None:
         kept_txt = f" \u00b7 kept {kept}" if kept != "0" else ""
         return f"Scanning X \u00b7 {proj} \u00b7 \u201c{query}\u201d{kept_txt}"
     # A few recognizable phase markers; otherwise show the trimmed tail.
-    if "posting" in low or "posted reply" in low:
+    if ("posting" in low and "without posting" not in low and "not posting" not in low) or "posted reply" in low:
         return "Posting reply on X\u2026"
     if "drafting" in low or "draft" in low and "cycle" not in low:
         return "Drafting replies\u2026"
@@ -517,7 +544,12 @@ def cmd_watch(interval: float = 2.0) -> int:
 
     threading.Thread(target=_watchdog, daemon=True).start()
 
+    # Backoff while there is nothing to paint (harness Chrome down, or no http
+    # tab): reconnecting every tick spawned a new Playwright node driver each time.
+    IDLE_BACKOFF_SEC = 30.0
     last_status = None
+    status_ts = int(time.time() * 1000)
+    painted = None  # (status, page urls) as of the last paint
     h: Harness | None = None
     registered = False
     try:
@@ -529,21 +561,33 @@ def cmd_watch(interval: float = 2.0) -> int:
                 status = _current_status()
             except Exception:
                 status = "Working\u2026"
+            if status != last_status:
+                status_ts = int(time.time() * 1000)
+            sleep_for = interval
             try:
                 if h is None:
                     h = Harness().__enter__()
                     registered = False
+                    painted = None
+                if not h.connected():
+                    raise RuntimeError("harness Chrome disconnected")
                 if not registered:
                     # Re-register init on each (re)connect so fresh tabs inherit it.
                     h.register_init(TITLE, REASSURE, status)
                     registered = True
-                # Repaint every tick even when text is unchanged: the timestamp
-                # reset keeps the heartbeat fresh so the dot never looks dead.
-                if h.paint(TITLE, REASSURE, status) == 0:
-                    # No live page (all tabs closed/navigating) -> drop & retry.
-                    raise RuntimeError("no live page")
+                pages = h._pages()
+                if not pages:
+                    # No http tab (closed or mid-navigation) is a normal idle state:
+                    # keep the connection and check back slowly.
+                    sleep_for = IDLE_BACKOFF_SEC
+                else:
+                    # A navigation replaces the document with the init script's
+                    # seed text, so repaint on URL changes as well as status changes.
+                    sig = (status, tuple(sorted(p.url for p in pages)))
+                    if sig != painted and h.paint(TITLE, REASSURE, status, status_ts) > 0:
+                        painted = sig
             except Exception:
-                # Harness down or transient CDP hiccup; tear down and retry next tick.
+                # Harness down or CDP hiccup; tear down and retry after a backoff.
                 if h is not None:
                     try:
                         h.__exit__(None, None, None)
@@ -551,10 +595,11 @@ def cmd_watch(interval: float = 2.0) -> int:
                         pass
                     h = None
                 registered = False
+                sleep_for = IDLE_BACKOFF_SEC
             if status != last_status:
                 print(f"[{time.strftime('%H:%M:%S')}] {status}")
                 last_status = status
-            time.sleep(interval)
+            time.sleep(sleep_for)
     except KeyboardInterrupt:
         print("\nstopping watch; clearing overlay")
     finally:
