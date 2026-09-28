@@ -1258,6 +1258,12 @@ for q in queries:
         dt = time.time() - t0
         print(f'  err project={project!r}  q={query[:50]!r}  in {dt:.1f}s  {type(e).__name__}: {e}', flush=True)
 PY
+    # Park the X tab now: DRAFT_ONLY and empty-plan cycles exit before Phase 2b,
+    # so twitter_browser.py's at-exit parker never runs and the tab would sit on
+    # a live x.com search (scripts + service worker running) until the next
+    # cycle. robots.txt, never about:blank (focus steal; see browser_lifecycle.py).
+    [ -z "${S4L_NO_TAB_PARK:-}" ] && python3 -c "import sys; sys.path.insert(0, sys.argv[1]); from browser_lifecycle import park_tabs; park_tabs(sys.argv[2], ('x.com', 'twitter.com'), 'https://x.com/robots.txt', 'twitter_scan')" \
+        "$REPO_DIR/scripts" "${TWITTER_CDP_URL:-http://127.0.0.1:9555}" 2>&1 | tee -a "$LOG_FILE" || true
 fi
 rm -f "$QUERIES_TMP"
 
