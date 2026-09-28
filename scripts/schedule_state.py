@@ -89,11 +89,6 @@ def _registry_worker_recs(by_id):
             return recs
     return None
 
-# A worker task whose lastRunAt is within this many seconds counts as "firing".
-# 7 min tolerates the host's per-task throttle + Claude restart gaps without a
-# false "not scheduled".
-FIRING_WINDOW = 420
-
 # --- Stall thresholds (single source of truth) --------------------------------
 # The longest a fully healthy drain can take end to end: a draft job can wait
 # minutes for a worker slot (per-minute scheduler cadence, workers busy on other
@@ -116,6 +111,15 @@ RUNNING_STALL_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
 # is the only timer that spans claim→die→requeue churn loops, which reset the two
 # per-state timers above on every transition while nothing ever completes.
 DRAFT_STUCK_SECONDS = HEALTHY_DRAIN_MAX_SECONDS
+# A worker task whose lastRunAt is within this many seconds counts as "firing".
+# The host scheduler serializes runs of one task (overlap guard), so lastRunAt
+# stays frozen for the whole duration of an in-flight run. A healthy draft run
+# can take up to HEALTHY_DRAIN_MAX_SECONDS, so the window must be at least that
+# long; the old 7-minute window flipped tasks_scheduled to "stalled" mid-run on
+# every 8-15 minute drain (operator Mac, 2026-09-28: checklist showed 8/10 with
+# the worker alive and firing between jobs). A genuinely wedged scheduler still
+# trips once the drain budget lapses.
+FIRING_WINDOW = HEALTHY_DRAIN_MAX_SECONDS
 
 # Grace for a JUST-scheduled task that hasn't fired yet. When the user runs
 # "Set up draft schedule", create_scheduled_task registers both worker tasks
