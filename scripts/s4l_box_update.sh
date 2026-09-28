@@ -29,10 +29,31 @@ set -euo pipefail
 # `*social-autoposter` dir that actually carries a manifest.json.
 APP_SUPPORT="$HOME/Library/Application Support"
 EXT_DIR=""
-for d in "$APP_SUPPORT"/Claude*/"Claude Extensions"/*social-autoposter; do
-  [ -f "$d/manifest.json" ] || continue
-  if [ -z "$EXT_DIR" ] || [ "$d" -nt "$EXT_DIR" ]; then EXT_DIR="$d"; fi
-done
+# LIVE profile first (2026-09-28): on a multi-profile machine (account rotator:
+# Claude, Claude-mediar, Claude-mddy, ...) every profile keeps its OWN copy of
+# the extension, and "newest mtime" is just the profile updated most recently,
+# not the one Claude is running right now. The operator Mac sat on 1.7.7-rc.4
+# in the live Claude-mediar profile for two months while every update landed
+# in Claude-mddy, and this script kept printing "already on latest". Prefer
+# the extension dir under a RUNNING Claude's --user-data-dir (no flag == plain
+# "Claude"); fall back to the newest-mtime scan only when nothing is running.
+# Mirrors mcp/menubar/s4l_menubar.py::_ext_dir; keep the two in sync.
+while IFS= read -r line; do
+  case "$line" in *"/Claude.app/Contents/MacOS/Claude"*) ;; *) continue ;; esac
+  udd="$(printf '%s' "$line" | sed -n 's/.*--user-data-dir=\(.*\)$/\1/p' | sed 's/ --.*$//')"
+  root="${udd:-$APP_SUPPORT/Claude}/Claude Extensions"
+  for d in "$root"/*social-autoposter; do
+    [ -f "$d/manifest.json" ] || continue
+    EXT_DIR="$d"; break
+  done
+  [ -n "$EXT_DIR" ] && break
+done < <(ps -axo command 2>/dev/null)
+if [ -z "$EXT_DIR" ]; then
+  for d in "$APP_SUPPORT"/Claude*/"Claude Extensions"/*social-autoposter; do
+    [ -f "$d/manifest.json" ] || continue
+    if [ -z "$EXT_DIR" ] || [ "$d" -nt "$EXT_DIR" ]; then EXT_DIR="$d"; fi
+  done
+fi
 # Last-resort fallback to the historical path so behavior is unchanged on old boxes.
 [ -n "$EXT_DIR" ] || EXT_DIR="$APP_SUPPORT/Claude/Claude Extensions/local.mcpb.m13v.social-autoposter"
 PY="/usr/bin/python3"
