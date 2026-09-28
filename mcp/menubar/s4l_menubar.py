@@ -1690,6 +1690,30 @@ class S4LMenuBar(rumps.App):
         verification on such machines.
         """
         app_support = os.path.expanduser("~/Library/Application Support")
+        # LIVE profile first (2026-09-28): on a multi-profile machine (account
+        # rotator: Claude, Claude-mediar, Claude-mddy, ...) every profile keeps
+        # its OWN copy of the extension, and "newest mtime" is simply the
+        # profile that was updated most recently, not the one Claude is
+        # running right now. The operator Mac sat on 1.7.7-rc.4 in the live
+        # Claude-mediar profile for two months while every update landed in
+        # Claude-mddy, and the updater kept reporting "already on latest".
+        # Prefer the extension dir under a RUNNING Claude's --user-data-dir
+        # (default profile == plain "Claude"); fall back to the newest-mtime
+        # scan only when no Claude instance is running. Mirrors
+        # scripts/s4l_box_update.sh; keep the two in sync.
+        for udd in S4LMenuBar._claude_user_data_dirs():
+            root = os.path.join(udd or os.path.join(app_support, "Claude"),
+                                "Claude Extensions")
+            try:
+                names = sorted(os.listdir(root))
+            except OSError:
+                continue
+            for name in names:
+                if not name.endswith("social-autoposter"):
+                    continue
+                d = os.path.join(root, name)
+                if os.path.exists(os.path.join(d, "manifest.json")):
+                    return d
         best, best_mtime = None, -1.0
         for root in glob.glob(os.path.join(app_support, "Claude*", "Claude Extensions")):
             try:
