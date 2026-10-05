@@ -1,0 +1,17 @@
+here is a story.
+
+i was 52. twenty four years authenticating paintings for an auction house. a canvas comes in with a family story and a dusty frame, and you stand close enough to smell it. the brushwork, the way the paint sits on the weave, how a hand hesitates on a horizon. people think it's a lab job. it isn't. it's an eye, and a signature at the bottom of a certificate that says this is real.
+
+when the house started testing a model trained on high resolution scans of brushstrokes, they asked me to write a short piece for the catalog. i put it in print: a model can't see a hand. it sees texture. a forger can fake texture. only an eye that has looked at ten thousand canvases knows when the hand is wrong. they ran it on page four.
+
+that winter they pointed the model at our own archive. every canvas we had certified in twenty years. it flagged eleven. one of them was a small river landscape i signed for in my second year. i remembered it. i had been proud of it. the lab took a sample from the sky. titanium white, the kind nobody could buy until decades after the painter died.
+
+i went down to the archive basement and pulled the file myself. the dehumidifier hummed. there was my signature, younger, rounder, very sure. i stood there holding it for a long time. the model hadn't beaten me that week. it had beaten me eleven years ago, and i'd been the last one to find out.
+
+so my work changed. every canvas goes under the scanner first now. it reads strokes faster and colder than i ever did. i do the part it can't: tracing the provenance, calling the family, sitting with a widow who believes her husband's painting is real, deciding what goes to the lab and what gets said out loud.
+
+i called the buyer of the river landscape myself. he was kinder than i deserved.
+
+the lesson: my eye wasn't the product. my signature was. and a signature only means something if you let someone check it.
+
+stop defending the eye. start auditing the signature.
