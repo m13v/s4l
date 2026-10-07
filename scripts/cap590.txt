@@ -1,0 +1,19 @@
+here is a story.
+
+i was 41. 14 years as the video analyst at a second division football club. every match, ours and theirs, broken down by hand. every pass, every press, every set piece tagged in a laptop at the back of the team bus.
+
+on a coaching podcast the host asked if ai would take my job. i said, on the record, "software can count passes. it can't see a pattern." the host laughed and said that was the quote of the episode.
+
+last season the club trialled an auto tagging tool for a month. it went through our next opponent's last six matches overnight. one line in its report: their left back drifts inside after every throw in on his side, leaving the channel open for about four seconds.
+
+i had watched all six of those matches. some twice. i went back to my own notes from those games and there it was, in my clips, in my tags, and i had never put it together. we scored from that channel in the 70th minute that weekend.
+
+i sat in the analysis room after the match, lights off, the replay paused on the throw in. coffee gone cold on the desk. i had spent fourteen years counting everything and the model had seen the one thing that mattered.
+
+so my work changed. the tool tags every frame now. i don't log passes anymore. i watch what it flags, throw out the noise, and pick the three clips the manager shows the players the night before. three, not thirty. players remember three.
+
+the lesson: watching everything was never the job. deciding what the team remembers is the job.
+
+i said software can't see a pattern. it can. it just can't decide which one a tired 22 year old will remember on a saturday.
+
+stop logging. start editing.
