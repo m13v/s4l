@@ -1,0 +1,17 @@
+here is a story.
+
+i was 47. eighteen years reading x-ray images at an airport checkpoint. a bag every few seconds, gray and orange and green shapes sliding across the screen, and me deciding which ones get pulled for a hand search. you learn the shapes. laptops, chargers, the coiled wire of a curling iron, the dense blob of a jar of honey somebody's grandmother packed.
+
+when the airport started piloting a detection model on the scanners, i said it at a union meeting, with the minutes running: "it sees shapes. it can't see intent. you need a person who has watched a million bags."
+
+my supervisor took that personally, in a good way. she ran a blind test. one week of bag images, half flagged by me, half flagged by the model, every label stripped off. then she put the stack in front of the whole crew and asked one question: which flags are the veteran's?
+
+they picked the model's flags as mine. clean, calm, every pull justified. mine they called the new software, too jumpy, pulling bags for shapes that turned out to be a thermos and a hair dryer. a guy i trained myself said, out loud, "the machine's paranoid."
+
+i sat in the break room at four in the morning with the vending machine humming and a coffee i forgot to drink. eighteen years, and the people who knew my work best couldn't tell it from the machine's, except to guess i was the worse one.
+
+so i changed how i work. the model reads every bag now. i take the ones it holds, and i do the part it can't: i walk over, i open the bag in front of the passenger, i talk to them. the nervous ones, the confused ones, the traveler with a dead mother's jewelry in a sock. that conversation was always the job. the screen was just how i got there.
+
+the lesson: when your own crew can't tell your work from the machine's, the looking was never what made you good.
+
+stop staring at the screen. start talking to the person.
