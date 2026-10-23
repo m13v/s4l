@@ -1,0 +1,21 @@
+here is a story.
+
+i was 44. sixteen years dating timber by its tree rings. a core from a barn beam, a panel from behind a painting, a cello back. i'd measure the rings to a hundredth of a millimeter and slide the sequence along a master chronology until it locked. the good matches you can feel. the wood tells you the year.
+
+then the lab licensed a matching model. at the methods meeting, in the minutes, i said: "it will find the statistics. it will not read the wood. on short sequences, missing rings, false rings, it will date confidently and date wrong."
+
+so they ran us blind for a season. every sample got a date from me and a date from the model. plus one extra column i proposed myself: how sure are you. i wrote a number on every call.
+
+on dates, we tied. i did not expect that. i could have lived with that.
+
+the confidence column was the part i couldn't live with. when the model said 95, it was right 19 times in 20. when i wrote certain, i was right 4 times in 5. and my certain calls clustered exactly where i'd warned about: short sequences, under sixty rings. the samples with the least data were the ones i felt surest about. the model had marked most of those undated.
+
+the director put both curves on one slide. mine bent the wrong way.
+
+i stood in the sample store, where it's kept cold, for a long time. sixteen years of being about as right as a machine, and sixteen years of not knowing which of my own calls to doubt. the wood never told me the year. it told me a story, and i had learned to believe stories.
+
+now the model dates everything. anything it flags under threshold comes to me. anything i mark certain with under sixty rings goes back for a second run. the lab went from four of us to me. i'm the appeals desk for my own old weakness.
+
+you don't lose to the machine on being right. you lose on knowing when you're wrong.
+
+stop tracking your hit rate. start tracking what your "certain" is worth.
