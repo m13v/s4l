@@ -226,10 +226,15 @@ def _upsert_corpus_section(corpus_path: Path, section: str) -> str:
 
 
 def _is_hand_written(proj: dict) -> bool:
-    """examples present but never stamped by us = a human typed them."""
+    """examples present but never stamped by us = a human typed them.
+    A curated examples_good set counts too: the account-wide scan is the
+    user's general X register, which would override a project's own voice."""
     voice = proj.get("voice")
-    return (isinstance(voice, dict) and bool(voice.get("examples"))
-            and not voice.get("examples_scanned_at"))
+    if not isinstance(voice, dict):
+        return False
+    if voice.get("examples_good"):
+        return True
+    return bool(voice.get("examples")) and not voice.get("examples_scanned_at")
 
 
 def _set_examples(proj: dict, scan: dict, top: int, min_chars: int,
