@@ -34,6 +34,28 @@ Use the project's own data sources, not Fazm's:
 - **PostHog**: `config.json[project].posthog.project_id` if available.
 - **Sentry / logs**: project-specific. If you don't have access, say so.
 
+**Vipassana (vipassana.cool) match questions.** Neon Postgres, repo
+`~/vipassana-cool` (`src/lib/db.ts`). Before telling anyone their match
+"ended" or that they are "back in the pool", check whether the pair is
+actually still sitting:
+- `waitlist_entries` (person, `status`), `matches` (pair, `status`,
+  `person_a_id`/`person_b_id`, `calendar_rsvp_a/b`), `vipassana_activity_log`
+  (who changed what, `triggered_by`).
+- **`meet_clicks`** (`match_id`, `person_id`, `clicked_at`) is the ground
+  truth for "are they still meeting". Recent clicks from both people on an
+  ended match mean the system ended a live pair: treat it as our bug, not as
+  the visitor quitting.
+
+```sql
+SELECT person_id, COUNT(*), MAX(clicked_at) FROM meet_clicks
+WHERE match_id = '<match id>' GROUP BY person_id;
+```
+
+- Never tell a visitor "you're back in the pool, you'll be paired straight
+  away" while their last partner is still clicking in. A `ready` person gets
+  auto-matched with a stranger, no yes/no step. Ask first whether they're
+  still sitting with that partner, and flag it to Matt.
+
 For bugs: investigate FIRST, reply with findings second. Do NOT reply
 "looking into it" without context — you have time inside the 20-min spawn.
 
