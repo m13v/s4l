@@ -197,3 +197,29 @@ persona_corpus.txt
 last_profile_scan.json
 .subreddit_bans_cache.json
 .cache/
+
+# Per-post one-off content (captions, media_posts insert/finalize scripts, clip pickers).
+# Organic post captions and prompt notes must not land in this public repo.
+scripts/cap[0-9]*.txt
+scripts/caption[0-9]*.txt
+scripts/post[0-9]*_caption.txt
+scripts/p[0-9]*/
+scripts/insert_post*.py
+scripts/insert_[0-9]*.py
+scripts/insert[0-9]*.py
+scripts/ins[0-9]*.py
+scripts/finalize_post_*.py
+scripts/tlh_pick_*.py
+scripts/tlh_freshness_*.py
+scripts/tlh_fresh.py
+scripts/tlh_stale.py
+scripts/fresh[0-9]*.py
+scripts/hist[0-9]*.py
+scripts/q[0-9]*.py
+scripts/show[0-9]*.py
+scripts/stale[0-9]*.py
+scripts/stale_[0-9]*.py
+scripts/stale_classes_*.py
+scripts/stale_clips_*.py
+scripts/r[0-9]*.py
+scripts/w[0-9]*.py
