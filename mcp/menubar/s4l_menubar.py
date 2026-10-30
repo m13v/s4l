@@ -894,6 +894,7 @@ class S4LMenuBar(rumps.App):
             except Exception:
                 user_data_dirs = None
             self._quit_claude_and_wait()
+            self._prune_session_index()
             self._relaunch_claude(user_data_dirs)
 
         threading.Thread(target=work, daemon=True).start()
@@ -933,6 +934,7 @@ class S4LMenuBar(rumps.App):
             # the currently-running code IS the current code; nothing to go
             # stale against.
             self._rewrite_scheduled_task_cwd()
+            self._prune_session_index()
             self._relaunch_claude(user_data_dirs)
             self._sig = None
             # Verify rather than claim success unconditionally — the earlier,
@@ -1642,6 +1644,7 @@ class S4LMenuBar(rumps.App):
                 _capture(e, action="quit_stop_flag")
             self._quit_claude_and_wait()
             self._remove_scheduled_tasks()
+            self._prune_session_index()
             try:
                 os.remove(MENUBAR_PLIST)
             except FileNotFoundError:
@@ -1976,6 +1979,7 @@ class S4LMenuBar(rumps.App):
                 # this already-running (about to be replaced) process imported at
                 # ITS OWN startup — see _rewrite_scheduled_task_cwd_fresh's docstring.
                 self._rewrite_scheduled_task_cwd_fresh()
+                self._prune_session_index()
             if target:
                 # The graceful quit can eat minutes; restart the verify clock
                 # now that the host is actually down so UPDATE_VERIFY_GRACE_SEC
@@ -2184,6 +2188,28 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
 
+    def _prune_session_index(self):
+        """Move archived s4l-worker session records out of Claude Desktop's
+        session index. Run ONLY while Claude is DOWN, same rule as
+        _rewrite_scheduled_task_cwd: the app loads the index at launch, keeps
+        it in memory, and walks ALL of it (one stat per record's cwd) on
+        every message of every session. Traced 2026-10-30: 32k records, 30k
+        of them archived worker polls (~140/day), gave a 6 to 8 s UI freeze
+        per message, twice per worker cycle; moving them out took it to zero.
+        Delegates to scripts/session_index_prune.py::prune(), the single
+        implementation (scripts/s4l_box_update.sh runs the same script).
+        Best-effort: never raises."""
+        try:
+            import session_index_prune
+            r = session_index_prune.prune()
+            if r.get("moved") or r.get("error"):
+                _capture_msg(
+                    "S4L pruned session index", level="info",
+                    phase="session_index_prune", _extra=r,
+                )
+        except Exception as e:
+            _capture(e, action="session_index_prune")
+
     def _fresh_pipeline_tmpdir(self):
         """Extract THIS UPDATE's embedded pipeline.tgz (already unpacked to
         self._ext_dir() by the caller) into a throwaway temp dir and return
@@ -2306,6 +2332,7 @@ class S4LMenuBar(rumps.App):
             # relaunch call site so this can never regress silently if that
             # ever changes, rather than reasoning per call site about staleness.
             self._rewrite_scheduled_task_cwd_fresh()
+            self._prune_session_index()
             self._relaunch_claude(user_data_dirs)
             time.sleep(8)  # let Claude reload the registry before we re-check
             if not self._scheduled_task_cwd_needs_fix():
