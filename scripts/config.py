@@ -27,15 +27,22 @@ Resolution order for the repo root (single source of truth):
 $S4L_CONFIG_PATH overrides the config file location outright (some installs
 pin the operator config, e.g. ~/s4l/config.json, independent of the code dir).
 
-Do NOT add write helpers here. Config writes go through the MCP server's
-project_config tool (it owns validation and the state snapshot); pipeline
-scripts are readers.
+Config writes: user-facing edits go through the MCP server's project_config
+tool (it owns validation and the state snapshot). The few pipeline scripts
+that must persist runtime state into config.json (subreddit bans) MUST use
+update_config() below and nothing else: never `open(config, "w")` +
+json.dump. That in-place pattern truncates the file to 0 bytes and streams it
+back, so any interruption leaves a torn prefix that breaks every reader
+(2026-09-06, 09-30, 10-22, 10-29 outages; the 10-29 one stopped all X
+drafting for ~23h).
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import sys
 
 _CACHE: dict | None = None
 _CACHE_PATH: str | None = None
@@ -96,6 +103,47 @@ def load_config(fresh: bool = False) -> dict:
     _CACHE_PATH = path
     _CACHE_MTIME = mtime
     return _CACHE
+
+
+def update_config(mutate, path: str | None = None):
+    """Locked, atomic read-modify-write of config.json.
+
+    `mutate(cfg)` edits the dict in place and returns a truthy value when it
+    changed something (nothing is written otherwise); its return value is
+    passed back to the caller. The whole read->mutate->write span holds the
+    same fcntl lock on <config>.lock that learned_preferences.py takes, so
+    concurrent writers cannot erase each other's edits. The new content goes
+    to a temp file in the same directory and is swapped in with os.replace,
+    so readers only ever see the complete old file or the complete new one;
+    a writer killed mid-write leaves a stray temp file, never a torn config.
+
+    Raises if config.json is missing or unparseable: callers must not
+    "repair" a broken config by writing a partial dict over it.
+    """
+    global _CACHE, _CACHE_PATH, _CACHE_MTIME
+    path = path or config_path()
+    with open(path + ".lock", "w") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        with open(path) as f:
+            cfg = json.load(f)
+        result = mutate(cfg)
+        if not result:
+            return result
+        tmp = f"{path}.tmp-{os.getpid()}"
+        try:
+            with open(tmp, "w") as f:
+                f.write(json.dumps(cfg, indent=2) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        # One attribution line per write, so the next incident names its writer.
+        caller = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else "?"
+        print(f"[config] saved {path} by {caller} pid={os.getpid()}", file=sys.stderr)
+        _CACHE, _CACHE_PATH, _CACHE_MTIME = None, None, None
+    return result
 
 
 def get(path: str, default=None):
