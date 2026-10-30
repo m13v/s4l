@@ -332,6 +332,14 @@ for f in glob.glob(pat):
 for tid in DEPRECATED:
     shutil.rmtree(os.path.join(home, ".claude", "scheduled-tasks", tid), ignore_errors=True)
 PYCWD
+# Prune archived s4l-worker session records from Claude's session index while
+# it's still down: the app loads every record at launch and walks them all on
+# every message (32k records = 6-8 s UI freeze per message, 2026-10-30). Same
+# script the menu bar's _prune_session_index() runs; it is also in this
+# package, so the freshly installed copy is the one that runs.
+echo "pruning archived worker session records ..."
+/usr/bin/python3 "$STATE_DIR/repo/package/scripts/session_index_prune.py" 2>/dev/null \
+    | grep -E '"(moved|skips_dropped|error)"' || true
 # env -u: never let S4L_*/SAPS_* leak into Claude Desktop (macOS `open`
 # propagates the caller's env; a leaked S4L_REPO_DIR disables pipeline
 # self-update — see envRepoClone() in mcp/src/runtime.ts).
