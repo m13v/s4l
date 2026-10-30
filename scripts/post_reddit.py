@@ -48,7 +48,7 @@ REPO_DIR = os.path.expanduser(os.environ.get("S4L_REPO_DIR") or "~/social-autopo
 # its hardcoded config path (the S4L-4H dead-path class on customer boxes).
 import os as _cfg_os, sys as _cfg_sys
 _cfg_sys.path.insert(0, _cfg_os.path.dirname(_cfg_os.path.abspath(__file__)))
-from config import config_path as _canonical_config_path, load_config
+from config import config_path as _canonical_config_path, load_config, update_config
 CONFIG_PATH = _canonical_config_path()
 REDDIT_BROWSER = os.path.join(REPO_DIR, "scripts", "reddit_browser.py")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
@@ -665,18 +665,16 @@ def mark_comment_blocked(thread_url: str,
     if not sub_match:
         return
     sub = sub_match.group(1).lower()
+    def _add(config):
+        blocked = config.setdefault("subreddit_bans", {}).setdefault("comment_blocked", [])
+        if sub in _ban_entries_to_subs(blocked):
+            return False
+        blocked.append(_make_ban_entry(sub, reason, project))
+        blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
+        return True
+
     try:
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
-        bans = config.setdefault("subreddit_bans", {})
-        blocked = bans.setdefault("comment_blocked", [])
-        existing = _ban_entries_to_subs(blocked)
-        if sub not in existing:
-            blocked.append(_make_ban_entry(sub, reason, project))
-            blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=2)
-                f.write("\n")
+        if update_config(_add, CONFIG_PATH):
             print(f"[post_reddit] Added r/{sub} to subreddit_bans.comment_blocked "
                   f"(reason={reason!r} project={project!r})")
     except Exception as e:
@@ -780,43 +778,42 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "",
     if not force and abort_reason and not _abort_is_permanent_block(abort_reason):
         return
     reason_str: str | None = (abort_reason or "").strip()[:280] or None
-    try:
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
-        bans = config.setdefault("subreddit_bans", {})
-        blocked = bans.setdefault("thread_blocked", [])
-        existing = _ban_entries_to_subs(blocked)
-        if sub not in existing:
+
+    def _block(config):
+        """Returns ("added"|"refreshed", entry) when config changed, else None."""
+        blocked = config.setdefault("subreddit_bans", {}).setdefault("thread_blocked", [])
+        if sub not in _ban_entries_to_subs(blocked):
             new_entry = _make_ban_entry(sub, reason_str, project)
             blocked.append(new_entry)
             blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=2)
-                f.write("\n")
+            return ("added", new_entry)
+        # Re-arm an existing QUARANTINE entry on a fresh quarantine strike
+        # (both old and new reasons carry the prefix). Never overwrite a
+        # permanent entry with a weaker time-limited one.
+        entry = next((e for e in blocked
+                      if isinstance(e, dict) and _ban_entry_sub(e) == sub), None)
+        old_reason = (entry or {}).get("reason") or ""
+        new_is_q = (reason_str or "").startswith(QUARANTINE_REASON_PREFIX)
+        if entry is not None and new_is_q and old_reason.startswith(QUARANTINE_REASON_PREFIX):
+            from datetime import datetime, timezone
+            entry["reason"] = reason_str
+            entry["added_at"] = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            return ("refreshed", entry)
+        return None
+
+    try:
+        changed = update_config(_block, CONFIG_PATH)
+        if not changed:
+            print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
+        elif changed[0] == "added":
             print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts "
                   f"(reason={reason_str!r} project={project!r})")
-            _mirror_ban_to_backend("thread_blocked", new_entry)
+            _mirror_ban_to_backend("thread_blocked", changed[1])
         else:
-            # Re-arm an existing QUARANTINE entry on a fresh quarantine strike
-            # (both old and new reasons carry the prefix). Never overwrite a
-            # permanent entry with a weaker time-limited one.
-            entry = next((e for e in blocked
-                          if isinstance(e, dict) and _ban_entry_sub(e) == sub), None)
-            old_reason = (entry or {}).get("reason") or ""
-            new_is_q = (reason_str or "").startswith(QUARANTINE_REASON_PREFIX)
-            if entry is not None and new_is_q and old_reason.startswith(QUARANTINE_REASON_PREFIX):
-                from datetime import datetime, timezone
-                entry["reason"] = reason_str
-                entry["added_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-                with open(CONFIG_PATH, "w") as f:
-                    json.dump(config, f, indent=2)
-                    f.write("\n")
-                print(f"[post_reddit] Refreshed r/{sub} thread quarantine "
-                      f"(30-day clock re-armed)")
-                _mirror_ban_to_backend("thread_blocked", entry)
-            else:
-                print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
+            print(f"[post_reddit] Refreshed r/{sub} thread quarantine "
+                  f"(30-day clock re-armed)")
+            _mirror_ban_to_backend("thread_blocked", changed[1])
     except Exception as e:
         print(f"[post_reddit] WARNING: could not persist thread-blocked sub r/{sub}: {e}")
 
