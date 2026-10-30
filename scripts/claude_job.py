@@ -1202,8 +1202,6 @@ def cmd_provider(ns) -> int:
     deadline = created + max(60, ns.timeout - 60)
     last_hb = created  # last menu-bar heartbeat (see below)
     claimed_at = None  # set the moment a worker moves the job pending/ -> running/
-    last_claim_check = created
-    requeues = 0
     while time.time() < deadline:
         now = time.time()
         # Pause landed mid-wait: abandon immediately with the same cleanup the
@@ -1226,21 +1224,6 @@ def cmd_provider(ns) -> int:
         # the right elapsed for each.
         if claimed_at is None and not os.path.exists(pending_path):
             claimed_at = now
-        # Stale-claim recovery (see _claim_is_dead): the claiming session died
-        # without a result -> hand the job back to the queue. Re-check the result
-        # file AFTER the death check so a result written just before the session
-        # exited is consumed, not discarded.
-        if (claimed_at is not None and requeues < MAX_REQUEUES
-                and now - last_claim_check >= CLAIM_CHECK_INTERVAL_S):
-            last_claim_check = now
-            if (os.path.exists(running_path) and _claim_is_dead(running_path)
-                    and not os.path.exists(res_path)
-                    and _requeue_claim(running_path, pending_path)):
-                requeues += 1
-                _plog(f"job {job_id} batch={batch}: claiming worker session died "
-                      f"after {_fmt_dur(now - claimed_at)} without a result; "
-                      f"re-queued for the next worker ({requeues}/{MAX_REQUEUES})")
-                claimed_at = None
         # Heartbeat the menu-bar label so its `since` stays fresh for the whole
         # multi-minute block. The consumer (s4l_state.read_activity) ages a label
         # out after a TTL, so without this refresh a long drafting turn would look
@@ -1320,76 +1303,22 @@ def cmd_provider(ns) -> int:
 # next (consumer side, run by a scheduled task)                               #
 # --------------------------------------------------------------------------- #
 def _agent_session_pid():
-    """Best-effort: pid of the Claude agent-mode SESSION running THIS worker — the exact process the stale-session reaper
-    (reap_stale_claude_sessions.py) would target. The claim is stamped with it
-    so (a) the reaper SPARES that session for the whole drafting turn (the
-    2026-06-29 draft-kill regression) and (b) the producer can tell when the
-    claiming session died and re-queue the job (see _claim_is_dead).
-    Shares _find_own_session's signature: the old private copy matched
-    'local-agent-mode-sessions', which current Desktop builds no longer put on
-    the cmdline, so every claim went unstamped. None if not identifiable."""
+    """Best-effort: pid of the Claude agent-mode SESSION running THIS worker —
+    the exact process the stale-session reaper (reap_stale_claude_sessions.py)
+    would target. The claim is stamped with it
+    so the reaper (a) SPARES that session for the whole drafting turn (the
+    2026-06-29 draft-kill regression) and (b) re-queues the job once that
+    session is dead (release_stale_claims, ~2 min). Shares _find_own_session's
+    signature: the old private copy matched 'local-agent-mode-sessions', which
+    current Desktop builds no longer put on the cmdline, so every claim went
+    unstamped and a claim whose session died stranded its producer for the full
+    ~30 min timeout (2026-10-30: Desktop relaunched a minute after a claim).
+    None if not identifiable."""
     try:
         found = _find_own_session(_ps_pid_map())
     except Exception:
         return None
     return found[0] if found else None
-
-
-def _proc_start(pid) -> str | None:
-    """The process's start time as ps prints it, or None if it is not running.
-    Stamped next to claim_pid so a recycled pid can't pass for the claimant
-    (start time is fixed for a process's life; its cmdline is not)."""
-    try:
-        out = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))],
-                             capture_output=True, text=True, timeout=10).stdout.strip()
-    except Exception:
-        return "unknown"  # can't tell -> treat as alive
-    return out or None
-
-
-# Stale-claim recovery (2026-10-30). A worker claims a job by renaming it into
-# running/, then drafts inside its Desktop session. If that session dies
-# mid-turn (Desktop quit/relaunch, reaper, crash) nothing ever writes a result,
-# and the producer used to block its full ~30 min timeout while every later
-# worker saw an empty queue (2026-10-30 11:28 -> 11:58, Desktop relaunched one
-# minute after the claim). The producer now checks the claim's session pid and
-# moves the job back to pending/ for the next worker.
-CLAIM_CHECK_INTERVAL_S = 15
-MAX_REQUEUES = 2  # past this, fall back to the plain timeout (no requeue loop)
-
-
-def _claim_is_dead(running_path: str) -> bool:
-    """True iff the job in running/ carries a claim pid whose session is gone
-    (pid not running, or recycled: different start time). Unstamped claims and
-    any read/ps error count as alive: we only requeue on positive evidence."""
-    try:
-        with open(running_path) as f:
-            job = json.load(f)
-    except Exception:
-        return False
-    pid, started = job.get("claim_pid"), job.get("claim_started")
-    if not pid:
-        return False
-    now_started = _proc_start(pid)
-    if now_started is None:
-        return True
-    return bool(started) and now_started not in ("unknown", started)
-
-
-def _requeue_claim(running_path: str, pending_path: str) -> bool:
-    """Move a dead claim back to pending/, dropping its claim stamps. Atomic
-    rename, so a concurrent worker either sees it pending or not at all."""
-    try:
-        with open(running_path) as f:
-            job = json.load(f)
-        for k in ("claim_pid", "claim_started", "claimed_at", "prompt_file", "schema_file"):
-            job.pop(k, None)
-        job["requeues"] = int(job.get("requeues", 0)) + 1
-        _atomic_write(running_path, job)
-        os.rename(running_path, pending_path)
-        return True
-    except OSError:
-        return False
 
 
 def _attempt_claim(ns, qtype: str) -> bool:
@@ -1442,7 +1371,6 @@ def _attempt_claim(ns, qtype: str) -> bool:
         agent_pid = _agent_session_pid()
         if agent_pid:
             job["claim_pid"] = agent_pid
-            job["claim_started"] = _proc_start(agent_pid)
         job["claimed_at"] = time.time()
         prompt_file = None
         schema_file = None
