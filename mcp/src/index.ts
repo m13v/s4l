@@ -4313,8 +4313,8 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 9; // v9 (2026-07-17): poll window widened 240s -> 900s (see QUEUE_WORKER_POLL_SECONDS); version bump forces the prompt refresh that carries the new --wait-seconds onto existing installs. v8: worker polls internally (claude_job.py next --wait-seconds) instead of single-shot check-then-die. Empirically verified (2026-07-06) that a single long-running Bash call survives well past the host's ~90s between-tool-call inactivity kill — that timer only fires on MODEL silence, not on one in-flight tool call — so one Bash call can safely poll for QUEUE_WORKER_POLL_SECONDS before giving up. This cuts the every-minute spin-up-empty-then-die husk cycle down to roughly one session per poll window instead of one per cron tick. v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
-// v10 (PLANNED, NOT IMPLEMENTED): delegate the actual drafting to a fresh
+const QUEUE_WORKER_PROMPT_VERSION = 10; // v10 (2026-10-29): poll window 900s -> 540s so one `next` call fits inside the Bash tool's 600s default timeout, self-reap disabled (S4L_WORKER_SELF_REAP=0 on every claude_job call), and the session ends by archiving itself instead of a SIGTERM. v9 (2026-07-17): poll window widened 240s -> 900s; version bump forces the prompt refresh that carries the new --wait-seconds onto existing installs. v8: worker polls internally (claude_job.py next --wait-seconds) instead of single-shot check-then-die. Empirically verified (2026-07-06) that a single long-running Bash call survives well past the host's ~90s between-tool-call inactivity kill — that timer only fires on MODEL silence, not on one in-flight tool call — so one Bash call can safely poll for QUEUE_WORKER_POLL_SECONDS before giving up. This cuts the every-minute spin-up-empty-then-die husk cycle down to roughly one session per poll window instead of one per cron tick. v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
+// v11 (PLANNED, NOT IMPLEMENTED): delegate the actual drafting to a fresh
 // sub-agent per claimed job (claim -> delegate -> wait -> claim next, looped
 // within one continuous worker session) instead of drafting inline. Validated
 // via throwaway probe tasks 2026-07-07/08 (10 loop iterations, ~210s of real
@@ -4323,10 +4323,19 @@ const QUEUE_WORKER_PROMPT_VERSION = 9; // v9 (2026-07-17): poll window widened 2
 // notification) or the host kills the whole parent+child chain in 1-3 min.
 // Never live-fire tested against a real production job. Full design, what's
 // validated vs not, and the implementation steps: docs/queue-worker-delegation-plan.md
-// Bump this constant to 10 only once that plan is actually implemented.
+// Bump this constant to 11 only once that plan is actually implemented.
 const QUEUE_WORKER_PROMPT_MARKER = "s4l_queue_worker_prompt_version";
 // How long ONE `next --wait-seconds` call polls before giving up and exiting.
-// 900s (15 min, per Matthew 2026-07-17, up from 240s): sits AT the single-
+// 540s (9 min, 2026-10-29, down from 900s): MUST stay below the Bash tool's
+// 600s default timeout. Measured on 2026-10-29 in Claude Desktop 4.29: the
+// 900s poll hit the 600s tool timeout on every empty cycle (81 of 106 runs
+// that day), the CLI then re-emitted a ~200KB prompt snapshot (a 7s
+// main-thread stall in the app), the poller kept running as an orphaned
+// background task for the remaining 300s, and its self-reap SIGTERM cost one
+// or two more 7s stalls plus an exit-143 re-attach. With the poll inside the
+// tool timeout the call returns normally, nothing is orphaned, and the worker
+// archives itself (step 5 of the prompt) at zero measured cost.
+// Earlier rationale (900s, per Matthew 2026-07-17, up from 240s): sits AT the single-
 // Bash-call survival ceiling verified live on 2026-07-06 (the host's ~90s
 // inactivity kill fires only on model silence, and one in-flight tool call
 // survived a full 900s probe). This covers the ~8min average real job
@@ -4342,7 +4351,7 @@ const QUEUE_WORKER_PROMPT_MARKER = "s4l_queue_worker_prompt_version";
 // poll window is legitimately still working, not a husk, and a too-tight
 // claim_grace would SIGTERM it mid-poll before it ever gets to claim.
 // (Bumped to 1020s alongside this change.)
-const QUEUE_WORKER_POLL_SECONDS = 900;
+const QUEUE_WORKER_POLL_SECONDS = 540;
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
@@ -4462,8 +4471,9 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     `The deterministic pipeline runs on this Mac. When it needs a Claude turn it ` +
       `drops a job on a local file queue. Your only job: pick up the next job, do ` +
       `EXACTLY what its prompt says, hand the result back. You do this with Bash, ` +
-      `Read, and Write, and NOTHING else. This run is unattended — reaching for any ` +
-      `other tool, or trying to "investigate", STALLS it forever.`,
+      `Read, and Write, and NOTHING else (except the single archive call in step 5). ` +
+      `This run is unattended — reaching for any other tool, or trying to ` +
+      `"investigate", STALLS it forever.`,
     ``,
     `PACING — CRITICAL: this unattended session is terminated ~90 seconds after ` +
       `your LAST tool call (a host inactivity timeout). That clock only runs BETWEEN ` +
@@ -4479,11 +4489,13 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     `1. Look for the next job. Run this EXACT Bash command and let it run to ` +
       `completion — it polls internally for up to ${Math.round(QUEUE_WORKER_POLL_SECONDS / 60)} ` +
       `minutes before giving up, so it may take a while to return. That is normal: ` +
-      `do NOT interrupt it and do NOT make any other tool call while it is running.`,
-    `     ${py} ${job} next --type any --prompt-file --wait-seconds ${QUEUE_WORKER_POLL_SECONDS} --state-dir ${sd}`,
+      `do NOT interrupt it and do NOT make any other tool call while it is running. ` +
+      `Pass the Bash tool's timeout parameter as 600000 (its 10-minute maximum) so ` +
+      `the call is never moved to the background.`,
+    `     S4L_WORKER_SELF_REAP=0 ${py} ${job} next --type any --prompt-file --wait-seconds ${QUEUE_WORKER_POLL_SECONDS} --state-dir ${sd}`,
     `   It prints one line of JSON once it returns. If it prints "{}" (empty), no ` +
       `job showed up during the whole poll window — report "no jobs" in one line ` +
-      `and STOP. You are done.`,
+      `and go to step 5.`,
     `2. Otherwise it prints {"job_id":"...","prompt_file":"...","schema_file":...}. ` +
       `Use the Read tool to read prompt_file; it is the complete, self-contained ` +
       `instruction the pipeline wrote for you. If the Read result says it is partial ` +
@@ -4493,20 +4505,28 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `ONLY that JSON object — no prose, no markdown, no code fences.`,
     `3. Submit it. Write your JSON object to ${outDir}/out-<job_id>.json using the ` +
       `Write tool (substitute the real job_id), then run this EXACT Bash command:`,
-    `     ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json --state-dir ${sd}`,
+    `     S4L_WORKER_SELF_REAP=0 ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json --state-dir ${sd}`,
     `   If it reports the result was rejected (bad JSON / missing keys), fix your JSON ` +
       `and submit again — at most twice. If it still fails, run ` +
-      `\`${py} ${job} result --job <job_id> --error --state-dir ${sd}\` (type a one-line ` +
-      `reason, then Ctrl-D) and STOP.`,
-    `4. Report in ONE short line what you did, then STOP. Do NOT claim another job, ` +
-      `do NOT loop, do NOT read other files, do NOT call any other tool.`,
+      `\`S4L_WORKER_SELF_REAP=0 ${py} ${job} result --job <job_id> --error --state-dir ${sd}\` (type a one-line ` +
+      `reason, then Ctrl-D) and go to step 5.`,
+    `4. Report in ONE short line what you did. Do NOT claim another job, ` +
+      `do NOT loop, do NOT read other files.`,
+    `5. End this session yourself. Call ToolSearch with the query ` +
+      `"select:mcp__ccd_session_mgmt__archive_session", then call ` +
+      `mcp__ccd_session_mgmt__archive_session with session_id "self" and reason ` +
+      `"s4l worker done". That archive call must be your very last tool call; it ` +
+      `ends the session cleanly (no SIGTERM, no idle wait). If the tool is not ` +
+      `available, just STOP.`,
     ``,
     `HARD RULES: use ONLY the Bash tool (to run claude_job.py AND any persist ` +
       `commands the job's prompt explicitly gives you), the Read tool (the ` +
       `prompt/schema sidecar + the SKILL/config files the prompt names), and the ` +
-      `Write tool (the result file). NEVER post, reply, open a browser, or run any ` +
-      `command the prompt does not explicitly give you. An empty queue is the ` +
-      `NORMAL, expected case most minutes — it is success, not a problem to debug.`,
+      `Write tool (the result file), plus ToolSearch and ` +
+      `mcp__ccd_session_mgmt__archive_session ONLY as the final step 5. NEVER post, ` +
+      `reply, open a browser, or run any command the prompt does not explicitly ` +
+      `give you. An empty queue is the NORMAL, expected case most minutes — it is ` +
+      `success, not a problem to debug.`,
   ].join("\n");
 }
 
