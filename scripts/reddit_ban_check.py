@@ -184,7 +184,7 @@ def record_confirmed_bans(subs, project=None) -> dict:
     'account_blocked_in_sub' (the reason platform_strike_events reads to emit
     platform_banned learning events). Upgrades pre-existing weak entries
     (reason=None) to the confirmed reason. Never records on None (unknown)."""
-    from config import config_path
+    from config import update_config
     from post_reddit import _make_ban_entry, _ban_entry_sub
 
     state = banned_state(subs)
@@ -194,33 +194,33 @@ def record_confirmed_bans(subs, project=None) -> dict:
     if not banned:
         return {"banned": [], "recorded": [], "upgraded": [], "unknown": unknown}
 
-    path = config_path()
-    with open(path) as f:
-        cfg = json.load(f)
-    bans = cfg.setdefault("subreddit_bans", {})
-    blocked = bans.setdefault("comment_blocked", [])
-    by_sub = {(_ban_entry_sub(e) or "").lower(): e for e in blocked}
+    blocked: list = []  # filled with the saved list, for the backend mirror
 
-    for sub in banned:
-        entry = by_sub.get(sub)
-        if entry is None:
-            blocked.append(_make_ban_entry(sub, "account_blocked_in_sub", project))
-            recorded.append(sub)
-        elif entry.get("reason") != "account_blocked_in_sub":
-            # upgrade a weak/manual entry so the digest ban event can fire
-            from datetime import datetime, timezone
-            entry["reason"] = "account_blocked_in_sub"
-            if not entry.get("added_at"):
-                entry["added_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-            entry.setdefault("noticed_by_project", project)
-            upgraded.append(sub)
+    def _mutate(cfg):
+        entries = cfg.setdefault("subreddit_bans", {}).setdefault("comment_blocked", [])
+        blocked[:] = entries
+        by_sub = {(_ban_entry_sub(e) or "").lower(): e for e in blocked}
+        for sub in banned:
+            entry = by_sub.get(sub)
+            if entry is None:
+                entries.append(_make_ban_entry(sub, "account_blocked_in_sub", project))
+                recorded.append(sub)
+            elif entry.get("reason") != "account_blocked_in_sub":
+                # upgrade a weak/manual entry so the digest ban event can fire
+                from datetime import datetime, timezone
+                entry["reason"] = "account_blocked_in_sub"
+                if not entry.get("added_at"):
+                    entry["added_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+                entry.setdefault("noticed_by_project", project)
+                upgraded.append(sub)
+        if not (recorded or upgraded):
+            return False
+        entries.sort(key=lambda e: (_ban_entry_sub(e) or ""))
+        blocked[:] = entries
+        return True
 
-    if recorded or upgraded:
-        blocked.sort(key=lambda e: (_ban_entry_sub(e) or ""))
-        with open(path, "w") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
+    if update_config(_mutate):
         # Mirror to the backend subreddit_bans table (source of truth as of
         # 2026-07-19; config.json is the write-through cache). Best-effort:
         # readers union both sources, so a failed mirror never un-bans.
