@@ -22,9 +22,10 @@ Idempotent: re-running on the new shape is a no-op.
 """
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
+
+from config import update_config
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
@@ -70,15 +71,10 @@ def upgrade_list(entries: list) -> tuple[list, int, int]:
     return out, upgraded, already
 
 
-def main() -> int:
-    with CONFIG_PATH.open() as f:
-        config = json.load(f)
-
+def _migrate(config) -> bool:
     bans = config.get("subreddit_bans") or {}
     if not isinstance(bans, dict):
-        print(f"subreddit_bans is not a dict (got {type(bans).__name__}); aborting",
-              file=sys.stderr)
-        return 1
+        raise SystemExit(f"subreddit_bans is not a dict (got {type(bans).__name__}); aborting")
 
     changed = False
     for key in ("comment_blocked", "thread_blocked"):
@@ -97,17 +93,15 @@ def main() -> int:
             changed = True
 
     config["subreddit_bans"] = bans
+    return changed
 
-    if not changed:
+
+def main() -> int:
+    if not update_config(_migrate, str(CONFIG_PATH)):
         print("Nothing to migrate (all entries already in new shape).")
         return 0
-
-    with CONFIG_PATH.open("w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
     print(f"Wrote {CONFIG_PATH}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
