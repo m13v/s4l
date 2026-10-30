@@ -636,6 +636,8 @@ class S4LMenuBar(rumps.App):
         # a hitch every 5s tick.
         self._resumed = False
         self._loopback_check_due_at = 0.0
+        # Session-index prune on OBSERVED Claude downtime (see _tick).
+        self._pruned_this_downtime = False
         # Periodic approved-backlog drain cadence (2026-07-17): the menubar is
         # the single drainer now that the MCP boot-time drain is gone. 10 min
         # keeps a transiently-failed approval's retry latency reasonable while
@@ -2188,6 +2190,21 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
 
+    @staticmethod
+    def _claude_main_running():
+        """True while any Claude Desktop MAIN process is alive, by executable
+        path suffix via ps (same approach as _claude_user_data_dirs). Helpers,
+        renderers and claude-code CLI children have other paths."""
+        try:
+            out = subprocess.run(["ps", "-axo", "comm"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            return any(l.rstrip().endswith("/Claude.app/Contents/MacOS/Claude")
+                       for l in out.splitlines())
+        except Exception:
+            return True  # unknown: assume up, so we never prune a live app's store
+
+    _prune_lock = threading.Lock()
+
     def _prune_session_index(self):
         """Move archived s4l-worker session records out of Claude Desktop's
         session index. Run ONLY while Claude is DOWN, same rule as
@@ -2198,7 +2215,11 @@ class S4LMenuBar(rumps.App):
         per message, twice per worker cycle; moving them out took it to zero.
         Delegates to scripts/session_index_prune.py::prune(), the single
         implementation (scripts/s4l_box_update.sh runs the same script).
-        Best-effort: never raises."""
+        Best-effort: never raises. Non-reentrant: a restart flow and the
+        _tick downtime hook can both fire in the same window; the second
+        caller just skips (the first one's pass is complete and idempotent)."""
+        if not self._prune_lock.acquire(blocking=False):
+            return
         try:
             import session_index_prune
             r = session_index_prune.prune()
@@ -2209,6 +2230,8 @@ class S4LMenuBar(rumps.App):
                 )
         except Exception as e:
             _capture(e, action="session_index_prune")
+        finally:
+            self._prune_lock.release()
 
     def _fresh_pipeline_tmpdir(self):
         """Extract THIS UPDATE's embedded pipeline.tgz (already unpacked to
@@ -2729,6 +2752,22 @@ class S4LMenuBar(rumps.App):
                         pass
             else:
                 self._resumed = False
+        # Prune Claude's session index whenever Claude is OBSERVED down, not
+        # only when one of our restart flows took it down (2026-10-30): a
+        # manual Cmd+Q, an app-update relaunch or a crash is just as good a
+        # window, and the prune only ever matters at the app's next launch.
+        # Edge-triggered, once per down-window, checked every tick (one ps
+        # call, ~10 ms; a manual quit-and-reopen can be under 15 s, so a
+        # slower poll would miss it), in a thread (the scan reads every
+        # record). ps rather than pgrep: BSD pgrep hides the caller's own
+        # ancestors, so from anything Claude spawned (tests, a Claude-run
+        # shell) `pgrep -x Claude` reports the host app as absent.
+        if self._claude_main_running():
+            self._pruned_this_downtime = False
+        elif not self._pruned_this_downtime:
+            self._pruned_this_downtime = True
+            threading.Thread(target=self._prune_session_index, daemon=True,
+                             name="s4l-session-index-prune").start()
         # Status-item visibility telemetry (60s-throttled inside; see __init__).
         self._icon_watch_tick(now)
         # The activity spinner owns the TITLE while a tool runs (we don't fight it at
