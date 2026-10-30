@@ -51,6 +51,35 @@ export function configPath(): string {
   }
 }
 
+// Atomic config.json write (2026-10-30). Never write config.json in place:
+// writeFileSync truncates the file first, so a reader in that window (or an
+// interrupted write) sees a torn file and every pipeline lane dies on it.
+// Write a same-directory temp file, fsync, then rename over the target so
+// readers only ever see the old or the new complete file. Keeps the
+// timestamped .bak- copy the call sites used to make.
+export function writeConfigAtomic(cfg: unknown): string {
+  const cfgPath = configPath();
+  if (fs.existsSync(cfgPath)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+  }
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  const tmp = `${cfgPath}.tmp-${process.pid}`;
+  try {
+    const fd = fs.openSync(tmp, "w");
+    try {
+      fs.writeSync(fd, JSON.stringify(cfg, null, 2) + "\n");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, cfgPath);
+  } finally {
+    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+  }
+  return cfgPath;
+}
+
 // One-time (idempotent) migration to the state-dir home, run at server boot.
 // Cases:
 //   - no state config, legacy is a REAL file  -> move it up, leave a symlink
@@ -412,13 +441,7 @@ export function applySetup(input: ProjectInput): {
     cfg.projects.push(entry);
     created = true;
   }
-  const cfgPath = configPath();
-  if (fs.existsSync(cfgPath)) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-  }
-  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  writeConfigAtomic(cfg);
   void sendStateSnapshot("config_write");
 
   if (!persona) recordManagedProject(input.name);
@@ -470,13 +493,7 @@ export function recordRedditAccount(username: string): { written: boolean; detai
   reddit.username = clean;
   if (!reddit.login_method) reddit.login_method = "browser";
   try {
-    const cfgPath = configPath();
-    if (fs.existsSync(cfgPath)) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-    }
-    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    writeConfigAtomic(cfg);
     void sendStateSnapshot("config_write");
     return { written: true, detail: `accounts.reddit.username = ${clean}` };
   } catch (e: any) {
@@ -614,13 +631,7 @@ export function ensurePersonaProject(
     created = true;
   }
 
-  const cfgPath = configPath();
-  if (fs.existsSync(cfgPath)) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-  }
-  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  const cfgPath = writeConfigAtomic(cfg);
 
   // Raw dictation transcript -> persona_corpus.txt sidecar (NOT config.json).
   // Mirrors scripts/build_persona.py cmd_apply: config.json is inlined into many
@@ -671,13 +682,7 @@ export function ensureShortLinksDefault(): { healed: string[] } {
       changed = true;
     }
     if (changed) {
-      const cfgPath = configPath();
-      if (fs.existsSync(cfgPath)) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
-      }
-      fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-      fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      writeConfigAtomic(cfg);
       void sendStateSnapshot("config_write");
     }
   } catch {
