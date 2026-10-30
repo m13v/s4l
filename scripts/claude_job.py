@@ -1202,6 +1202,8 @@ def cmd_provider(ns) -> int:
     deadline = created + max(60, ns.timeout - 60)
     last_hb = created  # last menu-bar heartbeat (see below)
     claimed_at = None  # set the moment a worker moves the job pending/ -> running/
+    last_claim_check = created
+    requeues = 0
     while time.time() < deadline:
         now = time.time()
         # Pause landed mid-wait: abandon immediately with the same cleanup the
@@ -1224,6 +1226,21 @@ def cmd_provider(ns) -> int:
         # the right elapsed for each.
         if claimed_at is None and not os.path.exists(pending_path):
             claimed_at = now
+        # Stale-claim recovery (see _claim_is_dead): the claiming session died
+        # without a result -> hand the job back to the queue. Re-check the result
+        # file AFTER the death check so a result written just before the session
+        # exited is consumed, not discarded.
+        if (claimed_at is not None and requeues < MAX_REQUEUES
+                and now - last_claim_check >= CLAIM_CHECK_INTERVAL_S):
+            last_claim_check = now
+            if (os.path.exists(running_path) and _claim_is_dead(running_path)
+                    and not os.path.exists(res_path)
+                    and _requeue_claim(running_path, pending_path)):
+                requeues += 1
+                _plog(f"job {job_id} batch={batch}: claiming worker session died "
+                      f"after {_fmt_dur(now - claimed_at)} without a result; "
+                      f"re-queued for the next worker ({requeues}/{MAX_REQUEUES})")
+                claimed_at = None
         # Heartbeat the menu-bar label so its `since` stays fresh for the whole
         # multi-minute block. The consumer (s4l_state.read_activity) ages a label
         # out after a TTL, so without this refresh a long drafting turn would look
@@ -1303,38 +1320,64 @@ def cmd_provider(ns) -> int:
 # next (consumer side, run by a scheduled task)                               #
 # --------------------------------------------------------------------------- #
 def _agent_session_pid():
-    """Best-effort: the Claude agent-mode SESSION pid running THIS worker — the
-    exact process the stale-session reaper (reap_stale_claude_sessions.py) would
-    target. We climb our own process tree to the ancestor whose cmd carries the
-    reaper's worker signature ('claude-code/' + 'local-agent-mode-sessions') and
-    return its pid, so the claim can be stamped with it and the reaper can SPARE
-    that session for the whole drafting turn (instead of SIGTERMing it at the short
-    grace window — the 2026-06-29 draft-kill regression). None if not identifiable;
-    the reaper then falls back to its newest-spare heuristic.
-    """
+    """Best-effort: the Claude agent-mode SESSION running THIS worker, as
+    (pid, reverify_token) — the exact process the stale-session reaper
+    (reap_stale_claude_sessions.py) would target. The claim is stamped with it
+    so (a) the reaper SPARES that session for the whole drafting turn (the
+    2026-06-29 draft-kill regression) and (b) the producer can tell when the
+    claiming session died and re-queue the job (see _claim_is_dead).
+    Shares _find_own_session's signature: the old private copy matched
+    'local-agent-mode-sessions', which current Desktop builds no longer put on
+    the cmdline, so every claim went unstamped. None if not identifiable."""
     try:
-        out = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,ppid=,command="],
-            capture_output=True, text=True, timeout=10,
-        ).stdout
-        info = {}
-        for line in out.splitlines():
-            m = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)$", line)
-            if m:
-                info[int(m.group(1))] = (int(m.group(2)), m.group(3))
-        pid = os.getpid()
-        for _ in range(16):  # bounded climb up the tree
-            ent = info.get(pid)
-            if not ent or ent[0] <= 1:
-                break
-            ppid = ent[0]
-            pcmd = info.get(ppid, (0, ""))[1]
-            if ("claude-code/" in pcmd) and ("local-agent-mode-sessions" in pcmd):
-                return ppid
-            pid = ppid
+        return _find_own_session(_ps_pid_map())
     except Exception:
         return None
-    return None
+
+
+# Stale-claim recovery (2026-10-30). A worker claims a job by renaming it into
+# running/, then drafts inside its Desktop session. If that session dies
+# mid-turn (Desktop quit/relaunch, reaper, crash) nothing ever writes a result,
+# and the producer used to block its full ~30 min timeout while every later
+# worker saw an empty queue (2026-10-30 11:28 -> 11:58, Desktop relaunched one
+# minute after the claim). The producer now checks the claim's session pid and
+# moves the job back to pending/ for the next worker.
+CLAIM_CHECK_INTERVAL_S = 15
+MAX_REQUEUES = 2  # past this, fall back to the plain timeout (no requeue loop)
+
+
+def _claim_is_dead(running_path: str) -> bool:
+    """True iff the job in running/ carries a claim pid whose session is gone
+    (pid absent, or recycled to a different command). Unstamped claims and any
+    read error count as alive: we only requeue on positive evidence of death."""
+    try:
+        with open(running_path) as f:
+            job = json.load(f)
+    except Exception:
+        return False
+    pid, token = job.get("claim_pid"), job.get("claim_token")
+    if not pid:
+        return False
+    ent = _ps_pid_map().get(int(pid))
+    if ent is None:
+        return True
+    return bool(token) and token not in ent[1]
+
+
+def _requeue_claim(running_path: str, pending_path: str) -> bool:
+    """Move a dead claim back to pending/, dropping its claim stamps. Atomic
+    rename, so a concurrent worker either sees it pending or not at all."""
+    try:
+        with open(running_path) as f:
+            job = json.load(f)
+        for k in ("claim_pid", "claim_token", "claimed_at", "prompt_file", "schema_file"):
+            job.pop(k, None)
+        job["requeues"] = int(job.get("requeues", 0)) + 1
+        _atomic_write(running_path, job)
+        os.rename(running_path, pending_path)
+        return True
+    except OSError:
+        return False
 
 
 def _attempt_claim(ns, qtype: str) -> bool:
@@ -1384,9 +1427,10 @@ def _attempt_claim(ns, qtype: str) -> bool:
             continue
         # Stamp the agent-session pid that holds THIS claim so the reaper spares it
         # for the whole drafting turn (see _agent_session_pid above).
-        agent_pid = _agent_session_pid()
-        if agent_pid:
-            job["claim_pid"] = agent_pid
+        session = _agent_session_pid()
+        agent_pid = session[0] if session else None
+        if session:
+            job["claim_pid"], job["claim_token"] = session
         job["claimed_at"] = time.time()
         prompt_file = None
         schema_file = None
