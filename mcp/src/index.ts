@@ -4491,7 +4491,10 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `minutes before giving up, so it may take a while to return. That is normal: ` +
       `do NOT interrupt it and do NOT make any other tool call while it is running. ` +
       `Pass the Bash tool's timeout parameter as 600000 (its 10-minute maximum) so ` +
-      `the call is never moved to the background.`,
+      `the call is never moved to the background. If the result nevertheless says ` +
+      `the command was moved to the background (this happens when the Mac sleeps ` +
+      `mid-poll; the timeout is wall-clock), do NOT wait for it: call TaskStop with ` +
+      `the ID it gives you, report "no jobs" in one line, and go to step 5.`,
     `     S4L_WORKER_SELF_REAP=0 ${py} ${job} next --type any --prompt-file --wait-seconds ${QUEUE_WORKER_POLL_SECONDS} --state-dir ${sd}`,
     `   It prints one line of JSON once it returns. If it prints "{}" (empty), no ` +
       `job showed up during the whole poll window — report "no jobs" in one line ` +
@@ -4522,8 +4525,8 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     `HARD RULES: use ONLY the Bash tool (to run claude_job.py AND any persist ` +
       `commands the job's prompt explicitly gives you), the Read tool (the ` +
       `prompt/schema sidecar + the SKILL/config files the prompt names), and the ` +
-      `Write tool (the result file), plus ToolSearch and ` +
-      `mcp__ccd_session_mgmt__archive_session ONLY as the final step 5. NEVER post, ` +
+      `Write tool (the result file), plus TaskStop ONLY for a backgrounded poll, and ` +
+      `ToolSearch and mcp__ccd_session_mgmt__archive_session ONLY as the final step 5. NEVER post, ` +
       `reply, open a browser, or run any command the prompt does not explicitly ` +
       `give you. An empty queue is the NORMAL, expected case most minutes — it is ` +
       `success, not a problem to debug.`,
