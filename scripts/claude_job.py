@@ -1320,8 +1320,7 @@ def cmd_provider(ns) -> int:
 # next (consumer side, run by a scheduled task)                               #
 # --------------------------------------------------------------------------- #
 def _agent_session_pid():
-    """Best-effort: the Claude agent-mode SESSION running THIS worker, as
-    (pid, reverify_token) — the exact process the stale-session reaper
+    """Best-effort: pid of the Claude agent-mode SESSION running THIS worker — the exact process the stale-session reaper
     (reap_stale_claude_sessions.py) would target. The claim is stamped with it
     so (a) the reaper SPARES that session for the whole drafting turn (the
     2026-06-29 draft-kill regression) and (b) the producer can tell when the
@@ -1330,9 +1329,22 @@ def _agent_session_pid():
     'local-agent-mode-sessions', which current Desktop builds no longer put on
     the cmdline, so every claim went unstamped. None if not identifiable."""
     try:
-        return _find_own_session(_ps_pid_map())
+        found = _find_own_session(_ps_pid_map())
     except Exception:
         return None
+    return found[0] if found else None
+
+
+def _proc_start(pid) -> str | None:
+    """The process's start time as ps prints it, or None if it is not running.
+    Stamped next to claim_pid so a recycled pid can't pass for the claimant
+    (start time is fixed for a process's life; its cmdline is not)."""
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return "unknown"  # can't tell -> treat as alive
+    return out or None
 
 
 # Stale-claim recovery (2026-10-30). A worker claims a job by renaming it into
@@ -1348,20 +1360,20 @@ MAX_REQUEUES = 2  # past this, fall back to the plain timeout (no requeue loop)
 
 def _claim_is_dead(running_path: str) -> bool:
     """True iff the job in running/ carries a claim pid whose session is gone
-    (pid absent, or recycled to a different command). Unstamped claims and any
-    read error count as alive: we only requeue on positive evidence of death."""
+    (pid not running, or recycled: different start time). Unstamped claims and
+    any read/ps error count as alive: we only requeue on positive evidence."""
     try:
         with open(running_path) as f:
             job = json.load(f)
     except Exception:
         return False
-    pid, token = job.get("claim_pid"), job.get("claim_token")
+    pid, started = job.get("claim_pid"), job.get("claim_started")
     if not pid:
         return False
-    ent = _ps_pid_map().get(int(pid))
-    if ent is None:
+    now_started = _proc_start(pid)
+    if now_started is None:
         return True
-    return bool(token) and token not in ent[1]
+    return bool(started) and now_started not in ("unknown", started)
 
 
 def _requeue_claim(running_path: str, pending_path: str) -> bool:
@@ -1370,7 +1382,7 @@ def _requeue_claim(running_path: str, pending_path: str) -> bool:
     try:
         with open(running_path) as f:
             job = json.load(f)
-        for k in ("claim_pid", "claim_token", "claimed_at", "prompt_file", "schema_file"):
+        for k in ("claim_pid", "claim_started", "claimed_at", "prompt_file", "schema_file"):
             job.pop(k, None)
         job["requeues"] = int(job.get("requeues", 0)) + 1
         _atomic_write(running_path, job)
@@ -1427,10 +1439,10 @@ def _attempt_claim(ns, qtype: str) -> bool:
             continue
         # Stamp the agent-session pid that holds THIS claim so the reaper spares it
         # for the whole drafting turn (see _agent_session_pid above).
-        session = _agent_session_pid()
-        agent_pid = session[0] if session else None
-        if session:
-            job["claim_pid"], job["claim_token"] = session
+        agent_pid = _agent_session_pid()
+        if agent_pid:
+            job["claim_pid"] = agent_pid
+            job["claim_started"] = _proc_start(agent_pid)
         job["claimed_at"] = time.time()
         prompt_file = None
         schema_file = None
