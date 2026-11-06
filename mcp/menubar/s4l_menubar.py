@@ -1655,6 +1655,11 @@ class S4LMenuBar(rumps.App):
                     fh.write(f"user quit via menu bar at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
             except Exception as e:
                 _capture(e, action="quit_stop_flag")
+            # Quit is Pause plus removing the tray: every S4L LaunchAgent and
+            # harness browser goes down through the one switch
+            # (st.pause_s4l) before Claude restarts, so the relaunched MCP
+            # boots paused instead of reinstalling the pipeline daemons.
+            st.pause_s4l()
             self._quit_claude_and_wait()
             self._remove_scheduled_tasks()
             self._prune_session_index()
