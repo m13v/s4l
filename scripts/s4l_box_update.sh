@@ -337,9 +337,22 @@ PYCWD
 # every message (32k records = 6-8 s UI freeze per message, 2026-10-30). Same
 # script the menu bar's _prune_session_index() runs; it is also in this
 # package, so the freshly installed copy is the one that runs.
+# Run it from the bundle JUST unzipped above, not from $STATE_DIR/repo/package:
+# that copy is re-materialized only on the next server boot, so the update that
+# ships the script (or any fix to it) would run the previous version, or nothing
+# (2026-11-06: the rc.9 box had no script there and the 2>/dev/null hid it).
 echo "pruning archived worker session records ..."
-/usr/bin/python3 "$STATE_DIR/repo/package/scripts/session_index_prune.py" 2>/dev/null \
-    | grep -E '"(moved|skips_dropped|error)"' || true
+prune_py="$STATE_DIR/repo/package/scripts/session_index_prune.py"
+if tar -xzf "$EXT_DIR/dist/pipeline.tgz" -C "$tmpd" 2>/dev/null \
+   && [ -f "$tmpd/package/scripts/session_index_prune.py" ]; then
+  prune_py="$tmpd/package/scripts/session_index_prune.py"
+fi
+if [ -f "$prune_py" ]; then
+  /usr/bin/python3 "$prune_py" | grep -E '"(moved|skips_dropped|error)"' \
+    || echo "  prune failed (see above); continuing with the restart" >&2
+else
+  echo "  prune script not in this bundle or install; skipped" >&2
+fi
 # env -u: never let S4L_*/SAPS_* leak into Claude Desktop (macOS `open`
 # propagates the caller's env; a leaked S4L_REPO_DIR disables pipeline
 # self-update — see envRepoClone() in mcp/src/runtime.ts).
