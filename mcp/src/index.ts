@@ -5325,6 +5325,10 @@ const PAUSE_TARGETS: Array<{
   { tag: "claude-reaper", label: REAPER_LABEL, plist: REAPER_PLIST, ensure: ensureClaudeReaperInstalled },
   { tag: "stall-watch", label: STALL_WATCH_LABEL, plist: STALL_WATCH_PLIST, ensure: ensureStallWatchInstalled },
   { tag: "memory-snapshot", label: MEMORY_SNAPSHOT_LABEL, plist: MEMORY_SNAPSHOT_PLIST, ensure: ensureMemorySnapshotInstalled },
+  // The harness overlay watcher attaches to the harness Chrome over CDP; with the
+  // kickers unloaded it has nothing to show, and reinstalling it at every boot
+  // while paused re-attached to a browser the user had deliberately stopped.
+  { tag: "overlay-watch", label: OVERLAY_WATCH_LABEL, plist: OVERLAY_WATCH_PLIST, ensure: ensureOverlayWatchInstalled },
 ];
 
 // Mirror the pausable label set into the state dir for the menubar's Python
@@ -6763,14 +6767,8 @@ async function main() {
   void ensureFeedbackDigestInstalled()
     .then((r) => console.error(`[feedback-digest] launchd digest: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[feedback-digest] digest install failed:", e?.message || e));
-  // On-screen overlay watcher supervisor. The harness status overlay only renders
-  // while the watcher process is alive, and that watcher had no supervisor — when
-  // it died nothing respawned it and the overlay silently vanished. Install it as
-  // a first-class self-healing launchd job (RunAtLoad + 60s idempotent re-invoke).
-  // Best-effort; the overlay is a nicety and must never block boot.
-  void ensureOverlayWatchInstalled()
-    .then((r) => console.error(`[overlay-watch] launchd supervisor: ${r.ok ? "ok" : "skip"} (${r.detail})`))
-    .catch((e) => console.error("[overlay-watch] supervisor install failed:", e?.message || e));
+  // The on-screen overlay watcher supervisor (KeepAlive launchd job) is installed
+  // through PAUSE_TARGETS above, so a Pause unloads it and a paused boot skips it.
   // Silent daily self-updates are banned (user decision 2026-07-31): the job
   // restarted Claude Desktop unattended. Clean it off every box that got it
   // from v1.7.1..v1.7.7-rc.4. Best-effort; never blocks boot.
