@@ -1311,7 +1311,7 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
 // The bundled menu bar source: <ext>/menubar in a packed .mcpb (dist/runtime.js
 // -> ../menubar), the same path for a tsc dev build (mcp/dist -> mcp/menubar),
 // and the repo clone for an npm install.
-function menubarSourceDir(): string | null {
+export function menubarSourceDir(): string | null {
   const candidates = [
     path.join(__dirname, "..", "menubar"),
     path.join(resolveRepoDir(), "mcp", "menubar"),
