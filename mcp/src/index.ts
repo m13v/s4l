@@ -71,6 +71,7 @@ import {
   ensureRuntimeProvisioned,
   ensureHarnessPatched,
   retryProvisionIfStalled,
+  menubarSourceDir,
 } from "./runtime.js";
 import {
   blockOnboardingMilestone,
@@ -4169,9 +4170,11 @@ tool(
     writeDraftProvider("claude-desktop-queue", "queue_setup(claude)");
     ensureQueueWorkerToolsAllowed();
     // Re-arming the autopilot is an explicit "start S4L" action: lift a prior
-    // tray Quit so the review cards have a surface again. Best-effort and
-    // async — task specs must return regardless of tray state.
+    // tray Quit (which is Pause + tray removal) so the pipeline and the review
+    // cards come back. Best-effort and async — task specs must return
+    // regardless of tray state.
     clearMenubarStop();
+    if (isPaused()) void resumeS4L();
     void ensureMenubar();
     // Write each worker's canonical SKILL.md to disk NOW, before the agent calls
     // create_scheduled_task. The host's create_scheduled_task can report a task
@@ -5347,36 +5350,37 @@ function writePauseTargetsManifest(): void {
   }
 }
 
+// THE one stop switch is menubar/s4l_state.py pause_s4l()/resume_s4l(): the
+// tray and dashboard_server.py need it with Claude Desktop closed, so the
+// mechanics (flag, dynamic sweep of every S4L LaunchAgent, harness browsers)
+// live there once and this is a thin shell-out. PAUSE_TARGETS above is still
+// the registry it reads (via pause-targets.json) and the set Resume re-ensures
+// so each daemon's install gates re-apply.
+function runPauseSwitch(action: "pause" | "resume"): { ok: boolean; detail: string } {
+  const dir = menubarSourceDir();
+  if (!dir) return { ok: false, detail: "menubar/s4l_state.py not found" };
+  try {
+    const out = execFileSync(resolvePython(), [path.join(dir, "s4l_state.py"), action], {
+      encoding: "utf-8",
+      timeout: 120_000,
+      env: { ...process.env, S4L_STATE_DIR: s4lStateDir() },
+    });
+    const res = JSON.parse(out.trim().split("\n").pop() || "{}");
+    return { ok: !!res.ok, detail: String(res.detail || "") };
+  } catch (e: any) {
+    return { ok: false, detail: `s4l_state.py ${action}: ${e?.message || e}` };
+  }
+}
+
 async function pauseS4L(): Promise<{ ok: boolean; detail: string }> {
   if (isPaused()) return { ok: true, detail: "already paused" };
   writePauseTargetsManifest();
-  try {
-    fs.mkdirSync(path.dirname(pauseFlagPath()), { recursive: true });
-    fs.writeFileSync(pauseFlagPath(), `paused at ${new Date().toISOString()}\n`, "utf-8");
-  } catch (e: any) {
-    return { ok: false, detail: `could not write pause flag: ${e?.message || e}` };
-  }
-  const uid = process.getuid ? process.getuid() : 0;
-  const results: string[] = [];
-  for (const { label, plist } of PAUSE_TARGETS) {
-    try {
-      const res = await unloadPlist(label, plist, uid);
-      results.push(`${label}: unloaded (rc=${res.code})`);
-    } catch (e: any) {
-      results.push(`${label}: ${e?.message || e}`);
-    }
-  }
-  return { ok: true, detail: results.join("; ") };
+  return runPauseSwitch("pause");
 }
 
 async function resumeS4L(): Promise<{ ok: boolean; detail: string }> {
-  try {
-    fs.rmSync(pauseFlagPath(), { force: true });
-  } catch {
-    /* best-effort */
-  }
   writePauseTargetsManifest();
-  const results: string[] = [];
+  const results: string[] = [runPauseSwitch("resume").detail];
   for (const t of PAUSE_TARGETS) {
     try {
       const r = await t.ensure();
