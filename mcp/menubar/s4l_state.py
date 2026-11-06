@@ -85,31 +85,39 @@ def state_dir() -> str:
     )
 
 
-# ---- pause/resume: stop drafting/posting without touching Claude Desktop ---
-# Real mechanics (flag file + launchctl bootout/bootstrap), NOT a loopback call
-# to the MCP: this needs to work from BOTH the menu bar (s4l_menubar.py) and
-# the Claude-independent dashboard_server.py, which share this process but
-# are a different process from the MCP server, so there's no way to delegate
-# to mcp/src/index.ts's pauseS4L/resumeS4L here. The label SET is not
-# duplicated though: index.ts's PAUSE_TARGETS registry is the single source of
-# truth, mirrored to <state>/pause-targets.json at every MCP boot and
-# pause/resume; pause_target_labels() reads that manifest, so a pipeline daemon
-# added to the registry reaches this button without touching this file.
-# PAUSE_TARGET_LABELS below is only the fallback for a box whose MCP has never
-# written the manifest. What this resume deliberately does NOT do:
-# mcp/src/index.ts's resumeS4L also re-runs the readiness-gated install logic
-# (persona/project/X-verified checks, content-aware plist rewrite) via
-# ensure*Installed() — that only matters for a box that was never fully set up
-# before Pause, an edge case the next Claude boot / project_config call
-# naturally heals once unpaused. This resume just reloads the exact plists
-# Pause unloaded (Pause never deletes anything).
+# ---- pause/resume: THE one stop switch -------------------------------------
+# One behaviour, implemented once. Pause stops all of S4L's background work:
+# every loaded S4L LaunchAgent (index.ts's PAUSE_TARGETS pipeline daemons plus
+# whatever fleet jobs a box carries: linkedin/github/instagram/stats/audits/
+# backfills/browser-watch) except the tray + dashboard, then the harness
+# browsers (Chrome on CDP 955x under ~/.claude/browser-profiles) and their
+# browser_harness daemons: a harness window being activated over CDP is what
+# yanks a fullscreen app out of focus (2026-11-05). Claude Desktop, the tray and
+# the draft schedule registration stay up; claude_job.py's `next` sees the flag
+# and reports no work; nothing is deleted. The labels actually unloaded are
+# recorded in <state>/paused-labels.json so Resume reloads exactly that set
+# (index.ts's resumeS4L then re-runs its PAUSE_TARGETS ensure*Installed() so
+# their install gates re-apply). It lives HERE, not in index.ts, because the
+# tray (s4l_menubar.py) and dashboard_server.py must work with Claude Desktop
+# closed; the MCP's pause_s4l tool shells out to `python3 s4l_state.py
+# pause|resume` so there is no second copy of the mechanics. Quit is Pause
+# plus removing the tray; Uninstall is the wipe (reset-test-machine.sh).
+# PAUSE_TARGET_LABELS mirrors index.ts PAUSE_TARGETS (written to
+# <state>/pause-targets.json at every MCP boot); it is only the fallback for a
+# box whose MCP never wrote the manifest.
 PAUSE_TARGET_LABELS = (
     AUTOPILOT_LABEL,
     "com.m13v.social-reddit-search",
     "com.m13v.social-claude-reaper",
     "com.m13v.social-autopilot-stall-watch",
     "com.m13v.social-memory-snapshot",
+    "com.m13v.social-overlay-watch",
 )
+# What counts as S4L's, by launchd label. The tray + dashboard ride through a pause.
+PAUSE_LABEL_PREFIXES = ("com.m13v.social-", "com.m13v.s4l-")
+PAUSE_LABEL_EXTRA = ("com.m13v.browser-watch", "com.m13v.gmail-dwd-keepalive-s4l")
+PAUSE_KEEP = ("com.m13v.social-autoposter.menubar", "com.m13v.social-dashboard")
+HARNESS_PROFILES_DIR = str(Path.home() / ".claude" / "browser-profiles") + "/"
 
 
 def pause_target_labels() -> tuple:
@@ -130,8 +138,54 @@ def pause_flag_path() -> str:
     return os.path.join(state_dir(), "paused.flag")
 
 
+def paused_labels_path() -> str:
+    return os.path.join(state_dir(), "paused-labels.json")
+
+
 def is_paused() -> bool:
     return os.path.exists(pause_flag_path())
+
+
+def _is_s4l_label(label: str) -> bool:
+    return label not in PAUSE_KEEP and (
+        label.startswith(PAUSE_LABEL_PREFIXES) or label in PAUSE_LABEL_EXTRA
+    )
+
+
+def _loaded_labels() -> set:
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return set()
+    labels = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            labels.add(parts[2])
+    return labels
+
+
+def _harness_pids() -> list:
+    """Harness Chrome main processes (CDP 955x + a profile under
+    ~/.claude/browser-profiles, not the Helper children) and browser_harness daemons."""
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return []
+    pids = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        pid, args = int(parts[0]), parts[1]
+        chrome = (
+            "remote-debugging-port=955" in args
+            and "--user-data-dir=" + HARNESS_PROFILES_DIR in args
+            and "Helper" not in args
+        )
+        if chrome or "browser_harness.daemon" in args:
+            pids.append(pid)
+    return pids
 
 
 def pause_s4l() -> dict:
@@ -144,16 +198,35 @@ def pause_s4l() -> dict:
     except Exception as e:
         return {"ok": False, "paused": is_paused(), "detail": f"could not write pause flag: {e}"}
     uid = os.getuid()
-    results = []
-    for label in pause_target_labels():
+    loaded = _loaded_labels()
+    labels = sorted(set(pause_target_labels()) | {l for l in loaded if _is_s4l_label(l)})
+    unloaded, results = [], []
+    for label in labels:
+        if label not in loaded:
+            continue
         try:
             subprocess.run(
                 ["launchctl", "bootout", f"gui/{uid}/{label}"],
                 capture_output=True, timeout=15,
             )
-            results.append(f"{label}: unloaded")
+            unloaded.append(label)
         except Exception as e:
             results.append(f"{label}: {e}")
+    try:
+        with open(paused_labels_path(), "w") as fh:
+            json.dump({"labels": unloaded}, fh)
+            fh.write("\n")
+    except Exception as e:
+        results.append(f"could not write paused-labels.json: {e}")
+    killed = []
+    for pid in _harness_pids():
+        try:
+            os.kill(pid, 15)
+            killed.append(pid)
+        except Exception:
+            pass
+    results.insert(0, f"unloaded {len(unloaded)} LaunchAgents")
+    results.append("harness processes stopped: " + (" ".join(map(str, killed)) if killed else "none"))
     return {"ok": True, "paused": True, "detail": "; ".join(results)}
 
 
@@ -164,10 +237,19 @@ def resume_s4l() -> dict:
         pass
     except Exception:
         pass
+    recorded = []
+    try:
+        data = json.loads(Path(paused_labels_path()).read_text())
+        recorded = [l for l in data.get("labels", []) if isinstance(l, str)]
+    except Exception:
+        pass
     uid = os.getuid()
     la_dir = str(Path.home() / "Library" / "LaunchAgents")
-    results = []
-    for label in pause_target_labels():
+    loaded = _loaded_labels()
+    reloaded, results = 0, []
+    for label in sorted(set(recorded) | set(pause_target_labels())):
+        if label in loaded:
+            continue
         plist = os.path.join(la_dir, f"{label}.plist")
         if not os.path.exists(plist):
             results.append(f"{label}: no plist, skip")
@@ -178,9 +260,17 @@ def resume_s4l() -> dict:
                 ["launchctl", "bootstrap", f"gui/{uid}", plist],
                 capture_output=True, timeout=15,
             )
-            results.append(f"{label}: rc={r.returncode}")
+            if r.returncode == 0:
+                reloaded += 1
+            else:
+                results.append(f"{label}: rc={r.returncode}")
         except Exception as e:
             results.append(f"{label}: {e}")
+    try:
+        os.remove(paused_labels_path())
+    except Exception:
+        pass
+    results.insert(0, f"reloaded {reloaded} LaunchAgents; harness browsers relaunch on demand")
     return {"ok": True, "paused": is_paused(), "detail": "; ".join(results)}
 
 
@@ -1695,3 +1785,11 @@ def _outbox_remove(shipped_uuids, keep_only_valid=False):
             os.replace(str(tmp), str(p))
     except Exception:
         pass
+
+
+# CLI for the MCP's pause_s4l tool (index.ts shells out here so the mechanics
+# above exist once): `python3 s4l_state.py pause|resume|status` prints one JSON line.
+if __name__ == "__main__":
+    _cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    _fn = {"pause": pause_s4l, "resume": resume_s4l}.get(_cmd)
+    print(json.dumps(_fn() if _fn else {"ok": True, "paused": is_paused()}))
