@@ -172,6 +172,17 @@ def _capture_msg(message, level="warning", _extra=None, **tags):
         pass
 
 
+def _log(msg):
+    """Stderr breadcrumb in the menubar.err.log style (launchd routes stderr
+    there). Sentry-only reporting left the session-index prune invisible on
+    the box for a week (2026-11-04: every attempt failed on a missing module
+    and nothing local said so); anything a restart flow does on disk logs here."""
+    try:
+        print(f"[s4l-menubar] {msg}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def _registry_summary_for_capture():
     """The scheduled-task registry breakdown (scripts/scheduled_tasks_snapshot
     build_summary) as a Sentry extra, so every needs-attention event carries the
@@ -2221,17 +2232,62 @@ class S4LMenuBar(rumps.App):
         if not self._prune_lock.acquire(blocking=False):
             return
         try:
-            import session_index_prune
-            r = session_index_prune.prune()
+            try:
+                import session_index_prune
+                r = session_index_prune.prune()
+            except ImportError:
+                # Not in S4L_REPO_DIR/scripts yet: the update that SHIPS the
+                # script runs this hook before the new pipeline.tgz is
+                # materialized (next server boot), exactly like the
+                # scheduled-task self-heal (_rewrite_scheduled_task_cwd_fresh).
+                # Run it from the just-downloaded bundle instead.
+                r = self._prune_session_index_fresh()
+            if r is None:
+                _log("session_index_prune: script not installed "
+                     "(S4L_REPO_DIR/scripts or bundled pipeline.tgz); skipped")
+                _capture_msg("S4L session index prune skipped: script not installed",
+                             phase="session_index_prune")
+                return
+            _log("session_index_prune: moved=%s skips_dropped=%s idx_moved=%s "
+                 "skipped_young=%s error=%s backup=%s" % (
+                     r.get("moved"), r.get("skips_dropped"), r.get("idx_moved"),
+                     r.get("skipped_young"), r.get("error"), r.get("backup_dir")))
             if r.get("moved") or r.get("error"):
                 _capture_msg(
                     "S4L pruned session index", level="info",
                     phase="session_index_prune", _extra=r,
                 )
         except Exception as e:
+            _log(f"session_index_prune failed: {type(e).__name__}: {e}")
             _capture(e, action="session_index_prune")
         finally:
             self._prune_lock.release()
+
+    def _prune_session_index_fresh(self):
+        """Run scripts/session_index_prune.py as a subprocess from a fresh
+        extract of the bundle's pipeline.tgz (see _fresh_pipeline_tmpdir).
+        Returns the script's summary dict, or None when the bundle has no
+        such script either (pre-prune bundle, or no .mcpb install at all)."""
+        tmpd = self._fresh_pipeline_tmpdir()
+        if not tmpd:
+            return None
+        try:
+            script = os.path.join(tmpd, "package", "scripts", "session_index_prune.py")
+            if not os.path.exists(script):
+                return None
+            py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
+            r = subprocess.run([py, script], capture_output=True, text=True, timeout=600)
+            try:
+                return json.loads(r.stdout)
+            except Exception:
+                return {"ok": False, "moved": 0,
+                        "error": "fresh prune rc=%s: %s" % (r.returncode, (r.stderr or "")[-300:])}
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(tmpd, ignore_errors=True)
+            except Exception:
+                pass
 
     def _fresh_pipeline_tmpdir(self):
         """Extract THIS UPDATE's embedded pipeline.tgz (already unpacked to
