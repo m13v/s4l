@@ -631,6 +631,334 @@ def _decide(ids: list[str], status: str) -> int:
     return 0
 
 
+# --------------------------------------------------------- recent-work digest
+#
+# 2026-11-17: the original (Feb 2026) autoposter started every run from the
+# user's recent Claude work (prompt-db), then searched for threads where that
+# work fit. That was lost in the Mar 9 config-driven refactor. This brings it
+# back for the personal_brand lane only, behind the `recent_work_context`
+# flag in mode.json (s4l_mode.get_recent_work, DEFAULT OFF):
+#
+#   digest   one tool-free queue job over the last ~2 days of human sessions
+#            -> recent_work.json: shareable work items + X search queries.
+#            `--if-stale-hours N --background` is what the cycle calls every
+#            run: no-op unless the flag is on, the digest is stale, no refresh
+#            is in flight, and the last attempt was not in the past hour.
+#   queries  read PROJECTS_JSON on stdin, emit extra Phase 1 queries (bank
+#            shape) for the persona project only; [] when off or stale.
+#   show     print the current digest.
+#
+# Consumers: skill/run-twitter-cycle.sh (Phase 1 queries + refresh kick) and
+# scripts/draft_prompt_core.py (recent_work_block, persona lane only).
+
+DIGEST_DAYS = 2
+DIGEST_BUDGET = 60_000
+DIGEST_MAX_AGE_HOURS = 48       # older than this: not used at all
+DIGEST_REFRESH_HOURS = 6        # cycle kicks a background refresh past this
+DIGEST_RETRY_COOLDOWN_S = 3600  # min gap between attempts (success or not)
+MAX_RECENT_WORK_QUERIES = 8
+RECENT_WORK_TOPIC_PREFIX = "recent work: "
+
+DIGEST_SCHEMA = {
+    "type": "object",
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["title", "what", "specifics", "angle", "queries"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "what": {"type": "string"},
+                    "specifics": {"type": "string"},
+                    "angle": {"type": "string"},
+                    "queries": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        }
+    },
+}
+
+
+def recent_work_enabled() -> bool:
+    try:
+        import s4l_mode  # noqa: WPS433 (lives next to this file)
+        return s4l_mode.get_recent_work()
+    except Exception:
+        return False
+
+
+def digest_path() -> Path:
+    return state_dir() / "recent_work.json"
+
+
+def _digest_attempt_path() -> Path:
+    return state_dir() / "recent_work.attempt.json"
+
+
+def _digest_lock_path() -> Path:
+    return state_dir() / "recent_work.lock"
+
+
+def load_digest(max_age_hours: float = DIGEST_MAX_AGE_HOURS) -> dict | None:
+    """The current digest, or None when missing, unreadable, or too old."""
+    try:
+        d = json.loads(digest_path().read_text())
+        ts = datetime.fromisoformat(d["generated_at"])
+    except Exception:
+        return None
+    age_h = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+    if age_h > max_age_hours:
+        return None
+    d["age_hours"] = round(age_h, 1)
+    return d
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def build_digest_prompt(sessions: list[dict]) -> str:
+    parts = [
+        f"### Session {s['session_id'][:8]} | {s['last_ts'][:16]} | cwd: {s['cwd']}\n\n{s['body']}"
+        for s in sessions
+    ]
+    transcripts = "\n\n---\n\n".join(parts)
+    return f"""EXECUTION NOTES: this is a single-turn, tool-free job. Read everything below, then submit ONE result object matching the provided JSON schema: {{"items": [...]}}. Do not use any tools. Do not fetch anything. An empty items list is a valid answer.
+
+# Role
+
+You write the "recent work" digest for a personal-brand X account. The account holder is a solo founder who does almost all of their work through Claude sessions. Below are their own sessions from the last {DIGEST_DAYS} days (their messages near-verbatim, assistant replies trimmed). The digest has two consumers:
+1. A thread finder that runs your search queries on X to find LIVE public conversations where this person's recent hands-on experience is genuinely relevant.
+2. A reply drafter that grounds replies in what they actually did this week (real specifics, not invented ones).
+
+# Pick 0-6 work items
+
+An item is something they actually built, debugged, measured, decided, or learned in these sessions that a stranger in tech would find interesting. Prefer items with concrete specifics: numbers, timelines, failure modes, what was tried, what worked. Merge sessions about the same thing into one item. Skip trivial chores, pure ops noise, and anything only meaningful inside their codebase.
+
+NEVER include (drop the item, or describe it generically):
+- credentials, keys, tokens, account numbers, or anything resembling one
+- names, handles, or identifying details of customers, users, clients, investors, or other private people
+- fundraising, legal, immigration, personal finance, or health details
+- client work that is not clearly the founder's own public product
+- harness noise (usage banners, reminders, scheduler chatter)
+
+# Fields
+
+- title: short specific handle (max ~60 chars).
+- what: 1-2 sentences, plain first person, what they did and why.
+- specifics: the concrete details a reply can cite truthfully (numbers, tools, the exact failure, the outcome). Only facts stated in the transcripts.
+- angle: one sentence on the opinion or lesson they could credibly share in a public thread about this.
+- queries: 1-3 X search queries that find recent public posts by OTHER people discussing this problem space (not this founder's products by name). Plain keyword style, use quotes for phrases and OR for variants, end each with lang:en. No since:, no min_faves:, no from:. Broad enough to return results within a few hours, specific enough that the founder's experience is relevant to what comes back. Example: "\\"claude code\\" (subagents OR \\"parallel agents\\") lang:en"
+
+# Transcripts ({len(sessions)} sessions, most recent first)
+
+{transcripts}
+
+Submit the result object now."""
+
+
+def _run_digest_job(prompt: str, timeout: int) -> dict | None:
+    schema_file = state_dir() / "recent_work.schema.json"
+    schema_file.write_text(json.dumps(DIGEST_SCHEMA))
+    env = dict(os.environ)
+    env["S4L_REPO_DIR"] = str(REPO_DIR)
+    cmd = ["bash", str(REPO_DIR / "scripts" / "run_claude.sh"), "recent-work",
+           "--json-schema", str(schema_file), "-p"]
+    try:
+        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                              env=env, timeout=timeout + 120)
+    except subprocess.TimeoutExpired:
+        print("[digest] hard timeout waiting for the queue result", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"[digest] provider failed rc={proc.returncode}", file=sys.stderr)
+        sys.stderr.write((proc.stderr or "")[-2000:] + "\n")
+        return None
+    try:
+        envelope = json.loads(proc.stdout[proc.stdout.index("{"):])
+        obj = envelope.get("structured_output")
+        if obj is None:
+            obj = json.loads(envelope.get("result") or "{}")
+        return obj if isinstance(obj, dict) else None
+    except Exception as e:
+        print(f"[digest] could not parse result envelope: {e}", file=sys.stderr)
+        return None
+
+
+def run_digest(ns) -> int:
+    if not recent_work_enabled() and not ns.force:
+        if ns.if_stale_hours is None:  # stay silent on the per-cycle kick
+            print("[digest] recent_work_context flag is off; nothing to do", file=sys.stderr)
+        return 0
+
+    if ns.if_stale_hours is not None:
+        if load_digest(max_age_hours=ns.if_stale_hours) is not None:
+            return 0
+        try:
+            last = json.loads(_digest_attempt_path().read_text()).get("at", 0)
+        except Exception:
+            last = 0
+        if time.time() - last < DIGEST_RETRY_COOLDOWN_S:
+            return 0
+
+    lock = _digest_lock_path()
+    try:
+        held = int(lock.read_text().strip() or 0)
+    except Exception:
+        held = 0
+    if held and _pid_alive(held):
+        print(f"[digest] refresh already in flight (pid {held})", file=sys.stderr)
+        return 0
+
+    if ns.background:
+        _digest_attempt_path().write_text(json.dumps({"at": time.time()}))
+        log = open(state_dir() / "recent_work.log", "a")
+        child = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "digest",
+             "--days", str(ns.days), "--timeout", str(ns.timeout)]
+            + (["--force"] if ns.force else []),
+            stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+        print(f"[digest] background refresh started (pid {child.pid})", file=sys.stderr)
+        return 0
+
+    lock.write_text(str(os.getpid()))
+    _digest_attempt_path().write_text(json.dumps({"at": time.time()}))
+    try:
+        sessions = gather_sessions(ns.days)
+        if not sessions:
+            print("[digest] no eligible human sessions in window", file=sys.stderr)
+            return 1
+        batch = chunk_by_budget(sessions, DIGEST_BUDGET)[0]
+        print(f"[digest] {datetime.now().isoformat(timespec='seconds')} "
+              f"{len(sessions)} sessions in {ns.days}d, digesting newest {len(batch)}",
+              file=sys.stderr)
+        prompt = build_digest_prompt(batch)
+        if ns.dry_run:
+            out = state_dir() / "recent_work.last_prompt.txt"
+            out.write_text(prompt)
+            print(f"[digest] dry-run: prompt ({len(prompt):,} chars) -> {out}", file=sys.stderr)
+            return 0
+        obj = _run_digest_job(prompt, ns.timeout)
+        if obj is None:
+            return 1
+        items = [i for i in (obj.get("items") or []) if isinstance(i, dict) and i.get("title")]
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "window_days": ns.days,
+            "sessions": [s["session_id"][:8] for s in batch],
+            "items": items,
+        }
+        tmp = digest_path().with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        tmp.replace(digest_path())
+        print(f"[digest] wrote {len(items)} items -> {digest_path()}", file=sys.stderr)
+        return 0
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def recent_work_queries(projects: list) -> list[dict]:
+    """Extra Phase 1 queries (qualified_query_bank shape) for the persona
+    project, or [] when the flag is off, the digest is stale, or no persona
+    project is in this cycle's selection."""
+    if not recent_work_enabled():
+        return []
+    digest = load_digest()
+    if not digest:
+        return []
+    try:
+        import s4l_mode  # noqa: WPS433
+        persona = s4l_mode.persona_name()
+    except Exception:
+        persona = ""
+    names = {(p or {}).get("name") for p in projects if isinstance(p, dict)}
+    if not persona or persona not in names:
+        return []
+    out, seen = [], set()
+    # round-robin across items so one item can't eat the whole cap
+    item_queries = [
+        [(it["title"], q) for q in (it.get("queries") or []) if isinstance(q, str) and q.strip()]
+        for it in digest.get("items") or []
+    ]
+    while len(out) < MAX_RECENT_WORK_QUERIES and any(item_queries):
+        for qs in item_queries:
+            if not qs or len(out) >= MAX_RECENT_WORK_QUERIES:
+                continue
+            title, q = qs.pop(0)
+            key = " ".join(q.lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "project": persona,
+                "query": q.strip(),
+                "search_topic": (RECENT_WORK_TOPIC_PREFIX + title)[:120],
+                "likes": 0, "clicks": 0, "posts": 0,
+            })
+    return out
+
+
+def recent_work_block() -> str:
+    """Prompt block for persona-lane drafts, or '' when off / stale / empty."""
+    if not recent_work_enabled():
+        return ""
+    digest = load_digest()
+    items = (digest or {}).get("items") or []
+    if not items:
+        return ""
+    lines = [
+        "## RECENT WORK (what the account holder actually did in the last few days)",
+        "First-hand, current, and true. When a candidate's `Search query` starts with "
+        f"\"{RECENT_WORK_TOPIC_PREFIX.strip()}\", it was found BECAUSE of the matching item below: "
+        "ground the reply in that item's specifics. For any other candidate, use an item only "
+        "if it genuinely fits the thread; never force it. Cite only the specifics listed here; "
+        "do not embellish numbers or invent outcomes. Never name private people or clients.",
+        "",
+    ]
+    for it in items:
+        lines.append(f"- {it.get('title', '').strip()}")
+        for key in ("what", "specifics", "angle"):
+            val = " ".join(str(it.get(key) or "").split())
+            if val:
+                lines.append(f"  {key}: {val}")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_queries(ns) -> int:
+    try:
+        projects = json.loads(sys.stdin.read() or "[]")
+    except json.JSONDecodeError:
+        projects = []
+    qs = recent_work_queries(projects if isinstance(projects, list) else [])
+    json.dump(qs, sys.stdout, ensure_ascii=False)
+    print()
+    return 0
+
+
+def cmd_show(_ns) -> int:
+    d = load_digest(max_age_hours=10**6)
+    print(f"flag recent_work_context: {'on' if recent_work_enabled() else 'off'}")
+    if not d:
+        print("no digest yet")
+        return 0
+    print(f"generated {d['generated_at']} ({d['age_hours']}h ago, used while <{DIGEST_MAX_AGE_HOURS}h)")
+    print(recent_work_block() or "(block empty: flag off, stale, or no items)")
+    for it in d.get("items") or []:
+        for q in it.get("queries") or []:
+            print(f"  query: {q}")
+    return 0
+
+
 # ---------------------------------------------------------------------- CLI
 
 
@@ -655,6 +983,22 @@ def main() -> int:
     s = sub.add_parser("skip", help="reject proposal(s), never re-pitched")
     s.add_argument("ids", nargs="+")
     s.set_defaults(func=lambda ns: _decide(ns.ids, "skipped"))
+
+    dg = sub.add_parser("digest", help="refresh the recent-work digest (flag-gated)")
+    dg.add_argument("--days", type=int, default=DIGEST_DAYS)
+    dg.add_argument("--timeout", type=int, default=1800)
+    dg.add_argument("--if-stale-hours", type=float, default=None,
+                    help="no-op if the digest is younger than this, or an attempt ran in the last hour")
+    dg.add_argument("--background", action="store_true", help="detach and return immediately")
+    dg.add_argument("--force", action="store_true", help="run even with the flag off (testing)")
+    dg.add_argument("--dry-run", action="store_true", help="build the prompt, don't enqueue")
+    dg.set_defaults(func=run_digest)
+
+    qq = sub.add_parser("queries", help="PROJECTS_JSON on stdin -> recent-work Phase 1 queries")
+    qq.set_defaults(func=cmd_queries)
+
+    sh = sub.add_parser("show", help="print the recent-work digest and block")
+    sh.set_defaults(func=cmd_show)
 
     ns = ap.parse_args()
     return ns.func(ns)
