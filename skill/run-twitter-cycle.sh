@@ -1192,6 +1192,27 @@ if [ "$SCAN_ATTEMPT" -gt 1 ]; then
 else
     log "Phase 1 (bank): building qualified query bank from PROJECTS_JSON (deterministic, no Claude)..."
     echo "$PROJECTS_JSON" | python3 "$REPO_DIR/scripts/qualified_query_bank.py" --from-projects-json > "$QUERIES_TMP" 2>>"$LOG_FILE"
+    # Recent-work discovery (2026-11-17, personal_brand lane only, behind the
+    # mode.json `recent_work_context` flag, DEFAULT OFF; see
+    # scripts/context_mining.py). Prepends up to 8 queries drafted from the
+    # user's own recent Claude sessions so the persona finds threads about
+    # what they actually did this week (restores the Feb 2026 work-first
+    # flow). Emits [] and changes nothing when the flag is off, the digest is
+    # stale, or the persona isn't the picked project. The digest refresh is
+    # kicked here too: detached, flag-gated, no-op unless >6h stale.
+    python3 "$REPO_DIR/scripts/context_mining.py" digest --if-stale-hours 6 --background >>"$LOG_FILE" 2>&1 || true
+    _RW_QUERIES=$(echo "$PROJECTS_JSON" | python3 "$REPO_DIR/scripts/context_mining.py" queries 2>>"$LOG_FILE" || echo "[]")
+    _RW_N=$(RW="$_RW_QUERIES" QT="$QUERIES_TMP" python3 -c '
+import json, os
+try: rw = json.loads(os.environ.get("RW") or "[]")
+except Exception: rw = []
+if rw:
+    try: bank = json.load(open(os.environ["QT"]))
+    except Exception: bank = []
+    json.dump(rw + bank, open(os.environ["QT"], "w"))
+print(len(rw))
+' 2>>"$LOG_FILE" || echo 0)
+    [ "${_RW_N:-0}" -gt 0 ] && log "Phase 1 (bank): +${_RW_N} recent-work queries prepended (personal_brand, recent_work_context on)"
 fi
 
 QUERIES_COUNT=$(python3 -c "
