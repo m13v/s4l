@@ -309,6 +309,11 @@ def _detail(glob_pattern: str | None = None) -> dict:
                 recs = _registry_worker_recs(by_id)
                 if recs is not None:
                     entry["has_workers"] = True
+                    # Surfaced so resume/dashboard can name a DISABLED worker
+                    # task outright. compute() aggregates across every Claude*
+                    # root, so one root's enabled-but-idle registry masks the
+                    # live root's disabled task as merely 'stalled'.
+                    entry["enabled"] = all(r.get("enabled") for r in recs)
                     epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
                     e = max([x for x in epochs if x is not None], default=None)
                     if e is not None:
