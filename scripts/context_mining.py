@@ -652,7 +652,8 @@ def _decide(ids: list[str], status: str) -> int:
 # scripts/draft_prompt_core.py (recent_work_block, persona lane only).
 
 DIGEST_DAYS = 2
-DIGEST_BUDGET = 60_000
+DIGEST_BUDGET = 100_000
+DIGEST_PER_SESSION_CAP = 3_500
 DIGEST_MAX_AGE_HOURS = 48       # older than this: not used at all
 DIGEST_REFRESH_HOURS = 6        # cycle kicks a background refresh past this
 DIGEST_RETRY_COOLDOWN_S = 3600  # min gap between attempts (success or not)
@@ -835,6 +836,12 @@ def run_digest(ns) -> int:
         if not sessions:
             print("[digest] no eligible human sessions in window", file=sys.stderr)
             return 1
+        # breadth over depth: trim each session (head + tail) so the whole
+        # window fits one job instead of only the newest few sessions
+        for s in sessions:
+            if len(s["body"]) > DIGEST_PER_SESSION_CAP:
+                half = DIGEST_PER_SESSION_CAP // 2
+                s["body"] = s["body"][:half] + "\n\n[... elided ...]\n\n" + s["body"][-half:]
         batch = chunk_by_budget(sessions, DIGEST_BUDGET)[0]
         print(f"[digest] {datetime.now().isoformat(timespec='seconds')} "
               f"{len(sessions)} sessions in {ns.days}d, digesting newest {len(batch)}",
