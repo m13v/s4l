@@ -5378,7 +5378,59 @@ async function pauseS4L(): Promise<{ ok: boolean; detail: string }> {
   return runPauseSwitch("pause");
 }
 
-async function resumeS4L(): Promise<{ ok: boolean; detail: string }> {
+// Resume only reloads launchd. Drafting ALSO needs the host's s4l-worker
+// scheduled task, which Resume cannot touch (only the host's scheduled-task
+// tools can). The task keeps firing through a pause, so a schedule that is not
+// 'ok' right after Resume is a real fault, never pause residue: without this
+// check Resume reported ok while cycles scanned, enqueued, and nothing drafted
+// (operator Mac, 2026-11-16: worker task disabled, read as 'stalled').
+async function draftScheduleAfterResume(): Promise<{
+  schedule_state: string;
+  warning?: string;
+  next_step?: string;
+}> {
+  let state = "missing";
+  let disabled: string[] = [];
+  try {
+    const res = await runPython("scripts/schedule_state.py", [], { timeoutMs: 15_000 });
+    const parsed = JSON.parse(res.stdout.trim());
+    if (["ok", "disabled", "stalled", "missing"].includes(parsed.state)) state = parsed.state;
+    disabled = (parsed.detail?.registries || [])
+      .filter((r: any) => r.has_workers && r.enabled === false)
+      .map((r: any) => String(r.path));
+  } catch {
+    /* unreadable -> treated as missing, same as scheduleState() */
+  }
+  if (state === "ok") return { schedule_state: state };
+  const why = disabled.length
+    ? `the s4l-worker scheduled task is DISABLED in ${disabled.join(", ")}`
+    : state === "missing"
+      ? "no s4l-worker scheduled task is registered for the active Claude account"
+      : state === "disabled"
+        ? "the s4l-worker scheduled task is disabled"
+        : "the s4l-worker scheduled task is enabled but has not fired recently";
+  return {
+    schedule_state: state,
+    warning:
+      `Launchd lanes are resumed, but drafting is NOT: ${why}. Cycles will scan and enqueue ` +
+      "jobs that nothing drafts until this is fixed.",
+    next_step:
+      state === "missing"
+        ? "Call queue_setup and create the returned task with create_scheduled_task."
+        : "Call the host tool list_scheduled_tasks; if s4l-worker shows enabled:false, call " +
+          "update_scheduled_task {taskId:'s4l-worker', enabled:true, notifyOnCompletion:false}. If it " +
+          "is already enabled, the host scheduler is wedged: fully quit and reopen Claude Desktop. " +
+          "Then call dashboard and confirm schedule_state 'ok'.",
+  };
+}
+
+async function resumeS4L(): Promise<{
+  ok: boolean;
+  detail: string;
+  schedule_state: string;
+  warning?: string;
+  next_step?: string;
+}> {
   writePauseTargetsManifest();
   const results: string[] = [runPauseSwitch("resume").detail];
   for (const t of PAUSE_TARGETS) {
@@ -5389,7 +5441,8 @@ async function resumeS4L(): Promise<{ ok: boolean; detail: string }> {
       results.push(`${t.tag}: ${e?.message || e}`);
     }
   }
-  return { ok: true, detail: results.join("; ") };
+  const sched = await draftScheduleAfterResume();
+  return { ok: sched.schedule_state === "ok", detail: results.join("; "), ...sched };
 }
 
 // Install/refresh the on-screen overlay watcher launchd job. Promotes the
