@@ -271,6 +271,20 @@ def corpus_block():
     return _CORPUS_HEADER + "\n" + content.rstrip("\n") + "\n"
 
 
+def recent_work_block(lane):
+    """RECENT WORK block (personal_brand lane only), appended after the
+    corpus. '' unless the recent_work_context flag is on and a fresh digest
+    exists; see scripts/context_mining.py. Never raises."""
+    if lane != "personal_brand":
+        return ""
+    try:
+        import context_mining
+        block = context_mining.recent_work_block()
+    except Exception:
+        return ""
+    return ("\n" + block) if block else ""
+
+
 # Ops-only plumbing the drafter can never use. Denylist, not whitelist, on
 # purpose: an unknown future MARKETING field should reach the drafter by
 # default; add a key here only when it is provably non-drafting plumbing.
@@ -529,7 +543,7 @@ def render_twitter_prompt(ing):
         .replace("@REPO_DIR@", ing["repo_dir"])
         .replace("@CANDIDATE_BLOCK@", ing.get("candidate_block") or "")
         .replace("@MEDIA_BLOCK@", ing.get("media_block") or "")
-        .replace("@CORPUS_BLOCK@", corpus_block())
+        .replace("@CORPUS_BLOCK@", corpus_block() + recent_work_block(lane))
         .replace("@ALL_PROJECTS_JSON@", projects_json(lane=lane))
         .replace("@GLOBAL_LEARNED_PREFS_JSON@", global_learned_prefs_json())
         .replace("@BATCH_ID@", ing.get("batch_id") or "")
@@ -703,7 +717,7 @@ def render_reddit_prompt(ing):
         .replace("@DRAFT_B_DIVERGENCE_NOTE@", draft_b_divergence_note(arm))
         .replace("@CONTENT_ANGLE@", ing.get("content_angle") or "")
         .replace("@CANDIDATES_BLOCK@", ing.get("candidates_block") or "")
-        .replace("@CORPUS_BLOCK@", corpus_block())
+        .replace("@CORPUS_BLOCK@", corpus_block() + recent_work_block(lane))
         .replace("@PROJECT_JSON@", projects_json(lane=lane, only_project=ing.get("project_name")))
         .replace("@GLOBAL_LEARNED_PREFS_JSON@", global_learned_prefs_json())
         .replace("@REPO_DIR@", ing.get("repo_dir") or _repo_dir())
