@@ -746,6 +746,7 @@ NEVER include (drop the item, or describe it generically):
 - credentials, keys, tokens, account numbers, or anything resembling one
 - names, handles, or identifying details of customers, users, clients, investors, or other private people
 - fundraising, legal, immigration, personal finance, or health details
+- security incidents in the founder's own products or accounts (leaked or abused keys, exposed endpoints, revoked tokens, breaches, abuse flags, billing spikes from abuse) and anything that reveals a still-exploitable weakness; drop these items entirely, do not genericize them
 - client work that is not clearly the founder's own public product
 - harness noise (usage banners, reminders, scheduler chatter)
 
