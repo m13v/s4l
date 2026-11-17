@@ -57,6 +57,8 @@ Usage:
     s4l_mode.py draft-only on|off   # set the draft-only flag (operator-only)
     s4l_mode.py split               # print the personal-brand share (0.0-1.0)
     s4l_mode.py split <value>       # set it; accepts 70, 70%, or 0.7
+    s4l_mode.py recent-work         # print 1|0 (recent-work context flag, default 0)
+    s4l_mode.py recent-work on|off  # set it (operator-only, reads local transcripts)
 
 Draft-only (2026-07-06, single global switch as of 2026-07-08): a third,
 independent flag in mode.json, DEFAULT ON. While ON (the normal state), every
@@ -292,6 +294,38 @@ def set_draft_only(on: bool) -> bool:
     return bool(on)
 
 
+def get_recent_work() -> bool:
+    """Recent-work context feature flag (2026-11-17), DEFAULT OFF.
+
+    When ON, scripts/context_mining.py keeps a short digest of what the user
+    shipped in their own recent Claude sessions, and the personal_brand lane
+    uses it twice: extra X discovery queries in run-twitter-cycle.sh Phase 1,
+    and a RECENT WORK block in persona draft prompts (draft_prompt_core.py).
+    Reads local transcripts, so it is operator opt-in only: no MCP tool param,
+    no menubar toggle; this CLI and mode.json are the only switch."""
+    try:
+        data = json.loads(mode_file().read_text())
+        return isinstance(data, dict) and _coerce_bool(data.get("recent_work_context", False))
+    except Exception:
+        return False
+
+
+def set_recent_work(on: bool) -> bool:
+    try:
+        payload = json.loads(mode_file().read_text())
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    payload["recent_work_context"] = bool(on)
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = mode_file().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.replace(mode_file())
+    return bool(on)
+
+
 def set_mode(mode: str) -> str:
     """Legacy single-mode setter: turns the named lane ON and the other OFF."""
     mode = (mode or "").strip()
@@ -483,6 +517,13 @@ def main(argv) -> int:
             print("1" if set_draft_only(_coerce_bool(argv[1])) else "0")
             return 0
         print("1" if get_draft_only() else "0")
+        return 0
+    if cmd == "recent-work":
+        # `recent-work` -> print 1|0; `recent-work on|off|1|0` -> set and print.
+        if len(argv) >= 2:
+            print("1" if set_recent_work(_coerce_bool(argv[1])) else "0")
+            return 0
+        print("1" if get_recent_work() else "0")
         return 0
     print(f"unknown command: {cmd}", file=sys.stderr)
     return 2
