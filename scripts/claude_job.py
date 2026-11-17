@@ -112,6 +112,10 @@ TAG_TO_TYPE = {
     # TYPE_TO_WORKER_NOTES) because an installed-package worker claims with
     # ITS copy of this map, which may predate this type.
     "context-mining": "context-mining",
+    # Recent-work digest (2026-11-17): context_mining.py `digest`, same
+    # tool-free shape, different schema ({"items": [...]}), personal_brand
+    # lane only, behind the recent_work_context flag.
+    "recent-work": "recent-work",
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
@@ -129,6 +133,7 @@ TYPE_TO_ACTIVITY = {
     # review card itself, not in the tray.
     "reddit-draft": ("drafting", "draft"),
     "context-mining": ("learning", "mining context"),
+    "recent-work": ("learning", "recent work"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
@@ -183,6 +188,13 @@ TYPE_TO_WORKER_NOTES = {
         "inlined in the prompt (transcripts, corpus, prior decisions). Never "
         "use tools. Read, then submit ONE result object matching the schema: "
         "{\"proposals\": [...]}. An empty proposals list is a valid answer."
+    ),
+    "recent-work": (
+        "WORKER EXECUTION NOTES (queue metadata; follow while executing the "
+        "prompt below): single-turn, tool-free job. Everything you need is "
+        "inlined in the prompt (recent transcripts). Never use tools. Read, "
+        "then submit ONE result object matching the schema: "
+        "{\"items\": [...]}. An empty items list is a valid answer."
     ),
 }
 
