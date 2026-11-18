@@ -84,10 +84,10 @@ def ledger_path() -> Path:
 # ---------------------------------------------------------------- gathering
 
 MIN_HUMAN_MSGS = 2
-PER_USER_MSG_CAP = 2500
-PER_ASSISTANT_MSG_CAP = 700
-PER_SESSION_CAP = 14_000
-DEFAULT_TOTAL_BUDGET = 80_000
+# No per-message or per-session caps (2026-11-17): transcripts go in whole.
+# The budgets below only decide how many sessions share ONE job; a window that
+# does not fit is split across more jobs, never trimmed.
+DEFAULT_TOTAL_BUDGET = 400_000  # chars per job (~100k tokens); uncapped sessions need room
 
 # cwd substrings that mark a session as S4L's own automation, never mined
 EXCLUDED_CWD_MARKERS = (".s4l-worker", ".saps-worker")
@@ -186,7 +186,7 @@ def _compact_session(path: Path) -> dict | None:
                     if not text:
                         continue
                     human_count += 1
-                    turns.append("USER: " + text[:PER_USER_MSG_CAP])
+                    turns.append("USER: " + text)
                 elif d.get("type") == "assistant" and role == "assistant":
                     text = _text_blocks(msg.get("content"))
                     if not text:
@@ -194,7 +194,7 @@ def _compact_session(path: Path) -> dict | None:
                     text = text.strip()
                     if len(text) < 40:  # skip one-liner tool narration
                         continue
-                    turns.append("ASSISTANT: " + text[:PER_ASSISTANT_MSG_CAP])
+                    turns.append("ASSISTANT: " + text)
     except OSError:
         return None
 
@@ -204,10 +204,6 @@ def _compact_session(path: Path) -> dict | None:
         return None
 
     body = "\n\n".join(turns)
-    if len(body) > PER_SESSION_CAP:
-        # keep the head and the tail; the middle is elided
-        half = PER_SESSION_CAP // 2
-        body = body[:half] + "\n\n[... middle of session elided ...]\n\n" + body[-half:]
     return {
         "session_id": path.stem,
         "path": str(path),
@@ -351,7 +347,7 @@ def build_prompt(sessions: list[dict], pending_props: list[dict] | None = None) 
         {"status": r.get("status"), "gist": _gist(r)} for r in read_ledger()[-60:]
     ] + [{"status": "pending", "gist": _gist(p)} for p in (pending_props or [])]
     considered_block = (
-        "\n".join(f"- ({r['status']}) {r['gist'][:200]}" for r in considered)
+        "\n".join(f"- ({r['status']}) {r['gist']}" for r in considered)
         if considered
         else "(nothing has been considered yet)"
     )
@@ -565,7 +561,7 @@ def cmd_review(_ns) -> int:
         if p.get("action") == "revise" and p.get("revises_line"):
             n = p["revises_line"]
             old = corpus_lines[n - 1] if 0 < n <= len(corpus_lines) else "(missing line)"
-            head += f"  REVISES [{n}]: {old[:120]}"
+            head += f"  REVISES [{n}]: {old}"
         else:
             head += "  ADD"
         print(head)
@@ -652,8 +648,7 @@ def _decide(ids: list[str], status: str) -> int:
 # scripts/draft_prompt_core.py (recent_work_block, persona lane only).
 
 DIGEST_DAYS = 2
-DIGEST_BUDGET = 100_000
-DIGEST_PER_SESSION_CAP = 3_500
+DIGEST_BUDGET = 400_000  # chars per job (~100k tokens)
 DIGEST_MAX_AGE_HOURS = 48       # older than this: not used at all
 DIGEST_REFRESH_HOURS = 6        # cycle kicks a background refresh past this
 DIGEST_RETRY_COOLDOWN_S = 3600  # min gap between attempts (success or not)
@@ -841,26 +836,43 @@ def run_digest(ns) -> int:
         if not sessions:
             print("[digest] no eligible human sessions in window", file=sys.stderr)
             return 1
-        # breadth over depth: trim each session (head + tail) so the whole
-        # window fits one job instead of only the newest few sessions
-        for s in sessions:
-            if len(s["body"]) > DIGEST_PER_SESSION_CAP:
-                half = DIGEST_PER_SESSION_CAP // 2
-                s["body"] = s["body"][:half] + "\n\n[... elided ...]\n\n" + s["body"][-half:]
-        batch = chunk_by_budget(sessions, DIGEST_BUDGET)[0]
+        # Every session goes in whole. A window bigger than one job's budget
+        # is split across jobs and the items are merged, so nothing is trimmed
+        # and nothing is dropped for being older than the newest few sessions.
+        batches = chunk_by_budget(sessions, DIGEST_BUDGET)
         print(f"[digest] {datetime.now().isoformat(timespec='seconds')} "
-              f"{len(sessions)} sessions in {ns.days}d, digesting newest {len(batch)}",
+              f"{len(sessions)} sessions in {ns.days}d, "
+              f"{sum(len(s['body']) for s in sessions):,} chars -> {len(batches)} job(s)",
               file=sys.stderr)
-        prompt = build_digest_prompt(batch)
         if ns.dry_run:
             out = state_dir() / "recent_work.last_prompt.txt"
+            prompt = build_digest_prompt(batches[0])
             out.write_text(prompt)
-            print(f"[digest] dry-run: prompt ({len(prompt):,} chars) -> {out}", file=sys.stderr)
+            for n, b in enumerate(batches, 1):
+                print(f"[digest]   job {n}/{len(batches)}: {len(b)} sessions, "
+                      f"{sum(len(s['body']) for s in b):,} chars", file=sys.stderr)
+            print(f"[digest] dry-run: job-1 prompt ({len(prompt):,} chars) -> {out}", file=sys.stderr)
             return 0
-        obj = _run_digest_job(prompt, ns.timeout)
-        if obj is None:
+        items: list[dict] = []
+        seen_titles: set[str] = set()
+        digested: list[dict] = []
+        for n, batch in enumerate(batches, 1):
+            obj = _run_digest_job(build_digest_prompt(batch), ns.timeout)
+            if obj is None:
+                print(f"[digest] job {n}/{len(batches)} failed; continuing", file=sys.stderr)
+                continue
+            digested.extend(batch)
+            for i in (obj.get("items") or []):
+                if not (isinstance(i, dict) and i.get("title")):
+                    continue
+                key = " ".join(str(i["title"]).lower().split())
+                if key in seen_titles:
+                    continue
+                seen_titles.add(key)
+                items.append(i)
+        if not digested:
             return 1
-        items = [i for i in (obj.get("items") or []) if isinstance(i, dict) and i.get("title")]
+        batch = digested
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "window_days": ns.days,
