@@ -1775,7 +1775,12 @@ else
 fi
 if [ -n "$VIRALITY_THRESHOLD" ] && [ -n "$CANDIDATES" ]; then
     _VF_TOTAL=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]' || true)
-    CANDIDATES=$(printf '%s\n' "$CANDIDATES" | awk -F'|' -v b="$VIRALITY_THRESHOLD" '$1 ~ /^[0-9]+$/ && NF>=5 && $5+0 >= b+0')
+    # Recent-work exemption (2026-11-17): rows whose search_topic (col 8)
+    # starts with "recent work: " came from the user's own recent sessions
+    # (personal_brand lane, recent_work_context flag) and are gated on
+    # relevance, not virality; twitter_cycle_helper.py already applied their
+    # reach floor. Everything else still has to clear the bar.
+    CANDIDATES=$(printf '%s\n' "$CANDIDATES" | awk -F'|' -v b="$VIRALITY_THRESHOLD" '$1 ~ /^[0-9]+$/ && NF>=5 && ($5+0 >= b+0 || (NF>=8 && index($8, "recent work: ") == 1))')
     _VF_KEPT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]' || true)
     log "[virality_prefilter] kept ${_VF_KEPT:-0} of ${_VF_TOTAL:-0} candidate(s) at/above bar=$VIRALITY_THRESHOLD; below-bar rows stay pending and are never sent to the drafter"
 fi
@@ -2412,11 +2417,23 @@ rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
 # (pipe cols: id|url|author|text|virality|delta|...). Shared by the top-N cap
 # and the rolling virality bar below.
 _vir = {}
+_rw_ids = set()
 for _ln in (os.environ.get('S4L_CAND_VIR', '') or '').splitlines():
     _p = _ln.split('|')
     if len(_p) >= 5 and _p[0].isdigit():
         try: _vir[int(_p[0])] = float(_p[4] or 0)
         except Exception: pass
+        if len(_p) >= 8 and _p[7].startswith('recent work: '):
+            _rw_ids.add(int(_p[0]))
+# RECENT-WORK LANE (2026-11-17): picks found via the user's own recent-work
+# queries (search_topic 'recent work: ...', personal_brand + recent_work_context
+# flag) are set aside BEFORE the top-N cap and the virality bar, then the best
+# ONE is added back after both. They are gated on relevance (the drafter
+# already chose them), not virality, and never compete with or displace the
+# regular top-N pick. Extra recent-work picks stay 'pending' like deferrals.
+_rw_picks = [c for c in candidates if c.get('candidate_id') in _rw_ids]
+candidates = [c for c in candidates if c.get('candidate_id') not in _rw_ids]
+_rw_picks.sort(key=lambda c: _vir.get(c.get('candidate_id'), 0.0), reverse=True)
 # TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
 # S4L_POST_TOP_N=0 disables the cap (env opt-out only; the cap applies to both
 # autopilot and DRAFT_ONLY lanes as of 2026-06-30). Truncated picks are dropped
@@ -2442,6 +2459,10 @@ if _bar and candidates:
         candidates = _kept
     except Exception:
         pass
+if _rw_picks:
+    candidates = candidates + _rw_picks[:1]
+    _deferred += len(_rw_picks) - 1
+    print(f'prep: recent-work lane kept 1 of {len(_rw_picks)} pick(s) outside the top-N cap and virality bar', file=sys.stderr)
 # The picker assignment travels through the plan envelope so
 # twitter_post_plan.py can call validate_or_register(...) with the
 # original (assigned_style, assigned_mode) and coerce USE-mode drift
