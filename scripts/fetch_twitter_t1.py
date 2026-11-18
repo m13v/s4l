@@ -95,7 +95,12 @@ def main():
             "bookmarks": t.get("bookmarks", 0),
         }
         t0 = {"likes": l0 or 0, "retweets": r0 or 0, "replies": p0 or 0, "views": v0 or 0, "bookmarks": b0 or 0}
-        return (cid, url, t1, compute_delta(t0, t1))
+        # Full tweet body. The scan reads X's search-result card, which X
+        # collapses behind "Show more" for long posts (~280 chars), so the
+        # stored tweet_text is cut mid-sentence. fxtwitter returns the whole
+        # post, so restamp it here and the drafter reads the real thing.
+        full_text = (t.get("text") or "").strip()
+        return (cid, url, t1, compute_delta(t0, t1), full_text)
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(fetch_row, rows))
@@ -103,12 +108,13 @@ def main():
     for result in results:
         if result is None:
             continue
-        cid, url, t1, delta = result
+        cid, url, t1, delta, full_text = result
         try:
             api_patch(
                 "/api/v1/twitter-candidates/by-id",
                 {
                     "id": cid,
+                    **({"tweet_text": full_text} if full_text else {}),
                     "action": "set_t1",
                     "likes_t1": t1["likes"],
                     "retweets_t1": t1["retweets"],
