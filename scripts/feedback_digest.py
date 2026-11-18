@@ -199,21 +199,21 @@ def _event_line(e: dict) -> str:
         label = ("moderation context"
                  if str(e.get("decision") or "").startswith("platform_")
                  else "user note")
-        line += f"\n  {label}: {note[:300]}"
+        line += f"\n  {label}: {note}"
     tweet = (e.get("tweet_text") or "").strip()
     if tweet:
-        line += f"\n  their post was: {tweet[:200]}"
+        line += f"\n  their post was: {tweet}"
     draft = (e.get("draft_text") or "").strip()
     original = (e.get("original_text") or "").strip()
     if original and draft and original != draft:
         # Edited approval: show the diff pair, the strongest style evidence
         # we have (draft_text carries the FINAL text the user actually posted).
-        line += f"\n  our ORIGINAL draft was: {original[:300]}"
-        line += f"\n  user REWROTE it to: {draft[:300]}"
+        line += f"\n  our ORIGINAL draft was: {original}"
+        line += f"\n  user REWROTE it to: {draft}"
     elif draft:
-        line += f"\n  our draft was: {draft[:200]}"
+        line += f"\n  our draft was: {draft}"
     if dc and show_unchosen:
-        line += f"\n  the draft they did NOT pick was: {(dc.get('unchosen_text') or '')[:300]}"
+        line += f"\n  the draft they did NOT pick was: {(dc.get('unchosen_text') or '')}"
         if dc.get("style") or dc.get("unchosen_style"):
             line += (
                 f"\n  styles: picked={dc.get('style') or '?'}"
@@ -256,7 +256,7 @@ def build_prompt(project: dict, events: list[dict], overall_events: list[dict] |
     overall_block = ""
     if overall_events:
         notes = "\n".join(
-            f"{i + 1}. {(e.get('reject_note') or '').strip()[:500]}"
+            f"{i + 1}. {(e.get('reject_note') or '').strip()}"
             for i, e in enumerate(overall_events)
         )
         overall_block = (
