@@ -1212,11 +1212,6 @@ no candidate lines, no commentary about thread content (you don't see any).
 """
 
 
-def _truncate(s, n):
-    s = s or ""
-    return s if len(s) <= n else s[:n] + "..."
-
-
 def _prefetch_thread_digests(candidates, reddit_username=None):
     """Pre-fetch thread content for the draft prompt (2026-07-14).
 
@@ -1268,15 +1263,15 @@ def _prefetch_thread_digests(candidates, reddit_username=None):
         ]
         selftext = (thread.get("selftext") or "").strip()
         if selftext:
-            lines.append(_truncate(selftext, 1500))
+            lines.append(selftext)
         already = False
         if comments:
             lines.append("top comments:")
-            for cm in comments[:12]:
+            for cm in comments:
                 author = cm.get("author") or ""
                 if our_name and author.lower() == our_name:
                     already = True
-                body = _truncate((cm.get("body") or "").strip().replace("\n", " "), 280)
+                body = (cm.get("body") or "").strip().replace("\n", " ")
                 lines.append(f"  u/{author} ({cm.get('score', 0)}): {body}")
         if already:
             lines.append("NOTE: one of OUR accounts already commented in this"

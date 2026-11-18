@@ -54,6 +54,13 @@ def enrich_one(tweet):
         tweet["replies"] = t.get("replies", tweet.get("replies", 0))
         tweet["bookmarks"] = t.get("bookmarks", tweet.get("bookmarks", 0))
         tweet["handle"] = author.get("screen_name", handle)
+        # Full post body. The browser scrape reads X's search-result card,
+        # which X collapses behind "Show more" (~280 chars) for long posts, so
+        # the scraped text stops mid-sentence. fxtwitter returns the whole
+        # post; take it whenever it is present so the drafter reads all of it.
+        full_text = (t.get("text") or "").strip()
+        if full_text:
+            tweet["text"] = full_text
 
     tweet["tweet_url"] = url
     tweet.setdefault("text", tweet.get("tweetText", tweet.get("tweet_text", "")))

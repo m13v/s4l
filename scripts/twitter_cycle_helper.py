@@ -163,10 +163,14 @@ def cmd_stamp_cycle_variant(batch_id: str, variant: str) -> int:
 
 def _sanitize(s) -> str:
     """Mirror the SQL `REPLACE(REPLACE(..., E'\n', ' '), E'\r', ' ')` so a
-    multi-line tweet/draft body doesn't break the pipe-delimited row format."""
+    multi-line tweet/draft body doesn't break the pipe-delimited row format.
+
+    A literal "|" is swapped for the look-alike "\u2502": the cycle shell
+    splits each row on "|", so a pipe inside the tweet used to cut the text
+    there and shift every later column."""
     if s is None:
         return ""
-    return str(s).replace("\n", " ").replace("\r", " ")
+    return str(s).replace("\n", " ").replace("\r", " ").replace("|", "\u2502")
 
 
 def cmd_candidates(batch_id: str) -> int:
