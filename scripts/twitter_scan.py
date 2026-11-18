@@ -337,7 +337,7 @@ _SCAN_DEADLINE_OVERRIDE = os.environ.get("S4L_SCAN_QUERY_DEADLINE_S")
 _X_SEARCH_STATE = pathlib.Path(
     os.environ.get("S4L_STATE_DIR") or (pathlib.Path.home() / ".social-autoposter-mcp")
 ) / "x-search-budget.json"
-_X_SEARCH_BUDGET_15M = int(os.environ.get("S4L_X_SEARCH_BUDGET_15M") or "50")
+_X_SEARCH_BUDGET_15M = int(os.environ.get("S4L_X_SEARCH_BUDGET_15M") or "35")
 _X_SEARCH_COOLDOWN_S = int(os.environ.get("S4L_X_SEARCH_COOLDOWN_S") or "600")
 _X_ERROR_JS = (
     "(() => { const m = document.querySelector('main') || document.body;"

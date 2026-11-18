@@ -83,6 +83,14 @@ _TRAILING_ZEROS_FAKE = re.compile(r"0{6,}$")
 REACH_POTENTIAL_WEIGHT = 0.6
 
 
+# Velocity denominator floor in hours (see calculate_virality_score).
+VELOCITY_AGE_FLOOR_HOURS = 0.5
+# Engagement-pod discount: applies when views >= POD_MIN_VIEWS and
+# engagements/views exceeds POD_RATIO_CAP.
+POD_MIN_VIEWS = 100
+POD_RATIO_CAP = 0.10
+
+
 def looks_like_fabricated_tweet_url(url: str) -> bool:
     """True if the URL's snowflake suffix is the model's fabrication signature.
 
@@ -129,7 +137,11 @@ def calculate_virality_score(tweet):
         age_hours = 0.1
 
     # 1. Engagement velocity (most important)
-    velocity = total_eng / age_hours
+    # Velocity age floor (2026-11-17): a tweet scored 2-15 min after posting
+    # divided its first burst by ~0.1h, a 10x inflation that let fresh
+    # off-topic bursts own the top of the bar pool (25 of the top 30 were
+    # <15 min old). Velocity uses max(age, 0.5h); age decay keeps real age.
+    velocity = total_eng / max(age_hours, VELOCITY_AGE_FLOOR_HOURS)
 
     # 2. Retweet ratio (reshare intent)
     rt_ratio = retweets / total_eng if total_eng > 0 else 0
@@ -188,6 +200,15 @@ def calculate_virality_score(tweet):
     reach_potential = math.log10(max(followers, 1)) * reach_mult * age_decay * REACH_POTENTIAL_WEIGHT
 
     score = engagement_score + reach_potential
+
+    # Engagement-pod discount (2026-11-17): organic eng/views is ~0.013 median,
+    # ~0.095 p95. Ratios above 0.10 on a real view count are pods/giveaways
+    # (e.g. 57 likes + 55 RTs on 155 views). Scale the score down by
+    # 0.10/ratio so a 0.75 ratio keeps 13%.
+    if views >= POD_MIN_VIEWS and total_eng > 0:
+        pod_ratio = total_eng / views
+        if pod_ratio > POD_RATIO_CAP:
+            score *= POD_RATIO_CAP / pod_ratio
 
     return round(score, 2), round(velocity, 2), round(rt_ratio, 3)
 
