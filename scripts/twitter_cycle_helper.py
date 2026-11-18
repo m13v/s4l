@@ -228,7 +228,25 @@ def cmd_candidates(batch_id: str) -> int:
             return -1.0
 
     rows.sort(key=composite, reverse=True)
-    rows = rows[:25]
+    # Recent-work candidates (2026-11-17, personal_brand + recent_work_context
+    # flag; see scripts/context_mining.py) are found by relevance to what the
+    # user just did, so they are low-virality by nature and would never make
+    # the top 25. Carry up to RECENT_WORK_EXTRA of them past the cap, subject
+    # to a small reach floor (>=1 like OR author >=1k followers). The cycle's
+    # virality prefilter and plan-parse bar exempt the same topic prefix.
+    def _rw_floor(r):
+        return (int(r.get("likes") or 0) >= 1
+                or int(r.get("author_followers") or 0) >= 1000)
+
+    top = rows[:25]
+    top_ids = {r.get("id") for r in top}
+    extra = [
+        r for r in rows
+        if r.get("id") not in top_ids
+        and str(r.get("search_topic") or "").startswith("recent work: ")
+        and _rw_floor(r)
+    ][:5]
+    rows = top + extra
 
     for r in rows:
         cols = [
