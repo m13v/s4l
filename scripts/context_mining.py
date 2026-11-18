@@ -756,7 +756,11 @@ NEVER include (drop the item, or describe it generically):
 - what: 1-2 sentences, plain first person, what they did and why.
 - specifics: the concrete details a reply can cite truthfully (numbers, tools, the exact failure, the outcome). Only facts stated in the transcripts.
 - angle: one sentence on the opinion or lesson they could credibly share in a public thread about this.
-- queries: 1-3 X search queries that find recent public posts by OTHER people discussing this problem space (not this founder's products by name). Plain keyword style, use quotes for phrases and OR for variants, end each with lang:en. No since:, no min_faves:, no from:. Broad enough to return results within a few hours, specific enough that the founder's experience is relevant to what comes back. Example: "\\"claude code\\" (subagents OR \\"parallel agents\\") lang:en"
+- queries: 2-3 X search queries that find recent public posts by OTHER people discussing this problem space (not this founder's products by name). These run against only the last ~6 hours of X, so they must be BROAD:
+  - Each query combines at most TWO concepts. Never AND three groups together; "(a OR b) (c OR d) (e OR f)" returns nothing.
+  - When the work involved a specific named thing people tweet about (a benchmark, model, tool, library, company, launch), make one query just that name, e.g. "AutomationBench lang:en". Named things find the best threads.
+  - Use quotes for multi-word phrases and OR for variants. End each with lang:en. No since:, no min_faves:, no from:.
+  Good: "\\"agent memory\\" benchmark lang:en", "\\"claude code\\" subagents lang:en", "SWE-bench lang:en". Bad: "\\"CLAUDE.md\\" (memory OR context) (eval OR benchmark) lang:en" (three concepts, zero results).
 
 # Transcripts ({len(sessions)} sessions, most recent first)
 
@@ -892,28 +896,54 @@ def recent_work_queries(projects: list) -> list[dict]:
     names = {(p or {}).get("name") for p in projects if isinstance(p, dict)}
     if not persona or persona not in names:
         return []
-    out, seen = [], set()
-    # round-robin across items so one item can't eat the whole cap
+    # Interleave items (round-robin) into one deduped list, then serve a
+    # rotating window of MAX_RECENT_WORK_QUERIES per cycle so EVERY digest
+    # query runs, not just the first 8 (2026-11-17: 8 of 16 never ran).
     item_queries = [
         [(it["title"], q) for q in (it.get("queries") or []) if isinstance(q, str) and q.strip()]
         for it in digest.get("items") or []
     ]
-    while len(out) < MAX_RECENT_WORK_QUERIES and any(item_queries):
+    flat, seen = [], set()
+    while any(item_queries):
         for qs in item_queries:
-            if not qs or len(out) >= MAX_RECENT_WORK_QUERIES:
+            if not qs:
                 continue
             title, q = qs.pop(0)
             key = " ".join(q.lower().split())
             if key in seen:
                 continue
             seen.add(key)
-            out.append({
-                "project": persona,
-                "query": q.strip(),
-                "search_topic": (RECENT_WORK_TOPIC_PREFIX + title)[:120],
-                "likes": 0, "clicks": 0, "posts": 0,
-            })
-    return out
+            flat.append((title, q.strip()))
+    if not flat:
+        return []
+    window = _rotate_window(len(flat), digest.get("generated_at", ""))
+    return [
+        {
+            "project": persona,
+            "query": flat[i][1],
+            "search_topic": (RECENT_WORK_TOPIC_PREFIX + flat[i][0])[:120],
+            "likes": 0, "clicks": 0, "posts": 0,
+        }
+        for i in window
+    ]
+
+
+def _rotate_window(n: int, digest_id: str) -> list[int]:
+    """Indices for this cycle's window and advance the cursor. The cursor
+    resets whenever a new digest is generated."""
+    path = state_dir() / "recent_work.cursor.json"
+    try:
+        cur = json.loads(path.read_text())
+        start = int(cur.get("next", 0)) if cur.get("digest") == digest_id else 0
+    except Exception:
+        start = 0
+    k = min(MAX_RECENT_WORK_QUERIES, n)
+    idx = [(start + j) % n for j in range(k)]
+    try:
+        path.write_text(json.dumps({"digest": digest_id, "next": (start + k) % n}))
+    except OSError:
+        pass
+    return idx
 
 
 def recent_work_block() -> str:
