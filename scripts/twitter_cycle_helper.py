@@ -238,14 +238,16 @@ def cmd_candidates(batch_id: str) -> int:
         return (int(r.get("likes") or 0) >= 1
                 or int(r.get("author_followers") or 0) >= 1000)
 
+    # The floor applies to EVERY recent-work row, inside the top 25 too: in a
+    # low-virality pool the top 25 is effectively everything, so a 7-follower,
+    # 0-like reply was reaching the drafter (2026-11-17).
+    def _is_rw(r):
+        return str(r.get("search_topic") or "").startswith("recent work: ")
+
+    rows = [r for r in rows if not _is_rw(r) or _rw_floor(r)]
     top = rows[:25]
     top_ids = {r.get("id") for r in top}
-    extra = [
-        r for r in rows
-        if r.get("id") not in top_ids
-        and str(r.get("search_topic") or "").startswith("recent work: ")
-        and _rw_floor(r)
-    ][:5]
+    extra = [r for r in rows if r.get("id") not in top_ids and _is_rw(r)][:5]
     rows = top + extra
 
     for r in rows:

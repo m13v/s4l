@@ -319,6 +319,73 @@ from stall_guard import stall_guard  # noqa: E402
 
 _SCAN_DEADLINE_OVERRIDE = os.environ.get("S4L_SCAN_QUERY_DEADLINE_S")
 
+# --- X search rate limit (2026-11-17) ----------------------------------------
+# X's web search is rate-limited per account. Measured over 30h of this
+# sidecar: blackouts begin after ~60-90 searches in the trailing 15 min and
+# last ~7 min (median; p75 7.6, max 38). During one, the search page renders
+# "Something went wrong. Try reloading." with zero articles, which scan() used
+# to count as a genuine 0-result query: the cycle kept firing every remaining
+# query into the error, 35-68% of searches per busy hour came back blank, and
+# each blank was logged as a DUD query (poisoning the dud list, and the invent
+# supply test, which also calls scan()). Now:
+#   * a pacing budget (BUDGET per trailing 15 min, shared by every caller via
+#     a state file) skips searches before they would trip the limit;
+#   * the error page is detected and starts a COOLDOWN; searches inside it are
+#     skipped without navigating;
+#   * skipped / rate-limited searches return [] and write NO scan record, so
+#     they are never logged as attempts or duds.
+_X_SEARCH_STATE = pathlib.Path(
+    os.environ.get("S4L_STATE_DIR") or (pathlib.Path.home() / ".social-autoposter-mcp")
+) / "x-search-budget.json"
+_X_SEARCH_BUDGET_15M = int(os.environ.get("S4L_X_SEARCH_BUDGET_15M") or "50")
+_X_SEARCH_COOLDOWN_S = int(os.environ.get("S4L_X_SEARCH_COOLDOWN_S") or "600")
+_X_ERROR_JS = (
+    "(() => { const m = document.querySelector('main') || document.body;"
+    " const t = m ? m.innerText : '';"
+    " return /Something went wrong|Rate limit exceeded|Try reloading/i.test(t)"
+    " && document.querySelectorAll('article').length === 0; })()"
+)
+
+
+def _budget_load() -> dict:
+    try:
+        d = json.loads(_X_SEARCH_STATE.read_text())
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _budget_save(d: dict) -> None:
+    try:
+        _X_SEARCH_STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _X_SEARCH_STATE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d))
+        tmp.replace(_X_SEARCH_STATE)
+    except OSError:
+        pass  # fail-open: pacing is protective, never on the data path
+
+
+def _budget_block_reason(now: float):
+    """'cooldown' / 'budget' when this search must be skipped, else None."""
+    d = _budget_load()
+    if now < float(d.get("cooldown_until") or 0):
+        return "cooldown"
+    recent = [t for t in (d.get("recent") or []) if now - t < 900]
+    if len(recent) >= _X_SEARCH_BUDGET_15M:
+        return "budget"
+    return None
+
+
+def _budget_record(now: float, rate_limited: bool) -> None:
+    d = _budget_load()
+    recent = [t for t in (d.get("recent") or []) if now - t < 900]
+    recent.append(now)
+    d["recent"] = recent
+    if rate_limited:
+        d["cooldown_until"] = now + _X_SEARCH_COOLDOWN_S
+        d["last_rate_limited_at"] = now
+    _budget_save(d)
+
 
 def scan(
     query: str,
@@ -350,6 +417,16 @@ def _scan_inner(
 ) -> list:
     skip = {str(s) for s in (skip_ids or [])}
     url = _build_url(query, int(freshness_hours))
+
+    blocked = _budget_block_reason(time.time())
+    if blocked:
+        print(f"[x_search_{blocked}] skipped q={query[:60]!r} (no navigation, no attempt logged)",
+              file=sys.stderr, flush=True)
+        _write_sidecar({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ts_epoch": int(time.time()),
+                        "query": query, "project": project, "skipped": blocked,
+                        "batch_id": os.environ.get("BATCH_ID")})
+        return []
+
     _navigate(url)
     wait_for_load(timeout=15.0)
     # X lazy-loads the result list; settle briefly before scraping. Matches
@@ -359,6 +436,21 @@ def _scan_inner(
     raw = js(_SCRAPE_JS)
     tweets = raw if isinstance(raw, list) else []
     pre_count = len(tweets)
+
+    rate_limited = False
+    if pre_count == 0:
+        try:
+            rate_limited = bool(js(_X_ERROR_JS))
+        except Exception:
+            rate_limited = False
+    _budget_record(time.time(), rate_limited)
+    if rate_limited:
+        print(f"[x_search_rate_limited] X error page on q={query[:60]!r}; cooling down "
+              f"{_X_SEARCH_COOLDOWN_S}s, attempt not logged", file=sys.stderr, flush=True)
+        _write_sidecar({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ts_epoch": int(time.time()),
+                        "query": query, "project": project, "url": url, "pre_count": 0,
+                        "rate_limited": True, "batch_id": os.environ.get("BATCH_ID")})
+        return []
 
     cap_epoch = int(time.time()) - int(freshness_hours) * 3600
     fresh = []

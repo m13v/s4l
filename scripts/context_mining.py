@@ -657,7 +657,7 @@ DIGEST_PER_SESSION_CAP = 3_500
 DIGEST_MAX_AGE_HOURS = 48       # older than this: not used at all
 DIGEST_REFRESH_HOURS = 6        # cycle kicks a background refresh past this
 DIGEST_RETRY_COOLDOWN_S = 3600  # min gap between attempts (success or not)
-MAX_RECENT_WORK_QUERIES = 8
+MAX_RECENT_WORK_QUERIES = 4  # per cycle; X search is budgeted (twitter_scan.py)
 RECENT_WORK_TOPIC_PREFIX = "recent work: "
 
 DIGEST_SCHEMA = {
@@ -956,11 +956,16 @@ def recent_work_block() -> str:
         return ""
     lines = [
         "## RECENT WORK (what the account holder actually did in the last few days)",
-        "First-hand, current, and true. When a candidate's `Search query` starts with "
-        f"\"{RECENT_WORK_TOPIC_PREFIX.strip()}\", it was found BECAUSE of the matching item below: "
-        "ground the reply in that item's specifics. For any other candidate, use an item only "
-        "if it genuinely fits the thread; never force it. Cite only the specifics listed here; "
-        "do not embellish numbers or invent outcomes. Never name private people or clients.",
+        "First-hand, current, and true. A candidate whose `Search query` starts with "
+        f"\"{RECENT_WORK_TOPIC_PREFIX.strip()}\" was found by a keyword search for the matching item "
+        "below, so the keyword match is NOT evidence of fit. Use an item ONLY when the thread "
+        "itself is about that item's subject (the same problem, tool, or claim), so the story "
+        "answers what the author actually said. If the thread only shares a keyword (a "
+        "changelog, a launch, a product pitch, a different problem), REJECT the candidate as "
+        "off-topic instead of bending the story to fit; the reviewer rejects those every time. "
+        "Tell each story at most ONCE: if your recent replies already used an item's anecdote, "
+        "do not reuse it. Cite only the specifics listed here; do not embellish numbers or "
+        "invent outcomes. Never name private people or clients.",
         "",
     ]
     for it in items:

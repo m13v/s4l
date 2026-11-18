@@ -1202,14 +1202,21 @@ else
     # kicked here too: detached, flag-gated, no-op unless >6h stale.
     python3 "$REPO_DIR/scripts/context_mining.py" digest --if-stale-hours 6 --background >>"$LOG_FILE" 2>&1 || true
     _RW_QUERIES=$(echo "$PROJECTS_JSON" | python3 "$REPO_DIR/scripts/context_mining.py" queries 2>>"$LOG_FILE" || echo "[]")
+    # Bank rotation (2026-11-17): twitter_scan.scan() now paces X searches to a
+    # per-15-min budget and skips the rest of a cycle's queries once it is
+    # spent or X shows its rate-limit error page. A fixed order would starve
+    # the same bank tail every cycle, so rotate the bank's start point by
+    # wall-clock (4-min steps, about one cycle). Recent-work queries stay first.
     _RW_N=$(RW="$_RW_QUERIES" QT="$QUERIES_TMP" python3 -c '
-import json, os
+import json, os, time
 try: rw = json.loads(os.environ.get("RW") or "[]")
 except Exception: rw = []
-if rw:
-    try: bank = json.load(open(os.environ["QT"]))
-    except Exception: bank = []
-    json.dump(rw + bank, open(os.environ["QT"], "w"))
+try: bank = json.load(open(os.environ["QT"]))
+except Exception: bank = []
+if bank:
+    k = int(time.time() // 240) % len(bank)
+    bank = bank[k:] + bank[:k]
+json.dump(rw + bank, open(os.environ["QT"], "w"))
 print(len(rw))
 ' 2>>"$LOG_FILE" || echo 0)
     [ "${_RW_N:-0}" -gt 0 ] && log "Phase 1 (bank): +${_RW_N} recent-work queries prepended (personal_brand, recent_work_context on)"
