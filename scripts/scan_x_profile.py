@@ -230,7 +230,7 @@ _TIMELINE_JS_TMPL = r"""(function(){
       // reply in the same conversation cell; remember it. On the posts tab it
       // is a repost/quote we simply skip (WITH_PARENTS=false there).
       if(WITH_PARENTS && text){
-        lastOther={author:'@'+authorHandle,text:text.slice(0,500),url:url};
+        lastOther={author:'@'+authorHandle,text:text,url:url};
       }
       continue;
     }
