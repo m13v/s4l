@@ -170,7 +170,7 @@ def format_examples(scan: dict, top: int, min_chars: int) -> list[str]:
         note = _stats_note(r, total, "replies")
         parent = r.get("parent") or {}
         if parent.get("text"):
-            ptxt = " ".join(parent["text"].split())[:140]
+            ptxt = " ".join(parent["text"].split())
             note += f'; replying to {parent.get("author") or "someone"}: "{ptxt}"'
         out.append(f'"{text}" (their real reply, {note})')
     return out
@@ -200,7 +200,7 @@ def format_corpus_section(scan: dict, top: int, min_chars: int) -> str:
         for r in replies:
             parent = r.get("parent") or {}
             if parent.get("text"):
-                ptxt = " ".join(parent["text"].split())[:200]
+                ptxt = " ".join(parent["text"].split())
                 lines.append(f'- {parent.get("author") or "someone"} wrote: "{ptxt}"')
                 lines.append(f"  their reply ({_stats_note(r, int(counts.get('comments') or len(replies)), 'replies')}): {r.get('text', '').strip()}")
             else:
