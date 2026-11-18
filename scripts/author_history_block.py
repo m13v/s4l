@@ -238,11 +238,8 @@ def fetch(platform, author, days=30, limit=5):
         return []
 
 
-def _truncate(s, n):
-    s = (s or "").replace("\n", " ").replace("\r", " ").strip()
-    if len(s) <= n:
-        return s
-    return s[: n - 3].rstrip() + "..."
+def _flat(s):
+    return (s or "").replace("\n", " ").replace("\r", " ").strip()
 
 
 def format_block(rows, author, platform, days):
@@ -292,7 +289,7 @@ def format_block(rows, author, platform, days):
         our_content_clean = _strip_active_campaign_suffixes(
             our_content, suffix_strip_list
         )
-        ours = _truncate(our_content_clean, 140)
+        ours = _flat(our_content_clean)
         eng_bits = []
         if upvotes:
             eng_bits.append(f"likes={upvotes}")
@@ -303,7 +300,7 @@ def format_block(rows, author, platform, days):
         eng_str = (" [" + ", ".join(eng_bits) + "]") if eng_bits else " [no engagement]"
         lines.append(f"- {date} ({proj}): \"{ours}\"{eng_str}")
         if their_first_reply:
-            tr = _truncate(their_first_reply, 110)
+            tr = _flat(their_first_reply)
             lines.append(f"   -> they replied: \"{tr}\"")
     lines.append(
         "Use as SOFT CONTEXT only: vary angle, avoid repeating phrasing or "
